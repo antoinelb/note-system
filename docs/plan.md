@@ -107,7 +107,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 
 ## Roadmap
 
-**v0 — daily driver for writing**
+**v0 — daily driver for writing** (task breakdown and current state: `roadmap-v0.md`)
 - Vault structure, `#meta` / `#l` conventions, shared template
 - File CRUD, note creation from per-type templates, daily note with template + prev/next
 - Hybrid block editor with live typst rendering (split-view fallback)

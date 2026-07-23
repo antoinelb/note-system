@@ -8,3 +8,10 @@
 
 # Scraper scratch: re-derivable from the course pages, never a deliverable
 data/cache/
+
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target
