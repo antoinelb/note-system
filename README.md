@@ -1,4 +1,4 @@
-# notes
+# Note system
 
 A personal knowledge system where every note is a plain [Typst](https://typst.app) file and the main view is an infinite table of index cards.
 
