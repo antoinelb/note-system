@@ -43,9 +43,8 @@ Created instantly via global hotkey or paste. No required fields, no summary req
 
 ```
 vault/
-  template.typ          # shared typst defs: #meta, #l, styles
-  templates/            # per-type note templates (editable notes)
-  daily/  weekly/       # time-based
+  templates/            # template.typ (shared defs: #meta, #l, styles) + per-type note templates (editable notes)
+  time/                 # time-based (daily, weekly, season — kind is a #meta type)
   permanent/            # all permanent types, flat; type is a #meta field
   capture/
   generated/
@@ -128,6 +127,9 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 - Dashed suggestion edges, ghost-text Tab-completion, suggestion debt in open-loops panel
 - MCP server exposing the vault to Claude Code
 - (later) generated-note pipeline
+
+**Later (unscheduled)**
+- Auto-rename: explicit action that re-derives the id from the current title, renames the file, and rewrites all inbound `#l` links via the index (ids stay frozen on ordinary title edits; see `adr/2026-07-schema-id-kebab-fige.md`)
 
 ## Known risks
 

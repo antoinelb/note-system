@@ -30,12 +30,12 @@ Exit: `cargo run` opens a window; `make test` is green (even with zero tests).
 
 Goal: a hand-made vault where every note compiles with the vanilla `typst` CLI.
 
-- [ ] Create the directory skeleton from `plan.md` § Storage layout (`.index/` gitignored).
-- [ ] Write `template.typ`: `#meta(id, type, created, tags, origin)`, `#l(id)`, base styles.
-  - [ ] Decide how notes import the template (relative `#import`, `--root`, package?). **→ ADR**
-- [ ] Write per-type templates under `templates/`: `daily`, `capture`, and the permanent types (they can start near-identical).
-- [ ] Write sample notes in each category, linked to each other, including one deliberately dangling `#l` (test fodder for phases 3 and 7).
-- [ ] Add a `make check-vault` target that typst-compiles every `.typ` in the vault.
+- [x] Create the directory skeleton from `plan.md` § Storage layout (`.index/` gitignored).
+- [x] Write `template.typ`: `#meta(id, type, created, tags, origin)`, `#l(id)`, base styles.
+  - [x] Decide how notes import the template (relative `#import`, `--root`, package?). **→ ADR** (`adr/2026-07-import-template-racine.md`)
+- [x] Write per-type templates under `templates/`: `daily`, `capture`, and the permanent types (they can start near-identical).
+- [x] Write sample notes in each category, linked to each other, including one deliberately dangling `#l` (test fodder for phases 3 and 7).
+- [x] Add a `make check-vault` target that typst-compiles every `.typ` in the vault.
 
 Exit: `make check-vault` compiles every note standalone.
 
@@ -85,7 +85,7 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
 - [ ] Split-view editor: source pane | rendered pane, debounced recompile.
 - [ ] Saving: pick explicit save vs autosave. **→ ADR**
 - [ ] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
-  - [ ] Id + filename scheme. **→ ADR**
+  - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-schema-id-kebab-fige.md`, decided during phase 1)
 - [ ] Daily note: a "today" action creates today's note from the daily template if missing and wires prev/next links.
 - [ ] Delete note (dangling links it causes become visible through the index).
 - [ ] *(Claude)* Tests: buffer ops, template instantiation, daily prev/next resolution across gaps.

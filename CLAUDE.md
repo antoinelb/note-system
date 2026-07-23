@@ -41,7 +41,7 @@ Rust throughout — details and reasoning in `docs/plan.md`:
 - **No hard blocks.** All friction (unsummarized captures, unresolved suggestions, dangling links, typeless notes) is visible debt in the open-loops panel, never a save-blocker.
 - **Canvas positions are user data disguised as index data** — they must survive index rebuilds.
 - **Strict buffer/widget separation in the editor**, so the v2 vim modal layer can be inserted without a rewrite.
-- Note **type is a `#meta` field, not a directory**: directories encode only the four categories (`permanent/`, `daily/`–`weekly/`, `capture/`, `generated/`); the index, not the filesystem, is the authority for querying by type.
+- Note **type is a `#meta` field, not a directory**: directories encode only the four categories (`permanent/`, `time/`, `capture/`, `generated/`); the index, not the filesystem, is the authority for querying by type.
 
 ## Roadmap
 
@@ -50,6 +50,10 @@ Four versions (`docs/plan.md` § Roadmap):
 - **v1 — the table**: canvas with persistent positions, semantic zoom, modal card editing, filters, auto-placement. The v1 list is the ceiling, not the floor.
 - **v2 — vim**: modal editing layer on the existing buffer architecture.
 - **v3 — AI**: `claude` CLI integration (tags, link suggestions), ghost-text Tab-completion, MCP server exposing the vault.
+
+## Design
+
+All spacing should use multiples of 4 and be coherent.
 
 ## Other instructions
 
