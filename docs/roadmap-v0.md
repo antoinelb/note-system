@@ -4,14 +4,14 @@ Task breakdown of `plan.md` § Roadmap, v0.
 The plan carries the *what* and *why*; this file carries the *order* and the *state*.
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 
-**Next step → Phase 0, first unchecked box.**
+**Next step → Phase 3, first unchecked box.**
 
 ## How we work
 
 - Unless tagged otherwise: **Antoine writes the code, Claude writes the unit tests and guides.**
 - Items marked **→ ADR** are decisions to take together at the start of the task, then record in `docs/adr/`.
 - A phase is done when its exit criterion holds and `make test` passes with 100% coverage (phases 2+).
-- Per-task loop: discuss approach → decisions become ADRs → Claude writes tests → Antoine implements until green → commit.
+- Per-task loop: discuss approach → decisions become ADRs → Claude guides the implementation → Claude writes tests → Antoine implements until green → commit.
 
 ## Phase 0 — Scaffolding
 
@@ -43,12 +43,12 @@ Exit: `make check-vault` compiles every note standalone.
 
 Goal: given a `.typ` file, extract metadata and links; malformed input is data, not a crash.
 
-- [ ] Define domain types: `NoteId`, `Category`, `NoteType`, `Meta`, `Note`, `Link`.
-  - [ ] Missing/malformed `#meta` is an explicit variant (e.g. `MetaStatus`), never an error — the open-loops panel needs it as data.
-- [ ] Parse with `typst-syntax` (never regex):
-  - [ ] locate the `#meta(..)` call and extract its fields;
-  - [ ] extract all `#l("...")` calls and their targets.
-- [ ] *(Claude)* Unit tests: happy path, no meta, malformed meta args, unknown type, duplicate `#meta`, `#l` inside strings/comments, empty file.
+- [x] Define domain types: `NoteId`, `Category`, `NoteType`, `Meta`, `Note`, `Link`.
+  - [x] Missing/malformed `#meta` is an explicit variant (e.g. `MetaStatus`), never an error — the open-loops panel needs it as data. (`adr/2026-07-anomalies-meta-donnees-fines.md`, `adr/2026-07-dates-jiff.md`)
+- [x] Parse with `typst-syntax` (never regex):
+  - [x] locate the `#meta(..)` call and extract its fields;
+  - [x] extract all `#l("...")` calls and their targets.
+- [x] *(Claude)* Unit tests: happy path, no meta, malformed meta args, unknown type, duplicate `#meta`, `#l` inside strings/comments, empty file.
 
 Exit: parsing the phase-1 sample vault yields the expected notes and links; `make test` 100%.
 
