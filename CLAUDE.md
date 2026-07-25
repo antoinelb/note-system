@@ -12,7 +12,8 @@ As such, your responsibility are unit tests and guiding, and the user should wri
 
 ## Documents
 
-- `docs/plan.md` — **the standalone source of truth**: design principles, note model, storage layout, editor, canvas, friction system, AI integration, roadmap, risks. Read it before writing code.
+- `docs/plan.md` — **the standalone source of truth**: design principles, note model, storage layout, screens, editor, canvas, friction system, AI integration, roadmap, risks. Read it before writing code.
+- `docs/design/` — UI direction: wireframes plus `ui-spec-table-and-logs.md`, the two-screen layout (the table, v1; the logs, v0). Layout only — sizes, colours and editor behaviour stay open. Read it before writing any UI.
 - `docs/adr/` — decision records (see below).
 
 ## Decision records (ADR) — required practice

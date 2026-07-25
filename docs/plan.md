@@ -33,7 +33,7 @@ Directories encode only the four **categories** (permanent, time-based, capture,
 
 ### Time-based notes
 
-Daily (and later weekly) notes follow the current Obsidian pattern: prev/next navigation links, quotes section (manually written), task list, notes, "what I learned today". Created from a **template that is itself a note** — editable like any other file, one template per note type. No task engine in v0: tasks are just text; no recurrence, aggregation, or carryover logic yet. Daily notes link *to* permanent notes but are excluded from the canvas.
+Daily, weekly and season notes follow the current Obsidian pattern: prev/next navigation links, quotes section (manually written), task list, notes, "what I learned today". Created from a **template that is itself a note** — editable like any other file, one template per note type. No task engine in v0: tasks are just text; no recurrence, aggregation, or carryover logic yet. Time notes link *to* permanent notes but are excluded from the canvas. All three scales are v0, because the logs screen shows them side by side; the day/week/season chain is derived from the id convention (`2026-07-23`, `2026-w30`, `2026-été`), not from stored links.
 
 ### Capture notes
 
@@ -52,8 +52,21 @@ vault/
 ```
 
 - Link syntax: `#l("note-id")` — valid typst, compiles standalone. Inserted via hotkey/autocomplete so it's cheap to type.
-- Canvas positions and AI suggestions live in `.index/`, never in note files. Positions should survive index rebuilds (either a separate small positions file or excluded from "derived" purges).
+- Canvas positions and AI suggestions live in `.index/`, never in note files. Positions live in their own file, separate from the index database, so the database stays disposable and rebuilding it cannot lose them (`adr/2026-07-positions-fichier-separe.md`).
 - Index is rebuilt by parsing files; file watcher keeps it live.
+
+## Screens
+
+Design direction and wireframes: `design/ui-spec-table-and-logs.md` (layout only — sizes, colours and editor behaviour stay open until it runs). Decision: `adr/2026-07-deux-ecrans-table-et-logs.md`.
+
+The app has exactly two screens, with a button each way:
+
+1. **The table** — the spatial canvas of permanent notes. Where knowledge lives. **v1.**
+2. **The logs** — day, week and season notes on one screen: a time rail on the left where indentation carries the scale, the selected note rendered in the centre with its clickable scale chain, and a jump panel on the right (month calendar marking days that have a note, plus week and season chips). This is the only calendar in the app. **v0.**
+
+Chrome is greyscale throughout. The only colours are the type bar on cards and a single alert hue for debt and dangling links. Note bodies are rendered typst — the app never restyles them, and the meta line comes from the note itself. Navigating never creates a file; clicking an empty day *offers* to create it from the template.
+
+Both screens carry the open-loops counter in the top bar; clicking it opens a flat list (`adr/2026-07-dette-compteur-puis-liste.md`).
 
 ## Editor
 
@@ -65,8 +78,9 @@ vault/
 ## Canvas (the table)
 
 - **Persistent positions.** Every canvas note stores x/y. New notes auto-place near their strongest links; once moved by hand, position is permanent. Force-directed layout is at most an on-demand "arrange this cluster" command, never the default.
-- **Semantic zoom.** Far: colored dots (color = type). Mid: title cards. Close: rendered typst body (cached SVGs). Viewport culling makes thousands of notes a non-issue for rendering.
-- **Enter/exit nodes.** Clicking a card opens a modal editor over the canvas — edit, close, back to the table. The canvas stays visible around it to preserve the sense of place.
+- **Cards** are flat rectangles — no paper texture, no rotation. Type is a thin colour bar on the left edge, and that is the only colour on the screen.
+- **Semantic zoom, two levels.** Titles (default) and rendered typst body (cached SVGs). The "coloured dots" level is dropped. Viewport culling makes thousands of notes a non-issue for rendering.
+- **Enter/exit nodes.** Clicking a card opens a **writing sheet** — a tall panel, far larger than the card, that opens *beside* it with a line tethering it back. The rest of the table dims; the origin card and its tether stay lit. The sheet is chromeless: id and type in a thin header, the note, link counts in the footer, everything else a keystroke. Escape puts the card back. Writing happens at the size of a page while the sense of place stays visible around it.
 - **Findability**: filter by tag and by type (filtered-out cards dim, not disappear), plus jump-to-note search that pans/zooms to the card.
 - **Edges**: real links (`#l(..)`) as solid edges; AI-suggested links as dashed edges (see below).
 - Scale target: hundreds now, low thousands eventually.
@@ -108,14 +122,15 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 
 **v0 — daily driver for writing** (task breakdown and current state: `roadmap-v0.md`)
 - Vault structure, `#meta` / `#l` conventions, shared template
-- File CRUD, note creation from per-type templates, daily note with template + prev/next
+- File CRUD, note creation from per-type templates, time notes (day/week/season) with template + prev/next
+- The logs screen: time rail, rendered centre pane with scale chain, month calendar
 - Hybrid block editor with live typst rendering (split-view fallback)
 - Link index, backlinks panel, dangling-link detection
-- Capture notes (global hotkey, paste) + open-loops panel (captures + dangling links)
+- Capture notes (global hotkey, paste) + open-loops counter opening a flat list (captures + dangling links)
 
 **v1 — the table**
-- Canvas with persistent positions, semantic zoom (dots → titles → rendered bodies)
-- Modal open/edit/close on cards; tag & type filters; type colors; jump-to-note
+- Canvas with persistent positions, two-level semantic zoom (titles → rendered bodies)
+- Tethered writing sheet on card click, dimmed table behind it; tag & type filters; type colors; jump-to-note
 - Auto-placement of new notes near linked ones; on-demand cluster arrange
 - Capture/generated visual treatment; `generated` type defined
 
@@ -133,7 +148,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 
 ## Known risks
 
-1. **The editor is half the project.** Hybrid block editing + typst rendering + (later) vim on Dioxus primitives, with no existing editor widget. Mitigation: split-view fallback, strict buffer/UI separation, per-block rather than per-character ambitions.
+1. **The editor is half the project.** Hybrid block editing + typst rendering + (later) vim on Dioxus primitives, with no existing editor widget. Mitigation: split-view fallback, strict buffer/UI separation, per-block rather than per-character ambitions. The fallback only works in v0, where the editor is full-window — it does not fit inside v1's writing sheet, so hybrid editing stops being optional when the table lands.
 2. **Typst parsing for the index.** Extracting `#meta` and `#l` calls needs a real parse (the `typst-syntax` crate), not regex, to survive edge cases.
 3. **Canvas position durability.** Positions are user data disguised as index data — must not be lost on index rebuilds.
 4. **Scope creep at v1.** The canvas is where feature ideas multiply; the v1 list above is the ceiling, not the floor.

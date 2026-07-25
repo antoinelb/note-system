@@ -3,6 +3,7 @@
 Task breakdown of `plan.md` § Roadmap, v0.
 The plan carries the *what* and *why*; this file carries the *order* and the *state*.
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
+UI direction for every screen below: `design/ui-spec-table-and-logs.md` and `adr/2026-07-deux-ecrans-table-et-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
 **Next step → Phase 4, first unchecked box.**
 
@@ -34,7 +35,7 @@ Goal: a hand-made vault where every note compiles with the vanilla `typst` CLI.
 - [x] Write `template.typ`: `#meta(id, type, created, tags, origin)`, `#l(id)`, base styles.
   - [x] Decide how notes import the template (relative `#import`, `--root`, package?). **→ ADR** (`adr/2026-07-import-template-racine.md`)
 - [x] Write per-type templates under `templates/`: `daily`, `capture`, and the permanent types (they can start near-identical).
-- [x] Write sample notes in each category, linked to each other, including one deliberately dangling `#l` (test fodder for phases 3 and 7).
+- [x] Write sample notes in each category, linked to each other, including one deliberately dangling `#l` (test fodder for phases 3 and 8).
 - [x] Add a `make check-vault` target that typst-compiles every `.typ` in the vault.
 
 Exit: `make check-vault` compiles every note standalone.
@@ -69,10 +70,12 @@ Exit: delete `.index/`, relaunch, everything is back — the invariant "index is
 
 Goal: open the app, see the note list, click a note, read it rendered.
 
-- [ ] Embed the typst compiler crate: implement its `World` trait (fonts, file resolution rooted at the vault). *This is the hidden iceberg of the phase — budget accordingly.*
-- [ ] Compile note → SVG with an in-memory cache keyed by content hash; invalidate on change.
-- [ ] Dioxus shell: note list from the index, click → rendered SVG view.
-- [ ] *(Claude)* Tests: compile a sample note to SVG, cache hit/invalidation logic.
+- [ ] Resolve the vault path at launch. **→ ADR** (`adr/2026-07-chemin-du-vault-au-lancement.md`)
+- [ ] Embed the typst compiler crate: implement its `World` trait (fonts, file resolution rooted at the vault). *This is the hidden iceberg of the phase — budget accordingly.* **→ ADR** (`adr/2026-07-monde-typst-embarque.md`)
+- [ ] Compile note → SVG with an in-memory cache keyed by content hash; invalidate on change. **→ ADR** (`adr/2026-07-cache-svg-par-chemin.md`)
+- [ ] Dioxus shell: note list from the index, click → rendered SVG view. **→ ADR** (`adr/2026-07-ui-couverte-a-100.md`)
+  - The list is deliberate scaffolding — the finished app has no list. It exists to prove the typst `World` works, and is deleted in phase 6; keep it dumb, don't grow features on it.
+- [ ] *(Claude)* Tests: compile a sample note to SVG, cache hit/invalidation logic, UI wiring via `VirtualDom` + `dioxus_ssr`.
 
 Exit: you can browse and read the real vault in the app.
 
@@ -87,12 +90,33 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
 - [ ] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
   - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-schema-id-kebab-fige.md`, decided during phase 1)
 - [ ] Daily note: a "today" action creates today's note from the daily template if missing and wires prev/next links.
+- [ ] Weekly + season notes (pulled into v0 by the logs screen, `adr/2026-07-deux-ecrans-table-et-logs.md`):
+  - [ ] `weekly.typ` and `seasonal.typ` templates, plus a season note in the fixture vault (only `daily.typ` and a `2026-w30` fixture exist today).
+  - [ ] Define what a season *is* — boundaries and id form (`2026-été`: accented, so check it against `adr/2026-07-schema-id-kebab-fige.md`). **→ ADR**
+  - [ ] Scale chain from a date: day → ISO week → season, resolved by `jiff` date math plus an index existence check, not by stored links.
 - [ ] Delete note (dangling links it causes become visible through the index).
-- [ ] *(Claude)* Tests: buffer ops, template instantiation, daily prev/next resolution across gaps.
+- [ ] *(Claude)* Tests: buffer ops, template instantiation, daily prev/next resolution across gaps, scale-chain resolution at year and season boundaries.
 
 Exit: a full day's workflow (open today, write, link, save) happens in the app, not Obsidian.
 
-## Phase 6 — Hybrid block editor
+## Phase 6 — The logs screen
+
+Goal: day, week and season on one screen — the first screen from the design, and the one that kills the phase-4 list.
+
+Spec: `design/ui-spec-table-and-logs.md` § The logs (wireframe `3e`). Three panes, no tabs.
+
+- [ ] Left: the time rail — one list where indentation carries the scale (season ⊃ week ⊃ day).
+- [ ] Centre: the selected note rendered, with its clickable scale chain above it (phase-5 date math).
+- [ ] Right: the jump panel — a compact month calendar marking days that have a note, plus week and season chips.
+  - [ ] Index query: time notes within a date range (`notes_by_type` exists; it needs a date bound).
+- [ ] Selecting in the rail or calendar swaps the centre pane; clicking an empty day *offers* creation from the template — navigating never writes a file.
+- [ ] Delete the phase-4 scaffolding list.
+- [ ] Decide whether the rail scrolls continuously or pages by month (design leaves it open). **→ ADR**
+- [ ] *(Claude)* Tests: range query, rail ordering across scales, "note exists" marking, empty-day creation offered but not taken.
+
+Exit: you navigate a month of logs without touching the filesystem, and the app has no list left in it.
+
+## Phase 7 — Hybrid block editor
 
 Goal: the block under the cursor shows source; every other block shows rendered output.
 
@@ -105,7 +129,7 @@ Goal: the block under the cursor shows source; every other block shows rendered 
 Exit: hybrid editing feels better than split view for daily writing.
 Pre-declared fallback (`plan.md` § Known risks): if this stalls, v0 ships on split view and this phase moves after v1.
 
-## Phase 7 — Links UX
+## Phase 8 — Links UX
 
 Goal: links are cheap to write and visible in both directions.
 
@@ -116,23 +140,24 @@ Goal: links are cheap to write and visible in both directions.
 
 Exit: you never type a full `#l("...")` by hand.
 
-## Phase 8 — Capture + open-loops panel
+## Phase 9 — Capture + open-loops
 
 Goal: zero-friction capture in, visible debt out — v0 complete.
 
 - [ ] In-app capture: hotkey + paste → new file in `capture/` from the capture template, no required fields.
 - [ ] Global (OS-level) capture strategy on Linux/Wayland: true global hotkey vs a DE shortcut launching `app --capture` through single-instance IPC. **→ ADR**
 - [ ] Define what marks a capture "summarized" (suggestion: a non-empty summary block from the capture template). **→ ADR**
-- [ ] Open-loops panel, always accessible: unsummarized captures (with age), dangling links, typeless notes.
-- [ ] *(Claude)* Tests: capture creation, summarized-detection, panel queries.
+- [ ] Open-loops counter in the top bar of both screens; clicking it opens a flat list of unsummarized captures, dangling links and typeless notes. No ages, no grouping, no per-item actions — the queries already exist from phase 3 (`adr/2026-07-dette-compteur-puis-liste.md`).
+- [ ] *(Claude)* Tests: capture creation, summarized-detection, counter total matches the list.
 
 Exit: v0 checklist below is fully green.
 
 ## v0 exit criteria (from `plan.md`)
 
 - [ ] Vault structure + `#meta`/`#l` conventions + shared template (phase 1)
-- [ ] File CRUD, creation from per-type templates, daily note with prev/next (phase 5)
-- [ ] Hybrid block editor with live rendering — or split view via the declared fallback (phases 5–6)
-- [ ] Link index, backlinks panel, dangling-link detection (phases 3, 7)
-- [ ] Capture notes + open-loops panel (phase 8)
+- [ ] File CRUD, creation from per-type templates, time notes (day/week/season) with prev/next (phase 5)
+- [ ] The logs screen: time rail, rendered centre pane with scale chain, month calendar (phase 6)
+- [ ] Hybrid block editor with live rendering — or split view via the declared fallback (phases 5, 7)
+- [ ] Link index, backlinks panel, dangling-link detection (phases 3, 8)
+- [ ] Capture notes + open-loops counter and list (phase 9)
 - [ ] `make test` green with 100% coverage; every note compiles with vanilla typst

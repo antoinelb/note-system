@@ -20,7 +20,7 @@ anomalies(note_path REFERENCES notes ON DELETE CASCADE, kind, field, raw)
 - **`links.target_id` has no foreign key** — a FK would turn dangling links into insert errors; they are data for the open-loops panel, found with a `LEFT JOIN`.
 - **One row per `#l` occurrence** — mirrors the parser's `Vec<Link>`, keeps rebuild a dumb insert loop, preserves occurrence counts; deduplication is `SELECT DISTINCT` at query time.
 - **Anomalies as rows** (`kind` ∈ `duplicate-meta` / `invalid-created` / `malformed-field`, plus nullable `field` and `raw`) so the panel can join and count in SQL.
-- **Typeless notes** = `type IS NULL AND category != 'capture'`: captures are typeless by design until promoted (their debt signal is "unsummarized", phase 8); notes with a missing `#meta` are included — their absent type is real debt and stays visible without a dedicated missing-meta query.
+- **Typeless notes** = `type IS NULL AND category != 'capture'`: captures are typeless by design until promoted (their debt signal is "unsummarized", phase 9); notes with a missing `#meta` are included — their absent type is real debt and stays visible without a dedicated missing-meta query.
 - No `MetaStatus` column: no phase-3 query needs it, and drop-and-rebuild (`2026-07-index-jetable-user-version.md`) makes adding columns later free.
 - Positions and suggestions tables are v1/v3 — not created now; nothing in this schema blocks adding them.
 

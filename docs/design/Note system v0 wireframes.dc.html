@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap"><style>
+body{margin:0;background:#f0eee9;font-family:system-ui,sans-serif}
+a{color:#6b3fa0}a:hover{color:#8a5fc0}
+.dv-turn{padding:40px 44px 32px;border-bottom:1px solid rgba(0,0,0,.08);scroll-margin-top:16px}
+.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 20px}
+.dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none}
+.dv-tname{font:600 13px/1.2 system-ui,sans-serif;color:#1a1a1a}
+.dv-opts{display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start}
+.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none}
+.dv-opt{flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px}
+.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)}
+.dv-card{max-width:100%;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden}
+.dv-opt:target .dv-oid{background:#2a78d6;color:#fff}
+.dv-next{margin:22px 0 0;font:12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.5)}
+.w{background:#fdfdfc;display:flex;flex-direction:column;font-family:ui-sans-serif,system-ui,sans-serif;color:#26251f}
+.wtop{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1.5px solid #2a2a28;background:#f2f0eb;font:10px ui-monospace,Menlo,monospace;color:#6a675f}
+.lbl{font:600 9px/1 ui-monospace,Menlo,monospace;letter-spacing:.09em;text-transform:uppercase;color:#8a877f}
+.ann{font:13px/1.25 Kalam,cursive;color:#b0553a}
+.ph{background:repeating-linear-gradient(45deg,#e8e6e0 0 6px,#f4f2ed 6px 12px);border:1px dashed #bdb9b0;display:flex;align-items:center;justify-content:center;font:9px ui-monospace,Menlo,monospace;color:#8a877f;text-align:center}
+.ti{font:600 12px/1.3 ui-sans-serif,system-ui}
+.mut{color:#8a877f}
+.typ{font-family:"EB Garamond",Georgia,serif}
+.mrule{border-bottom:.5px solid #b8b5ad;padding-bottom:5px;font:9px ui-monospace,Menlo,monospace;color:#98958d;margin-bottom:14px}
+.lnk{color:#6b3fa0;text-decoration:none}
+.chip{font:9px ui-monospace,Menlo,monospace;padding:2px 7px;border:1px solid #cfccc4;border-radius:10px;color:#6a675f}
+.kb{font:9px ui-monospace,Menlo,monospace;border:1px solid #cfccc4;border-radius:3px;padding:1px 5px;background:#f2f0eb;color:#6a675f}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.li{display:flex;gap:9px;align-items:center;padding:6px 10px;border-bottom:1px solid #ece9e3}
+.tc{box-sizing:border-box;background:#fff;border:1px solid #d8d3c6;padding:9px 11px;display:flex;flex-direction:column;gap:5px}
+.ov{box-sizing:border-box;background:#fdfdfc;border:1.5px solid #2a2a28;box-shadow:0 18px 44px rgba(0,0,0,.22)}
+.paper{box-sizing:border-box;background:#fffdf6;border:1px solid #d8d3c6;box-shadow:1px 2px 0 rgba(0,0,0,.07);background-image:linear-gradient(#eae5d6 1px,transparent 1px);background-size:100% 18px;background-position:0 26px}
+</style></helmet>
+
+<section class="dv-turn" id="t3">
+<div class="dv-thd"><a class="dv-tid" href="#t3">3</a><span class="dv-tname">Riffs on <a class="dv-oid" href="#2b">2b</a> — bigger writing sheet, dimmed table, plus a logs screen holding daily · weekly · season together (open loops left out for now). Tweaks panel drives sheet width, dim, card colour, annotations, season band.</span></div>
+<div class="dv-opts">
+
+<div class="dv-opt" id="3a">
+<div class="dv-olabel"><a class="dv-oid" href="#3a">3a</a>Tether kept, sheet doubled — logs are three columns: day · week · season, calendar in the rail</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#faf9f5;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb">logs ↗</span><span class="chip" style="border-color:#b0553a;color:#b0553a">6</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <svg style="position:absolute;inset:0" width="100%" height="100%"><line x1="150" y1="96" x2="252" y2="150" stroke="#cfccc4"></line><line x1="150" y1="330" x2="252" y2="188" stroke="#cfccc4"></line><line x1="252" y1="168" x2="900" y2="168" stroke="#2a2a28" stroke-width="1.5"></line></svg>
+  <div class="tc" style="position:absolute;left:56px;top:66px;width:172px;border-left:{{ barW }} solid #c98a72"><span class="dot" style="display:{{ dotDisplay }};background:#c98a72"></span><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:56px;top:300px;width:180px;border-left:{{ barW }} solid #a8b06a"><span class="dot" style="display:{{ dotDisplay }};background:#a8b06a"></span><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;left:60px;top:452px;width:176px;border-left:{{ barW }} solid #7f96c9"><span class="dot" style="display:{{ dotDisplay }};background:#7f96c9"></span><span class="lbl">idea</span><span class="ti">Les fichiers simples survivent…</span></div>
+  <div class="tc" style="position:absolute;left:150px;top:140px;width:180px;border:1.5px solid #2a2a28;border-left:3px solid #6fa8b0"><span class="lbl">claim · open</span><span class="ti">Les notes atomiques se recombinent mieux</span></div>
+  <div style="position:absolute;inset:0;background:#faf9f5;opacity:{{ dimOpacity }}"></div>
+  <div class="ov" style="position:absolute;left:340px;top:60px;width:{{ sheetW }};bottom:36px;display:flex;flex-direction:column">
+    <div style="display:flex;padding:8px 14px;border-bottom:1px solid #ece9e3;align-items:center;gap:8px"><span class="lbl">notes-atomiques.typ</span><span class="chip">claim</span><div style="flex:1"></div><span class="kb">⌘K</span><span class="kb">logs ↗</span><span class="kb">esc</span></div>
+    <div style="flex:1;padding:34px 56px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 26px/1.2 'EB Garamond',Georgia,serif;margin-bottom:16px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:15px;line-height:1.65">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+      <div style="font-size:15px;line-height:1.65;margin-top:14px">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+    </div>
+    <div style="border-top:1px solid #ece9e3;padding:9px 16px;font:10px ui-monospace;color:#6a675f">in 2 · out 2 · 1 dangling</div>
+  </div>
+  <p class="ann" style="display:{{ noteDisplay }};position:absolute;left:56px;bottom:12px;width:250px;margin:0">the tether is the only thing left undimmed — position stays legible, nothing else competes</p>
+</div>
+</div>
+</div>
+<div style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">logs — day · week · season side by side</div>
+<div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:360px">
+  <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><span class="mut">2026-07-23 · w30 · été</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="width:190px;border-right:1px solid #ddd9d0;padding:12px;background:#faf9f5">
+      <div class="lbl" style="margin-bottom:8px">july 2026</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;font:9px ui-monospace;color:#8a877f">
+        <span style="text-align:center">m</span><span style="text-align:center">t</span><span style="text-align:center">w</span><span style="text-align:center">t</span><span style="text-align:center">f</span><span style="text-align:center">s</span><span style="text-align:center">s</span>
+        <span style="text-align:center;padding:3px 0;color:#c4c1b8">13</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">14</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">15</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">16</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">17</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">18</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">19</span>
+        <span style="text-align:center;padding:3px 0;background:#ece9e3;color:#26251f">20</span><span style="text-align:center;padding:3px 0;background:#ece9e3;color:#26251f">21</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">22</span><span style="text-align:center;padding:3px 0;background:#26251f;color:#fff">23</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">24</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">25</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">26</span>
+        <span style="text-align:center;padding:3px 0;color:#c4c1b8">27</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">28</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">29</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">30</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">31</span><span></span><span></span>
+      </div>
+      <p class="ann" style="display:{{ noteDisplay }};margin:12px 0 0">filled = a note exists; click jumps all three columns to that date</p>
+    </div>
+    <div style="flex:1.2;border-right:1px solid #ddd9d0;padding:16px 20px" class="typ">
+      <div class="mrule">2026-07-23 · daily</div>
+      <div style="font:600 17px 'EB Garamond',Georgia,serif;margin-bottom:8px">2026-07-23</div>
+      <div style="font-size:13px;line-height:1.6">☐ finir le gabarit du vault<br>Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+    </div>
+    <div style="flex:1;border-right:1px solid #ddd9d0;padding:16px 20px;background:#fcfbf8" class="typ">
+      <div class="mrule">2026-w30 · weekly</div>
+      <div style="font:600 15px 'EB Garamond',Georgia,serif;margin-bottom:8px">Semaine 30</div>
+      <div style="font-size:13px;line-height:1.6">Retour sur <span class="lnk">2026-07-21</span> : démarrage du vault de test.</div>
+    </div>
+    <div style="display:{{ seasonDisplay }};flex:1;padding:16px 20px;background:#f7f6f2;flex-direction:column" class="typ">
+      <div class="mrule">2026-été · season</div>
+      <div style="font:600 15px 'EB Garamond',Georgia,serif;margin-bottom:8px">Été 2026</div>
+      <div style="font-size:13px;line-height:1.6">Objectif : sortir le v0 du <span class="lnk">note-system</span>.</div>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<div class="dv-opt" id="3b">
+<div class="dv-olabel"><a class="dv-oid" href="#3b">3b</a>Centered sheet, origin card stays lit — logs stack day under week under season</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#faf9f5;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb">logs ↗</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <div class="tc" style="position:absolute;left:56px;top:74px;width:172px;border-left:{{ barW }} solid #c98a72"><span class="dot" style="display:{{ dotDisplay }};background:#c98a72"></span><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:840px;top:120px;width:180px;border-left:{{ barW }} solid #6fb08c"><span class="dot" style="display:{{ dotDisplay }};background:#6fb08c"></span><span class="lbl">concept</span><span class="ti">Zettelkasten</span></div>
+  <div class="tc" style="position:absolute;left:820px;top:400px;width:180px;border-left:{{ barW }} solid #c988ae"><span class="dot" style="display:{{ dotDisplay }};background:#c988ae"></span><span class="lbl">project</span><span class="ti">Note system</span></div>
+  <div class="tc" style="position:absolute;left:60px;top:420px;width:176px;border-left:{{ barW }} solid #a8b06a"><span class="dot" style="display:{{ dotDisplay }};background:#a8b06a"></span><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+  <div style="position:absolute;inset:0;background:#26251f;opacity:{{ dimOpacity }}"></div>
+  <div class="tc" style="position:absolute;left:100px;top:236px;width:180px;border:1.5px solid #2a2a28;border-left:3px solid #6fa8b0;box-shadow:0 6px 20px rgba(0,0,0,.14)"><span class="lbl">claim · being written</span><span class="ti">Les notes atomiques se recombinent mieux</span></div>
+  <div class="ov" style="position:absolute;left:50%;top:44px;transform:translateX(-50%);width:{{ sheetW }};bottom:44px;display:flex;flex-direction:column">
+    <div style="flex:1;padding:40px 60px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 28px/1.2 'EB Garamond',Georgia,serif;margin-bottom:18px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:16px;line-height:1.7">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+      <div style="font-size:16px;line-height:1.7;margin-top:14px">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+    </div>
+    <div style="padding:10px 20px;border-top:1px solid #ece9e3;display:flex;gap:8px;align-items:center"><span class="kb">⌘K</span><span class="kb">logs ↗</span><span class="kb">esc put back</span><div style="flex:1"></div><span class="mut" style="font:10px ui-monospace">in 2 · out 2</span></div>
+  </div>
+  <p class="ann" style="display:{{ noteDisplay }};position:absolute;left:56px;bottom:14px;width:180px;margin:0;color:#f3ded6">the card you are writing on stays above the dim, in place</p>
+</div>
+</div>
+</div>
+<div style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">logs — nested scales, calendar strip on top</div>
+<div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:360px">
+  <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+  <div style="display:flex;gap:3px;padding:8px 12px;border-bottom:1px solid #ddd9d0;background:#faf9f5;font:9px ui-monospace;color:#8a877f;align-items:center">
+    <span class="mut" style="margin-right:6px">jul</span>
+    <span style="padding:3px 6px;background:#ece9e3;color:#26251f">20</span><span style="padding:3px 6px;background:#ece9e3;color:#26251f">21</span><span style="padding:3px 6px">22</span><span style="padding:3px 6px;background:#26251f;color:#fff">23</span><span style="padding:3px 6px">24</span><span style="padding:3px 6px">25</span><span style="padding:3px 6px">26</span><span class="mut" style="margin:0 8px">|</span><span style="padding:3px 6px">27</span><span style="padding:3px 6px">28</span><span style="padding:3px 6px">29</span><span style="padding:3px 6px">30</span><span style="padding:3px 6px">31</span>
+    <div style="flex:1"></div><span class="chip">w30</span><span class="chip">été 2026</span>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+    <div style="display:{{ seasonDisplay }};padding:10px 20px;background:#f7f6f2;border-bottom:1px solid #ece9e3;gap:14px;align-items:baseline"><span class="lbl">season · 2026-été</span><span class="typ" style="font-size:13px">Objectif : sortir le v0 du <span class="lnk">note-system</span>.</span></div>
+    <div style="padding:10px 20px;background:#fcfbf8;border-bottom:1px solid #ece9e3;display:flex;gap:14px;align-items:baseline"><span class="lbl">week · 2026-w30</span><span class="typ" style="font-size:13px">Retour sur <span class="lnk">2026-07-21</span> : démarrage du vault de test.</span></div>
+    <div style="flex:1;padding:18px 24px" class="typ">
+      <div class="mrule">2026-07-23 · daily</div>
+      <div style="font:600 18px 'EB Garamond',Georgia,serif;margin-bottom:4px">2026-07-23</div>
+      <div style="font:10px ui-monospace;color:#8a877f;margin-bottom:10px"><span class="lnk">2026-07-22</span> | next</div>
+      <div style="font-size:14px;line-height:1.6">☐ finir le gabarit du vault<br>Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+      <p class="ann" style="display:{{ noteDisplay }};margin:12px 0 0">the wider scales are one line each until you click them — the day is what you write in</p>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<div class="dv-opt" id="3c">
+<div class="dv-olabel"><a class="dv-oid" href="#3c">3c</a>Sheet takes the right two-thirds, table stays dim on the left — logs are calendar-first</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#faf9f5;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">logs ↗</span><span class="kb">esc</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <div class="tc" style="position:absolute;left:40px;top:60px;width:150px;border-left:{{ barW }} solid #c98a72"><span class="dot" style="display:{{ dotDisplay }};background:#c98a72"></span><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:200px;top:150px;width:160px;border-left:{{ barW }} solid #6fb08c"><span class="dot" style="display:{{ dotDisplay }};background:#6fb08c"></span><span class="lbl">concept</span><span class="ti">Zettelkasten</span></div>
+  <div class="tc" style="position:absolute;left:52px;top:280px;width:160px;border-left:{{ barW }} solid #a8b06a"><span class="dot" style="display:{{ dotDisplay }};background:#a8b06a"></span><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;left:170px;top:420px;width:160px;border-left:{{ barW }} solid #7f96c9"><span class="dot" style="display:{{ dotDisplay }};background:#7f96c9"></span><span class="lbl">idea</span><span class="ti">Les fichiers simples survivent…</span></div>
+  <div class="tc" style="position:absolute;left:36px;top:170px;width:160px;border:1.5px solid #2a2a28;border-left:3px solid #6fa8b0"><span class="lbl">claim</span><span class="ti">Les notes atomiques…</span></div>
+  <div style="position:absolute;inset:0;background:#faf9f5;opacity:{{ dimOpacity }}"></div>
+  <div class="ov" style="position:absolute;right:0;top:0;bottom:0;width:{{ sheetW }};border-right:0;border-top:0;border-bottom:0;display:flex;flex-direction:column">
+    <div style="flex:1;padding:44px 64px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 28px/1.2 'EB Garamond',Georgia,serif;margin-bottom:18px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:16px;line-height:1.7">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif.</div>
+      <div style="font-size:16px;line-height:1.7;margin-top:14px">À rapprocher des <span class="lnk">notes-evergreen</span>. La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+    </div>
+    <div style="padding:10px 24px;border-top:1px solid #ece9e3;display:flex;gap:8px"><span class="kb">⌘K</span><span class="kb">logs ↗</span><span class="kb">esc</span></div>
+  </div>
+  <p class="ann" style="display:{{ noteDisplay }};position:absolute;left:36px;bottom:14px;width:220px;margin:0">the table never fully leaves the screen — a permanent sliver of place</p>
+</div>
+</div>
+</div>
+<div style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">logs — month grid drives the panel</div>
+<div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:360px">
+  <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="width:420px;border-right:1px solid #ddd9d0;padding:14px 16px">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px"><span class="lbl">july 2026</span><span class="mut" style="font:9px ui-monospace">4 notes</span><div style="flex:1"></div><span class="kb">‹</span><span class="kb">›</span></div>
+      <div style="display:grid;grid-template-columns:26px repeat(7,1fr);gap:3px;font:10px ui-monospace">
+        <span></span><span class="mut" style="text-align:center">m</span><span class="mut" style="text-align:center">t</span><span class="mut" style="text-align:center">w</span><span class="mut" style="text-align:center">t</span><span class="mut" style="text-align:center">f</span><span class="mut" style="text-align:center">s</span><span class="mut" style="text-align:center">s</span>
+        <span class="mut" style="text-align:right">w29</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">13</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">14</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">15</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">16</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">17</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">18</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">19</span>
+        <span style="text-align:right;background:#ece9e3;padding:6px 2px">w30</span><span style="text-align:center;padding:6px 0;background:#f2f0eb">20</span><span style="text-align:center;padding:6px 0;background:#f2f0eb">21</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">22</span><span style="text-align:center;padding:6px 0;background:#26251f;color:#fff">23</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">24</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">25</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">26</span>
+        <span class="mut" style="text-align:right">w31</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">27</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">28</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">29</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">30</span><span style="text-align:center;padding:6px 0;color:#c4c1b8">31</span><span></span><span></span>
+      </div>
+      <div style="display:{{ seasonDisplay }};margin-top:14px;gap:6px;align-items:center"><span class="lbl">season</span><span class="chip" style="background:#26251f;color:#fff;border-color:#26251f">été 2026</span><span class="chip">printemps</span><span class="chip">hiver</span></div>
+      <p class="ann" style="display:{{ noteDisplay }};margin:12px 0 0">the week column is clickable too — one calendar for all three scales</p>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+      <div style="display:flex;border-bottom:1px solid #ddd9d0;font:10px ui-monospace">
+        <div style="padding:7px 12px;background:#fff;border-right:1px solid #ddd9d0">day 07-23</div>
+        <div style="padding:7px 12px;border-right:1px solid #ddd9d0;color:#8a877f;background:#f8f7f3">week w30</div>
+        <div style="display:{{ seasonDisplay }};padding:7px 12px;color:#8a877f;background:#f8f7f3">season été</div>
+      </div>
+      <div style="flex:1;padding:18px 22px" class="typ">
+        <div class="mrule">2026-07-23 · daily</div>
+        <div style="font:600 18px 'EB Garamond',Georgia,serif;margin-bottom:10px">2026-07-23</div>
+        <div style="font-size:14px;line-height:1.6">☐ finir le gabarit du vault<br>Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+      </div>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<div class="dv-opt" id="3d">
+<div class="dv-olabel"><a class="dv-oid" href="#3d">3d</a>Table dims to outlines only — logs as three nested bands you can open</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#fff;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">logs ↗</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <div class="tc" style="position:absolute;left:70px;top:70px;width:160px;background:transparent;border-color:#c4c1b8"><span class="lbl" style="color:#a8a49b">person</span><span class="ti" style="color:#8a877f">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:70px;top:200px;width:160px;background:transparent;border-color:#c4c1b8"><span class="lbl" style="color:#a8a49b">source</span><span class="ti" style="color:#8a877f">How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;left:70px;top:330px;width:160px;background:transparent;border-color:#c4c1b8"><span class="lbl" style="color:#a8a49b">idea</span><span class="ti" style="color:#8a877f">Les fichiers simples…</span></div>
+  <div class="tc" style="position:absolute;right:70px;top:120px;width:160px;background:transparent;border-color:#c4c1b8"><span class="lbl" style="color:#a8a49b">concept</span><span class="ti" style="color:#8a877f">Zettelkasten</span></div>
+  <div class="tc" style="position:absolute;right:70px;top:330px;width:160px;background:transparent;border-color:#c4c1b8"><span class="lbl" style="color:#a8a49b">project</span><span class="ti" style="color:#8a877f">Note system</span></div>
+  <div style="position:absolute;inset:0;background:#fff;opacity:0.25"></div>
+  <div class="ov" style="position:absolute;left:50%;transform:translateX(-50%);top:0;bottom:0;width:{{ sheetW }};border-top:0;border-bottom:0;box-shadow:0 0 60px rgba(0,0,0,.10);display:flex;flex-direction:column">
+    <div style="padding:10px 18px;display:flex;gap:8px;align-items:center;border-bottom:1px solid #ece9e3"><span class="dot" style="background:#6fa8b0"></span><span class="lbl">notes-atomiques</span><div style="flex:1"></div><span class="kb">⌘K</span><span class="kb">logs ↗</span><span class="kb">esc</span></div>
+    <div style="flex:1;padding:46px 64px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 30px/1.2 'EB Garamond',Georgia,serif;margin-bottom:20px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:16px;line-height:1.75">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+      <div style="font-size:16px;line-height:1.75;margin-top:16px">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+      <p class="ann" style="display:{{ noteDisplay }};margin:20px 0 0">full-height column: writing is a page, not a popup</p>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+<div style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">logs — season contains weeks contain days</div>
+<div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:360px">
+  <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">jump to date</span><span class="kb">table ↗</span></div>
+  <div style="flex:1;padding:14px;display:flex;flex-direction:column;gap:10px;min-height:0">
+    <div style="display:{{ seasonDisplay }};border:1px solid #d8d3c6;padding:10px 12px;gap:12px;align-items:center;background:#f7f6f2"><span class="lbl">season</span><span class="ti">Été 2026</span><span class="mut" style="font:10px ui-monospace">jun–sep · 3 weeks written</span><div style="flex:1"></div><span class="kb">open</span></div>
+    <div style="border:1px solid #d8d3c6;padding:10px 12px;display:flex;gap:12px;align-items:center;background:#fcfbf8"><span class="lbl">week</span><span class="ti">Semaine 30</span><span class="mut" style="font:10px ui-monospace">20–26 july</span><div style="flex:1"></div><span class="kb">‹ w29</span><span class="kb">w31 ›</span><span class="kb">open</span></div>
+    <div style="flex:1;display:flex;gap:8px;min-height:0">
+      <div style="flex:1;border:1px solid #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="lbl">mon 20</div></div>
+      <div style="flex:1;border:1px solid #d8d3c6;padding:8px 10px;box-sizing:border-box"><div class="lbl">tue 21</div><div class="mut" style="font:10px/1.4 ui-sans-serif;margin-top:6px">démarrage du vault</div></div>
+      <div style="flex:1;border:1px solid #d8d3c6;padding:8px 10px;box-sizing:border-box"><div class="lbl">wed 22</div><div class="mut" style="font:10px/1.4 ui-sans-serif;margin-top:6px">notes atomiques</div></div>
+      <div style="flex:2;border:1.5px solid #2a2a28;padding:10px 12px;box-sizing:border-box" class="typ"><div class="lbl">thu 23 · today</div><div style="font-size:12.5px;line-height:1.5;margin-top:6px">Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>. <span class="mut">☐ 1</span></div></div>
+      <div style="flex:1;border:1px dashed #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="lbl" style="color:#cfccc4">fri 24</div></div>
+      <div style="flex:1;border:1px dashed #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="lbl" style="color:#cfccc4">sat 25</div></div>
+      <div style="flex:1;border:1px dashed #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="lbl" style="color:#cfccc4">sun 26</div></div>
+    </div>
+    <p class="ann" style="display:{{ noteDisplay }};margin:0">no separate calendar widget: the week row *is* the calendar, and the season band pages it</p>
+  </div>
+</div></div></div>
+</div>
+
+<div class="dv-opt" id="3e">
+<div class="dv-olabel"><a class="dv-oid" href="#3e">3e</a>Sheet keeps the card's header, table washes out — logs on a vertical time rail</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#f7f6f2;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">logs ↗</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <div class="tc" style="position:absolute;left:64px;top:64px;width:160px;border-left:{{ barW }} solid #c98a72"><span class="dot" style="display:{{ dotDisplay }};background:#c98a72"></span><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:300px;top:440px;width:170px;border-left:{{ barW }} solid #a8b06a"><span class="dot" style="display:{{ dotDisplay }};background:#a8b06a"></span><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;right:74px;top:96px;width:170px;border-left:{{ barW }} solid #6fb08c"><span class="dot" style="display:{{ dotDisplay }};background:#6fb08c"></span><span class="lbl">concept</span><span class="ti">Zettelkasten</span></div>
+  <div class="tc" style="position:absolute;right:120px;top:440px;width:170px;border-left:{{ barW }} solid #c988ae"><span class="dot" style="display:{{ dotDisplay }};background:#c988ae"></span><span class="lbl">project</span><span class="ti">Note system</span></div>
+  <div style="position:absolute;inset:0;background:#f7f6f2;opacity:{{ dimOpacity }}"></div>
+  <div class="ov" style="position:absolute;left:50%;transform:translateX(-50%);top:52px;bottom:52px;width:{{ sheetW }};display:flex;flex-direction:column">
+    <div style="padding:12px 20px;background:#f2f0eb;border-bottom:1.5px solid #2a2a28;display:flex;gap:10px;align-items:center">
+      <span class="lbl">claim</span><span class="ti" style="font-size:13px">Les notes atomiques se recombinent mieux</span><div style="flex:1"></div><span class="kb" style="background:#fff">logs ↗</span><span class="kb" style="background:#fff">esc</span>
+    </div>
+    <div style="flex:1;padding:38px 58px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font-size:16px;line-height:1.75">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+      <div style="font-size:16px;line-height:1.75;margin-top:16px">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+      <p class="ann" style="display:{{ noteDisplay }};margin:18px 0 0">the card's title becomes the sheet's header — no duplicated H1 in the body</p>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+<div style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">logs — time rail with scale markers</div>
+<div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:360px">
+  <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="width:230px;border-right:1px solid #ddd9d0;padding:12px 14px;display:flex;flex-direction:column;gap:5px;font:10px ui-monospace">
+      <div style="display:{{ seasonDisplay }};padding:6px 8px;background:#f2f0eb;justify-content:space-between"><span>2026-été</span><span class="mut">season</span></div>
+      <div style="padding:6px 8px;background:#fcfbf8;display:flex;justify-content:space-between;border-left:2px solid #d8d3c6;margin-left:10px"><span>2026-w30</span><span class="mut">week</span></div>
+      <div style="padding:6px 8px;background:#26251f;color:#fff;margin-left:20px">2026-07-23</div>
+      <div style="padding:6px 8px;margin-left:20px;color:#8a877f">2026-07-22</div>
+      <div style="padding:6px 8px;margin-left:20px;color:#8a877f">2026-07-21</div>
+      <div style="padding:6px 8px;background:#fcfbf8;display:flex;justify-content:space-between;border-left:2px solid #d8d3c6;margin-left:10px;color:#8a877f"><span>2026-w29</span><span class="mut">week</span></div>
+      <div style="margin-top:auto;display:flex;gap:4px;align-items:center"><span class="kb">jul</span><span class="kb">‹</span><span class="kb">›</span><span class="mut">calendar</span></div>
+    </div>
+    <div style="flex:1;padding:20px 26px;min-width:0" class="typ">
+      <div class="mrule">2026-07-23 · daily · w30 · été 2026</div>
+      <div style="font:600 20px 'EB Garamond',Georgia,serif;margin-bottom:10px">2026-07-23</div>
+      <div style="font-size:14px;line-height:1.65">☐ finir le gabarit du vault<br>Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+      <p class="ann" style="display:{{ noteDisplay }};margin:16px 0 0">indentation carries the scale: season ⊃ week ⊃ day, one rail, no tabs</p>
+    </div>
+    <div style="width:210px;border-left:1px solid #ddd9d0;padding:14px;background:#faf9f5">
+      <div class="lbl" style="margin-bottom:8px">jump</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;font:9px ui-monospace;color:#8a877f">
+        <span style="text-align:center;padding:3px 0">20</span><span style="text-align:center;padding:3px 0">21</span><span style="text-align:center;padding:3px 0">22</span><span style="text-align:center;padding:3px 0;background:#26251f;color:#fff">23</span><span style="text-align:center;padding:3px 0">24</span><span style="text-align:center;padding:3px 0">25</span><span style="text-align:center;padding:3px 0">26</span>
+        <span style="text-align:center;padding:3px 0;color:#c4c1b8">27</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">28</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">29</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">30</span><span style="text-align:center;padding:3px 0;color:#c4c1b8">31</span><span></span><span></span>
+      </div>
+      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:4px"><span class="chip">w29</span><span class="chip" style="background:#26251f;color:#fff;border-color:#26251f">w30</span><span class="chip">w31</span></div>
+      <div style="display:{{ seasonDisplay }};margin-top:10px;gap:4px;flex-wrap:wrap"><span class="chip">printemps</span><span class="chip" style="background:#26251f;color:#fff;border-color:#26251f">été</span></div>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<div class="dv-opt" id="3f">
+<div class="dv-olabel"><a class="dv-oid" href="#3f">3f</a>Table shrinks to a minimap while writing — logs are three horizontal lanes with a year strip</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#faf9f5">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><span class="mut">writing · notes-atomiques</span><div style="flex:1"></div><span class="kb">logs ↗</span><span class="kb">esc</span></div>
+<div style="flex:1;display:flex;min-height:0">
+  <div style="width:240px;border-right:1px solid #ddd9d0;position:relative;background:#f2f0eb;overflow:hidden">
+    <div style="position:absolute;inset:0;transform:scale(.42);transform-origin:top left;width:238%;height:238%">
+      <div class="tc" style="position:absolute;left:40px;top:40px;width:180px;border-left:{{ barW }} solid #c98a72"><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+      <div class="tc" style="position:absolute;left:300px;top:120px;width:180px;border-left:{{ barW }} solid #6fb08c"><span class="lbl">concept</span><span class="ti">Zettelkasten</span></div>
+      <div class="tc" style="position:absolute;left:60px;top:300px;width:180px;border-left:{{ barW }} solid #a8b06a"><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+      <div class="tc" style="position:absolute;left:330px;top:420px;width:180px;border-left:{{ barW }} solid #c988ae"><span class="lbl">project</span><span class="ti">Note system</span></div>
+      <div class="tc" style="position:absolute;left:120px;top:600px;width:180px;border-left:{{ barW }} solid #7f96c9"><span class="lbl">idea</span><span class="ti">Les fichiers simples…</span></div>
+      <div class="tc" style="position:absolute;left:180px;top:180px;width:190px;border:3px solid #2a2a28"><span class="lbl">claim</span><span class="ti">Les notes atomiques…</span></div>
+    </div>
+    <div style="position:absolute;inset:0;background:#f2f0eb;opacity:{{ dimOpacity }}"></div>
+    <p class="ann" style="display:{{ noteDisplay }};position:absolute;left:12px;bottom:10px;width:200px;margin:0">minimap: place without detail</p>
+  </div>
+  <div style="flex:1;display:flex;justify-content:center;padding:34px 0;min-width:0">
+    <div style="width:{{ sheetW }};max-width:100%;border:1.5px solid #2a2a28;background:#fdfdfc;display:flex;flex-direction:column;box-sizing:border-box">
+      <div style="flex:1;padding:44px 62px" class="typ">
+        <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+        <div style="font:600 28px/1.2 'EB Garamond',Georgia,serif;margin-bottom:18px">Les notes atomiques se recombinent mieux</div>
+        <div style="font-size:16px;line-height:1.75">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+        <div style="font-size:16px;line-height:1.75;margin-top:16px">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+      </div>
+      <div style="padding:10px 22px;border-top:1px solid #ece9e3;display:flex;gap:8px"><span class="kb">⌘K</span><span class="kb">⌘L link</span><span class="kb">esc</span></div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+<div style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">logs — one lane per scale, year strip in the header</div>
+<div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:360px">
+  <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span>
+    <div style="display:flex;gap:2px;margin-left:10px;font:9px ui-monospace;color:#8a877f;align-items:center">
+      <span style="padding:2px 5px">jan</span><span style="padding:2px 5px">feb</span><span style="padding:2px 5px">mar</span><span style="padding:2px 5px">apr</span><span style="padding:2px 5px">may</span><span style="padding:2px 5px">jun</span><span style="padding:2px 5px;background:#26251f;color:#fff">jul</span><span style="padding:2px 5px">aug</span><span style="padding:2px 5px">sep</span><span style="padding:2px 5px">oct</span><span style="padding:2px 5px">nov</span><span style="padding:2px 5px">dec</span>
+    </div>
+    <div style="flex:1"></div><span class="kb">table ↗</span></div>
+  <div style="flex:1;padding:14px;display:flex;flex-direction:column;gap:12px;min-height:0">
+    <div><div class="lbl" style="margin-bottom:6px">days</div>
+      <div style="display:flex;gap:8px">
+        <div style="width:150px;border:1px solid #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="mut" style="font:9px ui-monospace">07-20</div></div>
+        <div style="width:150px;border:1px solid #d8d3c6;padding:8px 10px;box-sizing:border-box"><div class="mut" style="font:9px ui-monospace">07-21</div><div style="font:10px/1.4 ui-sans-serif;margin-top:4px">démarrage du vault</div></div>
+        <div style="width:150px;border:1px solid #d8d3c6;padding:8px 10px;box-sizing:border-box"><div class="mut" style="font:9px ui-monospace">07-22</div><div style="font:10px/1.4 ui-sans-serif;margin-top:4px">notes atomiques</div></div>
+        <div style="width:220px;border:1.5px solid #2a2a28;padding:8px 10px;box-sizing:border-box"><div style="font:9px ui-monospace">07-23 · today</div><div class="typ" style="font-size:12px;line-height:1.5;margin-top:4px">Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div></div>
+        <div style="width:150px;border:1px dashed #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="mut" style="font:9px ui-monospace;color:#cfccc4">07-24</div></div>
+      </div>
+    </div>
+    <div><div class="lbl" style="margin-bottom:6px">weeks</div>
+      <div style="display:flex;gap:8px">
+        <div style="width:150px;border:1px solid #d8d3c6;padding:8px 10px;box-sizing:border-box;background:#fcfbf8"><div class="mut" style="font:9px ui-monospace">w29</div></div>
+        <div style="width:220px;border:1.5px solid #2a2a28;padding:8px 10px;box-sizing:border-box;background:#fcfbf8"><div style="font:9px ui-monospace">w30</div><div class="typ" style="font-size:12px;line-height:1.5;margin-top:4px">Retour sur <span class="lnk">2026-07-21</span>.</div></div>
+        <div style="width:150px;border:1px dashed #e6e3db;padding:8px 10px;box-sizing:border-box"><div class="mut" style="font:9px ui-monospace;color:#cfccc4">w31</div></div>
+      </div>
+    </div>
+    <div style="display:{{ seasonDisplay }};flex-direction:column"><div class="lbl" style="margin-bottom:6px">seasons</div>
+      <div style="display:flex;gap:8px">
+        <div style="width:150px;border:1px solid #d8d3c6;padding:8px 10px;box-sizing:border-box;background:#f7f6f2"><div class="mut" style="font:9px ui-monospace">printemps 2026</div></div>
+        <div style="width:220px;border:1.5px solid #2a2a28;padding:8px 10px;box-sizing:border-box;background:#f7f6f2"><div style="font:9px ui-monospace">été 2026</div><div class="typ" style="font-size:12px;line-height:1.5;margin-top:4px">Objectif : sortir le v0 du <span class="lnk">note-system</span>.</div></div>
+      </div>
+    </div>
+    <p class="ann" style="display:{{ noteDisplay }};margin:0">all three scales scroll on the same horizontal axis — the month strip above moves them together</p>
+  </div>
+</div></div></div>
+</div>
+
+</div>
+<p class="dv-next">Try next: "take <a class="dv-oid" href="#3b">3b</a> to hi-fi" · "3c's calendar with <a class="dv-oid" href="#3d">3d</a>'s week row" · "show <a class="dv-oid" href="#3a">3a</a> with the sheet at 820 and dim at 0.7"</p>
+</section>
+
+<section class="dv-turn" id="t2">
+<div class="dv-thd"><a class="dv-tid" href="#t2">2</a><span class="dv-tname">Table + card overlay — <a class="dv-oid" href="#1d">1d</a> × <a class="dv-oid" href="#1c">1c</a>, flat straight cards, two zoom levels (titles ⇄ bodies), debt as a small widget, logs as a separate UI</span></div>
+<div class="dv-opts">
+
+<div class="dv-opt" id="2a">
+<div class="dv-olabel"><a class="dv-oid" href="#2a">2a</a>Aligned grid — cards snap to a column grid; overlay grows in place from the clicked card</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:680px;background:#f2f0eb;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><span class="mut">12 cards</span><div style="flex:1"></div><span class="chip" style="background:#fff">type</span><span class="chip" style="background:#fff">#méthode</span><span class="kb" style="background:#fff">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb" style="background:#fff">logs ↗</span><span style="display:flex;gap:5px;align-items:center;font:10px ui-monospace;color:#b0553a;border:1px solid #b0553a;padding:2px 6px">loops 6</span></div>
+<div style="flex:1;padding:20px;display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:100px;gap:14px;align-content:start">
+  <div class="tc" style="border-top:3px solid #c98a72"><span class="lbl">person</span><span class="ti">Niklas Luhmann</span><span class="mut" style="font:9px ui-monospace;margin-top:auto">2 ↔</span></div>
+  <div class="tc" style="border-top:3px solid #6fb08c"><span class="lbl">concept</span><span class="ti">Zettelkasten</span><span class="mut" style="font:9px ui-monospace;margin-top:auto">4 ↔</span></div>
+  <div class="tc" style="border-top:3px solid #a8b06a"><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span><span class="mut" style="font:9px ui-monospace;margin-top:auto">3 ↔ · #livre</span></div>
+  <div class="tc" style="border-top:3px solid #7f96c9"><span class="lbl">idea</span><span class="ti">Les fichiers simples survivent aux applications</span><span class="mut" style="font:9px ui-monospace;margin-top:auto">origin self</span></div>
+  <div class="tc" style="border-top:3px solid #c988ae"><span class="lbl">project</span><span class="ti">Note system</span><span class="mut" style="font:9px ui-monospace;margin-top:auto">#rust</span></div>
+  <div style="grid-column:2 / span 2;grid-row:2 / span 3;border:1px dashed #b0553a;background:#fbf7f4"></div>
+  <div class="tc" style="border-top:3px solid #6fb08c"><span class="lbl">concept</span><span class="ti">Liens pièges</span><span class="mut" style="font:9px ui-monospace;margin-top:auto">1 ↔</span></div>
+  <div class="tc" style="border-top:3px solid #b6b3ab;background:#f6f5f1"><span class="lbl">capture · 3 d</span><span class="ti mut">capture-articles-zettel</span></div>
+  <div class="tc" style="border-top:3px solid #b6b3ab;background:#f6f5f1"><span class="lbl">capture · 2 d</span><span class="ti mut">capture-idee-canvas</span></div>
+  <div class="tc" style="border-top:3px dashed #a09d95"><span class="lbl">generated</span><span class="ti">Digest : How to Take Smart Notes</span></div>
+  <div class="tc" style="border-top:3px solid #b0553a"><span class="lbl" style="color:#b0553a">no type</span><span class="ti">Note sans type</span></div>
+  <div class="tc" style="border-top:3px solid #b0553a"><span class="lbl" style="color:#b0553a">no meta</span><span class="ti mut">sans-meta.typ</span></div>
+</div>
+<div class="ov" style="position:absolute;left:288px;top:170px;width:512px;height:378px;display:flex;flex-direction:column">
+  <div style="display:flex;align-items:center;gap:8px;padding:8px 14px 0"><span class="lbl">notes-atomiques</span><span class="chip">claim</span><div style="flex:1"></div><span class="kb">⌘K</span><span class="kb">esc</span></div>
+  <div style="flex:1;padding:16px 34px 0" class="typ">
+    <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+    <div style="font:600 21px/1.2 'EB Garamond',Georgia,serif;margin-bottom:12px">Les notes atomiques se recombinent mieux</div>
+    <div style="font-size:14px;line-height:1.55">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif.</div>
+    <div style="font-size:14px;line-height:1.55;margin-top:10px">À rapprocher des <span class="lnk">notes-evergreen</span><span style="color:#b0553a;font:9px ui-monospace;vertical-align:super">dangling</span><span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+  </div>
+  <div style="padding:10px 34px;border-top:1px solid #ece9e3;display:flex;gap:20px;font:10px ui-monospace,Menlo,monospace;color:#6a675f"><span>in 2 · zettelkasten, digest-smart-notes</span><span>out 2</span></div>
+</div>
+<p class="ann" style="position:absolute;left:288px;top:556px;margin:0;width:512px">overlay occupies the card's own grid slot, expanded — the surrounding grid never moves, so the place is preserved</p>
+</div>
+</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">logs (separate UI)</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><span class="mut">week 30</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+    <div style="flex:1;display:flex">
+      <div style="flex:1;padding:12px;display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;gap:10px;align-items:baseline;padding:6px 8px;background:#f2f0eb"><span style="font:11px ui-monospace">07-23 thu</span><span class="mut" style="font:10px ui-sans-serif">Fini le gabarit du vault…</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">1 ☐</span></div>
+        <div style="display:flex;gap:10px;align-items:baseline;padding:6px 8px"><span style="font:11px ui-monospace">07-22 wed</span><span class="mut" style="font:10px ui-sans-serif">notes atomiques, smart-notes</span></div>
+        <div style="display:flex;gap:10px;align-items:baseline;padding:6px 8px"><span style="font:11px ui-monospace">07-21 mon</span><span class="mut" style="font:10px ui-sans-serif">démarrage du vault de test</span></div>
+        <div style="display:flex;gap:10px;align-items:baseline;padding:6px 8px;border-top:1px solid #ece9e3"><span style="font:11px ui-monospace">2026-w30</span><span class="mut" style="font:10px ui-sans-serif">weekly review</span></div>
+        <p class="ann" style="margin:auto 0 0">ledger, not cards: logs are a stream you scroll</p>
+      </div>
+      <div style="width:250px;border-left:1px solid #ddd9d0;padding:12px 14px" class="typ">
+        <div class="mrule">2026-07-23 · daily</div>
+        <div style="font:600 15px 'EB Garamond',Georgia,serif;margin-bottom:8px">2026-07-23</div>
+        <div style="font-size:12px;line-height:1.5">Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+      </div>
+    </div>
+  </div></div></div>
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">loops screen (opened from the widget)</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#b0553a">open loops 6</span><span class="mut">oldest 3 d</span><div style="flex:1"></div><span class="kb">esc</span></div>
+    <div style="flex:1;padding:12px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div style="display:flex;flex-direction:column;gap:6px"><span class="lbl">captures 2</span>
+        <div class="tc" style="gap:3px"><span class="ti mut" style="font-size:11px">capture-articles-zettel</span><span class="mut" style="font:9px ui-monospace">3 d · no summary</span></div>
+        <div class="tc" style="gap:3px"><span class="ti mut" style="font-size:11px">capture-idee-canvas</span><span class="mut" style="font:9px ui-monospace">2 d</span></div></div>
+      <div style="display:flex;flex-direction:column;gap:6px"><span class="lbl">dangling 2</span>
+        <div class="tc" style="gap:3px"><span class="ti" style="font-size:11px">notes-evergreen</span><span class="mut" style="font:9px ui-monospace">from notes-atomiques</span></div>
+        <div class="tc" style="gap:3px"><span class="ti" style="font-size:11px">2026-07-24</span><span class="mut" style="font:9px ui-monospace">next-day link</span></div></div>
+      <div style="display:flex;flex-direction:column;gap:6px"><span class="lbl">meta 2</span>
+        <div class="tc" style="gap:3px"><span class="ti" style="font-size:11px">sans-type</span><span class="mut" style="font:9px ui-monospace">type missing</span></div>
+        <div class="tc" style="gap:3px"><span class="ti mut" style="font-size:11px">sans-meta.typ</span><span class="mut" style="font:9px ui-monospace">unparseable</span></div></div>
+    </div>
+  </div></div></div>
+</div>
+</div>
+
+<div class="dv-opt" id="2b">
+<div class="dv-olabel"><a class="dv-oid" href="#2b">2b</a>Free positions, tethered overlay — the sheet opens beside its card with a line back to it</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#faf9f5;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb">logs ↗</span><span style="display:flex;gap:4px;align-items:center;font:10px ui-monospace;color:#6a675f"><span style="width:8px;height:8px;background:#b0553a"></span>6</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <svg style="position:absolute;inset:0" width="100%" height="100%"><line x1="150" y1="96" x2="286" y2="152" stroke="#cfccc4"></line><line x1="286" y1="152" x2="470" y2="86" stroke="#cfccc4"></line><line x1="200" y1="300" x2="286" y2="180" stroke="#cfccc4"></line><line x1="470" y1="110" x2="560" y2="300" stroke="#cfccc4"></line><line x1="286" y1="180" x2="770" y2="180" stroke="#2a2a28" stroke-width="1.5"></line><line x1="640" y1="420" x2="790" y2="420" stroke="#cfccc4" stroke-dasharray="4 4"></line></svg>
+  <div class="tc" style="position:absolute;left:60px;top:62px;width:176px;border-left:3px solid #c98a72"><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:410px;top:56px;width:190px;border-left:3px solid #6fb08c"><span class="lbl">concept</span><span class="ti">Zettelkasten</span><span class="mut" style="font:9px ui-monospace">4 ↔ · #méthode</span></div>
+  <div class="tc" style="position:absolute;left:120px;top:270px;width:200px;border-left:3px solid #a8b06a"><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;left:490px;top:282px;width:190px;border-left:3px solid #c988ae"><span class="lbl">project</span><span class="ti">Note system</span></div>
+  <div class="tc" style="position:absolute;left:104px;top:430px;width:186px;border-left:3px solid #7f96c9"><span class="lbl">idea</span><span class="ti">Les fichiers simples survivent aux applications</span></div>
+  <div class="tc" style="position:absolute;left:560px;top:400px;width:180px;background:#f6f5f1;border-left:3px solid #b6b3ab"><span class="lbl">capture · 2 d</span><span class="ti mut">capture-idee-canvas</span></div>
+  <div class="tc" style="position:absolute;left:790px;top:400px;width:190px;border-left:3px dashed #a09d95"><span class="lbl">generated</span><span class="ti">Digest : How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;left:196px;top:140px;width:180px;border:1.5px solid #2a2a28;border-left:3px solid #6fa8b0"><span class="lbl">claim · open</span><span class="ti">Les notes atomiques se recombinent mieux</span></div>
+  <div class="ov" style="position:absolute;left:406px;top:118px;width:474px;height:280px;display:flex;flex-direction:column">
+    <div style="display:flex;padding:7px 12px;border-bottom:1px solid #ece9e3;align-items:center;gap:8px"><span class="lbl">notes-atomiques.typ</span><div style="flex:1"></div><span class="kb">⌘K</span><span class="kb">logs</span><span class="kb">esc</span></div>
+    <div style="flex:1;padding:16px 30px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 18px/1.2 'EB Garamond',Georgia,serif;margin-bottom:10px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:13px;line-height:1.55">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+      <div style="font-size:13px;line-height:1.55;margin-top:8px;color:#a8a49b">#l("fichiers-simples")<span class="kb" style="margin-left:6px">tab</span></div>
+    </div>
+  </div>
+  <p class="ann" style="position:absolute;left:406px;top:474px;width:300px;margin:0">the tether keeps the card's position legible while you write — release and the sheet snaps back into the card</p>
+</div>
+</div>
+</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">logs — day spine</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">today</span><span class="kb">table ↗</span></div>
+    <div style="flex:1;display:flex;padding:12px;gap:14px">
+      <div style="width:96px;border-right:1px solid #ddd9d0;display:flex;flex-direction:column;gap:4px;font:10px ui-monospace;color:#8a877f">
+        <span style="background:#26251f;color:#fff;padding:3px 6px">07-23 thu</span><span style="padding:3px 6px">07-22 wed</span><span style="padding:3px 6px">07-21 mon</span><span style="padding:3px 6px">2026-w30</span></div>
+      <div style="flex:1" class="typ">
+        <div class="mrule">2026-07-23 · daily</div>
+        <div style="font:600 16px 'EB Garamond',Georgia,serif">2026-07-23</div>
+        <div style="font:10px ui-monospace;color:#8a877f;margin:4px 0 10px"><span class="lnk">2026-07-22</span> | next</div>
+        <div style="font-size:12px;line-height:1.6">☐ finir le gabarit du vault<br>Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+      </div>
+    </div>
+  </div></div></div>
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">loops — one list, aged</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#b0553a">open loops</span><span class="mut">6</span><div style="flex:1"></div><span class="kb">esc</span></div>
+    <div style="flex:1;padding:6px 0">
+      <div class="li"><span style="width:7px;height:7px;background:#b0553a"></span><span class="ti">capture-articles-zettel</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">3 d · summary empty</span></div>
+      <div class="li"><span style="width:7px;height:7px;background:#c9a86a"></span><span class="ti">capture-idee-canvas</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">2 d</span></div>
+      <div class="li"><span style="width:7px;height:7px;background:#b0553a"></span><span class="ti">notes-evergreen</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">dangling ← notes-atomiques</span></div>
+      <div class="li"><span style="width:7px;height:7px;background:#cfccc4"></span><span class="ti">2026-07-24</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">dangling · expected</span></div>
+      <div class="li"><span style="width:7px;height:7px;background:#b0553a"></span><span class="ti">sans-type</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">type missing</span></div>
+      <div class="li" style="border:0"><span style="width:7px;height:7px;background:#b0553a"></span><span class="ti">sans-meta.typ</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">unparseable</span></div>
+      <p class="ann" style="margin:8px 12px 0">sorted by age, mixed kinds — one queue instead of three columns</p>
+    </div>
+  </div></div></div>
+</div>
+</div>
+
+<div class="dv-opt" id="2c">
+<div class="dv-olabel"><a class="dv-oid" href="#2c">2c</a>Type lanes — colour lives in the band label, cards stay white; overlay is a wide reading sheet</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#fff;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><span class="mut">grouped by type</span><div style="flex:1"></div><span class="kb">free</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">lanes</span><span class="kb">titles</span><span class="kb">logs ↗</span><span class="chip" style="border-color:#b0553a;color:#b0553a">6 loops</span></div>
+<div style="flex:1;padding:0;overflow:hidden">
+  <div style="display:flex;align-items:stretch;border-bottom:1px solid #ece9e3"><div style="width:112px;padding:12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl" style="color:#6fb08c">concept</div><div class="mut" style="font:9px ui-monospace;margin-top:4px">3</div></div>
+    <div style="flex:1;padding:12px;display:flex;gap:12px"><div class="tc" style="width:200px"><span class="ti">Zettelkasten</span><span class="mut" style="font:9px ui-monospace">4 ↔ · #méthode</span></div><div class="tc" style="width:200px"><span class="ti">Liens pièges</span><span class="mut" style="font:9px ui-monospace">1 ↔</span></div><div class="tc" style="width:200px;border-style:dashed"><span class="ti mut">＋ new concept</span></div></div></div>
+  <div style="display:flex;align-items:stretch;border-bottom:1px solid #ece9e3"><div style="width:112px;padding:12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl" style="color:#6fa8b0">claim</div><div class="mut" style="font:9px ui-monospace;margin-top:4px">1</div></div>
+    <div style="flex:1;padding:12px;display:flex;gap:12px"><div class="tc" style="width:260px;border:1.5px solid #2a2a28"><span class="ti">Les notes atomiques se recombinent mieux</span><span class="mut" style="font:9px ui-monospace">from smart-notes</span></div></div></div>
+  <div style="display:flex;align-items:stretch;border-bottom:1px solid #ece9e3"><div style="width:112px;padding:12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl" style="color:#c98a72">person</div><div class="lbl" style="color:#a8b06a;margin-top:8px">source</div></div>
+    <div style="flex:1;padding:12px;display:flex;gap:12px"><div class="tc" style="width:200px"><span class="ti">Niklas Luhmann</span></div><div class="tc" style="width:220px"><span class="ti">How to Take Smart Notes</span><span class="mut" style="font:9px ui-monospace">#livre</span></div></div></div>
+  <div style="display:flex;align-items:stretch;border-bottom:1px solid #ece9e3"><div style="width:112px;padding:12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl" style="color:#7f96c9">idea</div><div class="lbl" style="color:#c988ae;margin-top:8px">project</div></div>
+    <div style="flex:1;padding:12px;display:flex;gap:12px"><div class="tc" style="width:240px"><span class="ti">Les fichiers simples survivent aux applications</span></div><div class="tc" style="width:200px"><span class="ti">Note system</span><span class="mut" style="font:9px ui-monospace">#rust</span></div></div></div>
+  <div style="display:flex;align-items:stretch;background:#faf9f5"><div style="width:112px;padding:12px;border-right:1px solid #ece9e3"><div class="lbl">second class</div></div>
+    <div style="flex:1;padding:12px;display:flex;gap:12px"><div class="tc" style="width:180px;background:#f2f0eb"><span class="ti mut">capture-articles-zettel</span><span class="mut" style="font:9px ui-monospace">3 d</span></div><div class="tc" style="width:180px;background:#f2f0eb"><span class="ti mut">capture-idee-canvas</span></div><div class="tc" style="width:190px;border-style:dashed"><span class="ti mut">Digest : Smart Notes</span></div><div class="tc" style="width:150px;border-color:#b0553a"><span class="ti">sans-type</span></div></div></div>
+</div>
+<div class="ov" style="position:absolute;left:236px;top:96px;right:0;bottom:0;display:flex">
+  <div style="flex:1;padding:24px 44px" class="typ">
+    <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+    <div style="font:600 24px/1.2 'EB Garamond',Georgia,serif;margin-bottom:14px">Les notes atomiques se recombinent mieux</div>
+    <div style="font-size:15px;line-height:1.6">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif.</div>
+    <div style="font-size:15px;line-height:1.6;margin-top:12px">À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+    <p class="ann" style="margin:16px 0 0">the lane you came from stays visible on the left — you never lose which type you were reading</p>
+  </div>
+  <div style="width:186px;border-left:1px solid #ece9e3;padding:16px 14px;display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;gap:6px;justify-content:flex-end"><span class="kb">⌘K</span><span class="kb">esc</span></div>
+    <div><div class="lbl" style="margin-bottom:5px">in 2</div><div style="font:11px/1.6 ui-sans-serif;color:#4a483f">Zettelkasten<br>digest-smart-notes</div></div>
+    <div><div class="lbl" style="margin-bottom:5px">out 2</div><div style="font:11px/1.6 ui-sans-serif;color:#4a483f">zettelkasten<br><span style="color:#b0553a">notes-evergreen ✕</span></div></div>
+    <div style="margin-top:auto"><span class="chip">logs ↗</span></div>
+  </div>
+</div>
+</div>
+</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">logs — month grid</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><span class="mut">july 2026</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+    <div style="flex:1;padding:12px;display:grid;grid-template-columns:repeat(7,1fr);grid-auto-rows:1fr;gap:4px">
+      <div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">13</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">14</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">15</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">16</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">17</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">18</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">19</div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:4px;font:9px ui-monospace">20<div class="mut" style="margin-top:3px">w30</div></div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:4px;font:9px ui-monospace">21<div class="mut" style="margin-top:3px">vault</div></div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:4px;font:9px ui-monospace">22<div class="mut" style="margin-top:3px">notes</div></div>
+      <div style="border:1.5px solid #2a2a28;background:#f2f0eb;padding:4px;font:9px ui-monospace">23<div class="mut" style="margin-top:3px">gabarit</div></div>
+      <div class="ph" style="border-style:dashed;background:#fff">24</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">25</div><div class="ph" style="border-style:solid;border-color:#ece9e3;background:#fff">26</div>
+    </div>
+    <p class="ann" style="margin:0 12px 10px">days with a note are filled; empty days are just empty</p>
+  </div></div></div>
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">loops — table lane treatment reused</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#b0553a">open loops 6</span><div style="flex:1"></div><span class="kb">esc</span></div>
+    <div style="flex:1">
+      <div style="display:flex;border-bottom:1px solid #ece9e3"><div style="width:112px;padding:10px 12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl">captures 2</div></div><div style="flex:1;padding:10px;display:flex;gap:10px"><div class="tc" style="width:150px;background:#f2f0eb"><span class="ti mut" style="font-size:11px">capture-articles-zettel</span><span class="mut" style="font:9px ui-monospace">3 d</span></div><div class="tc" style="width:150px;background:#f2f0eb"><span class="ti mut" style="font-size:11px">capture-idee-canvas</span><span class="mut" style="font:9px ui-monospace">2 d</span></div></div></div>
+      <div style="display:flex;border-bottom:1px solid #ece9e3"><div style="width:112px;padding:10px 12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl">dangling 2</div></div><div style="flex:1;padding:10px;display:flex;gap:10px"><div class="tc" style="width:150px;border-color:#b0553a"><span class="ti" style="font-size:11px">notes-evergreen</span><span class="mut" style="font:9px ui-monospace">create as claim</span></div><div class="tc" style="width:150px"><span class="ti" style="font-size:11px">2026-07-24</span><span class="mut" style="font:9px ui-monospace">expected</span></div></div></div>
+      <div style="display:flex"><div style="width:112px;padding:10px 12px;border-right:1px solid #ece9e3;background:#faf9f5"><div class="lbl">meta 2</div></div><div style="flex:1;padding:10px;display:flex;gap:10px"><div class="tc" style="width:150px;border-color:#b0553a"><span class="ti" style="font-size:11px">sans-type</span></div><div class="tc" style="width:150px;border-color:#b0553a"><span class="ti mut" style="font-size:11px">sans-meta.typ</span></div></div></div>
+    </div>
+  </div></div></div>
+</div>
+</div>
+
+<div class="dv-opt" id="2d">
+<div class="dv-olabel"><a class="dv-oid" href="#2d">2d</a>Ink only — no type colour at all, type is a word; overlay is a hairline sheet with a palette dock</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#f7f6f2;position:relative">
+<div class="wtop" style="background:#fff"><span style="font-weight:700;color:#26251f">table</span><div style="flex:1"></div><span class="kb">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb">logs ↗</span><span class="kb" style="border-color:#26251f;color:#26251f">loops 6</span></div>
+<div style="flex:1;padding:24px;display:flex;flex-wrap:wrap;gap:16px;align-content:flex-start">
+  <div style="width:236px;background:#fff;border:1px solid #26251f;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;color:#26251f;text-transform:uppercase;letter-spacing:.09em">person</div><div class="ti" style="margin-top:6px">Niklas Luhmann</div><div class="mut" style="font:9px ui-monospace;margin-top:8px">luhmann · 07-21</div></div>
+  <div style="width:236px;background:#fff;border:1px solid #26251f;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em">concept</div><div class="ti" style="margin-top:6px">Zettelkasten</div><div class="mut" style="font:9px ui-monospace;margin-top:8px">4 ↔ · #méthode</div></div>
+  <div style="width:236px;background:#fff;border:1px solid #26251f;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em">source</div><div class="ti" style="margin-top:6px">How to Take Smart Notes</div><div class="mut" style="font:9px ui-monospace;margin-top:8px">#livre</div></div>
+  <div style="width:236px;background:#fff;border:1px solid #26251f;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em">idea</div><div class="ti" style="margin-top:6px">Les fichiers simples survivent aux applications</div></div>
+  <div style="width:236px;background:#fff;border:1px solid #26251f;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em">project</div><div class="ti" style="margin-top:6px">Note system</div></div>
+  <div style="width:236px;background:#fff;border:1px solid #26251f;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em">concept</div><div class="ti" style="margin-top:6px">Liens pièges</div></div>
+  <div style="width:236px;background:#f0efea;border:1px solid #a8a49b;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em;color:#8a877f">capture · 3 d</div><div class="ti mut" style="margin-top:6px">capture-articles-zettel</div></div>
+  <div style="width:236px;background:#fff;border:1px dashed #a8a49b;padding:12px 14px;box-sizing:border-box"><div style="font:9px ui-monospace;text-transform:uppercase;letter-spacing:.09em;color:#8a877f">generated</div><div class="ti" style="margin-top:6px">Digest : How to Take Smart Notes</div></div>
+</div>
+<div class="ov" style="position:absolute;left:196px;top:130px;width:560px;height:400px;border-width:1px;display:flex;flex-direction:column;box-shadow:0 0 0 12px rgba(38,37,31,.06),0 18px 44px rgba(0,0,0,.18)">
+  <div style="flex:1;padding:30px 48px 0" class="typ">
+    <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+    <div style="font:600 23px/1.2 'EB Garamond',Georgia,serif;margin-bottom:14px">Les notes atomiques se recombinent mieux</div>
+    <div style="font-size:15px;line-height:1.6">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif.</div>
+    <div style="font-size:15px;line-height:1.6;margin-top:12px">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+    <p class="ann" style="margin:14px 0 0">no chrome inside the sheet: everything is a keystroke away in the dock below</p>
+  </div>
+  <div style="border-top:1px solid #ece9e3;padding:8px 14px;display:flex;gap:8px;align-items:center;background:#f7f6f2">
+    <span class="kb">⌘K palette</span><span class="kb">⌘L link</span><span class="kb">⌘⇧L logs</span><span class="kb">esc put back</span>
+    <div style="flex:1"></div><span class="mut" style="font:9px ui-monospace">in 2 · out 2 · 1 dangling</span>
+  </div>
+</div>
+</div>
+</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">logs — monospace ledger</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px;background:#fff">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">⌘⇧L back</span></div>
+    <div style="flex:1;padding:14px 18px;font:11px/1.9 ui-monospace,Menlo,monospace;color:#3a3833">
+      <div>2026-07-23 &nbsp;daily &nbsp;&nbsp;gabarit du vault fini &nbsp;→ smart-notes &nbsp;<span class="mut">1 ☐</span></div>
+      <div>2026-07-22 &nbsp;daily &nbsp;&nbsp;notes atomiques &nbsp;&nbsp;&nbsp;→ smart-notes</div>
+      <div>2026-07-21 &nbsp;daily &nbsp;&nbsp;démarrage du vault</div>
+      <div>2026-w30 &nbsp;&nbsp;&nbsp;weekly &nbsp;retour sur 07-21</div>
+      <div class="mut" style="margin-top:10px">— 4 log notes · never on the table —</div>
+    </div>
+    <p class="ann" style="margin:0 18px 12px">logs are a different medium: lines, not cards</p>
+  </div></div></div>
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">loops — inline ledger with ages</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px;background:#fff">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">open loops</span><span class="mut">6 · oldest 3 d</span><div style="flex:1"></div><span class="kb">esc</span></div>
+    <div style="flex:1;padding:14px 18px;font:11px/2 ui-monospace,Menlo,monospace;color:#3a3833">
+      <div>3 d &nbsp;capture &nbsp;capture-articles-zettel &nbsp;<span class="mut">summary empty</span></div>
+      <div>2 d &nbsp;capture &nbsp;capture-idee-canvas</div>
+      <div>2 d &nbsp;dangling &nbsp;notes-evergreen &nbsp;<span class="mut">← notes-atomiques</span></div>
+      <div>0 d &nbsp;dangling &nbsp;2026-07-24 &nbsp;<span class="mut">expected</span></div>
+      <div>2 d &nbsp;meta &nbsp;&nbsp;&nbsp;&nbsp;sans-type &nbsp;<span class="mut">type missing</span></div>
+      <div>2 d &nbsp;meta &nbsp;&nbsp;&nbsp;&nbsp;sans-meta.typ</div>
+    </div>
+  </div></div></div>
+</div>
+</div>
+
+<div class="dv-opt" id="2e">
+<div class="dv-olabel"><a class="dv-oid" href="#2e">2e</a>Tinted fill, dense — colour carries the whole card; overlay is the same card, enlarged</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#efece5;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><span class="mut">12</span><div style="flex:1"></div><span class="kb" style="background:#fff">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb" style="background:#fff">logs ↗</span><span style="font:10px ui-monospace;background:#b0553a;color:#fff;padding:3px 7px">6</span></div>
+<div style="flex:1;padding:16px;display:grid;grid-template-columns:repeat(5,1fr);grid-auto-rows:96px;gap:10px;align-content:start">
+  <div style="background:#f3e3dc;border:1px solid #dcbcae;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#9c5f45">person</div><div class="ti" style="margin-top:5px">Niklas Luhmann</div></div>
+  <div style="background:#dcefe5;border:1px solid #a9d2be;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#3f7a5e">concept</div><div class="ti" style="margin-top:5px">Zettelkasten</div><div class="mut" style="font:9px ui-monospace;margin-top:4px">#méthode</div></div>
+  <div style="background:#dceef1;border:1px solid #a8cdd4;padding:9px 10px;box-sizing:border-box;grid-column:span 2;border-width:1.5px;border-color:#2a2a28"><div class="lbl" style="color:#3f717a">claim · open</div><div class="ti" style="margin-top:5px">Les notes atomiques se recombinent mieux</div></div>
+  <div style="background:#e9edd8;border:1px solid #c3ca9f;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#6b7440">source</div><div class="ti" style="margin-top:5px">How to Take Smart Notes</div></div>
+  <div style="background:#e2e7f4;border:1px solid #b4c0dd;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#4c5c8c">idea</div><div class="ti" style="margin-top:5px">Les fichiers simples survivent…</div></div>
+  <div style="background:#f4e3ed;border:1px solid #dfb6cd;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#8f4f72">project</div><div class="ti" style="margin-top:5px">Note system</div></div>
+  <div style="background:#dcefe5;border:1px solid #a9d2be;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#3f7a5e">concept</div><div class="ti" style="margin-top:5px">Liens pièges</div></div>
+  <div style="background:#e8e6e0;border:1px solid #c4c1b8;padding:9px 10px;box-sizing:border-box"><div class="lbl">capture 3 d</div><div class="ti mut" style="margin-top:5px">capture-articles-zettel</div></div>
+  <div style="background:#e8e6e0;border:1px solid #c4c1b8;padding:9px 10px;box-sizing:border-box"><div class="lbl">capture 2 d</div><div class="ti mut" style="margin-top:5px">capture-idee-canvas</div></div>
+  <div style="background:#f7f6f2;border:1px dashed #b3afa6;padding:9px 10px;box-sizing:border-box"><div class="lbl">generated</div><div class="ti" style="margin-top:5px">Digest : Smart Notes</div></div>
+  <div style="background:#fff;border:1px solid #b0553a;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#b0553a">no type</div><div class="ti" style="margin-top:5px">Note sans type</div></div>
+  <div style="background:#fff;border:1px solid #b0553a;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#b0553a">no meta</div><div class="ti mut" style="margin-top:5px">sans-meta.typ</div></div>
+  <div style="background:#f3e3dc;border:1px solid #dcbcae;padding:9px 10px;box-sizing:border-box"><div class="lbl" style="color:#9c5f45">organisation</div><div class="ti mut" style="margin-top:5px">＋ new</div></div>
+</div>
+<div class="ov" style="position:absolute;left:300px;top:150px;width:520px;height:390px;background:#eef6f8;border-color:#2a2a28;display:flex;flex-direction:column">
+  <div style="padding:9px 14px;display:flex;align-items:center;gap:8px;background:#dceef1;border-bottom:1px solid #a8cdd4"><span class="lbl" style="color:#3f717a">claim · notes-atomiques</span><div style="flex:1"></div><span class="kb" style="background:#fff">⌘K</span><span class="kb" style="background:#fff">logs</span><span class="kb" style="background:#fff">esc</span></div>
+  <div style="flex:1;padding:24px 42px;background:#fff;margin:12px;box-sizing:border-box" class="typ">
+    <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+    <div style="font:600 22px/1.2 'EB Garamond',Georgia,serif;margin-bottom:12px">Les notes atomiques se recombinent mieux</div>
+    <div style="font-size:14px;line-height:1.6">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+    <div style="margin-top:16px;display:flex;gap:8px"><span class="chip">in 2</span><span class="chip">out 2</span><span class="chip" style="border-color:#b0553a;color:#b0553a">1 dangling</span></div>
+  </div>
+  <p class="ann" style="margin:0 14px 10px">the tint tells you which lane you are in without any label — same colour as the card you clicked</p>
+</div>
+</div>
+</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">logs — week columns</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+    <div style="flex:1;padding:12px;display:flex;gap:8px">
+      <div style="flex:1;background:#f7f6f2;border:1px solid #e3e0d8;padding:8px;box-sizing:border-box"><div class="lbl">mon 21</div><div style="font:10px/1.5 ui-sans-serif;margin-top:6px;color:#4a483f">démarrage du vault de test</div></div>
+      <div style="flex:1;background:#f7f6f2;border:1px solid #e3e0d8;padding:8px;box-sizing:border-box"><div class="lbl">wed 22</div><div style="font:10px/1.5 ui-sans-serif;margin-top:6px;color:#4a483f">notes atomiques ↗ smart-notes</div></div>
+      <div style="flex:1;background:#fff;border:1.5px solid #2a2a28;padding:8px;box-sizing:border-box"><div class="lbl">thu 23</div><div style="font:10px/1.5 ui-sans-serif;margin-top:6px;color:#4a483f">gabarit fini<br>☐ 1 tâche</div></div>
+      <div style="flex:1;background:#f7f6f2;border:1px dashed #d6d2ca;padding:8px;box-sizing:border-box"><div class="lbl">fri 24</div><div class="mut" style="font:9px ui-monospace;margin-top:6px">create</div></div>
+      <div style="width:76px;background:#efece5;border:1px solid #e3e0d8;padding:8px;box-sizing:border-box"><div class="lbl">w30</div><div class="mut" style="font:9px ui-monospace;margin-top:6px">review</div></div>
+    </div>
+  </div></div></div>
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">loops — tinted by kind</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">open loops</span><span style="font:10px ui-monospace;background:#b0553a;color:#fff;padding:2px 6px">6</span><div style="flex:1"></div><span class="kb">esc</span></div>
+    <div style="flex:1;padding:12px;display:flex;flex-direction:column;gap:7px">
+      <div style="background:#f0efea;border:1px solid #c4c1b8;padding:8px 10px;display:flex;gap:10px;align-items:center"><span class="lbl">capture</span><span class="ti">capture-articles-zettel</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">3 d</span></div>
+      <div style="background:#f0efea;border:1px solid #c4c1b8;padding:8px 10px;display:flex;gap:10px;align-items:center"><span class="lbl">capture</span><span class="ti">capture-idee-canvas</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">2 d</span></div>
+      <div style="background:#fbf1ee;border:1px solid #dcb6a9;padding:8px 10px;display:flex;gap:10px;align-items:center"><span class="lbl" style="color:#9c5f45">dangling</span><span class="ti">notes-evergreen</span><span class="chip" style="margin-left:auto">create as claim</span></div>
+      <div style="background:#fbf1ee;border:1px solid #dcb6a9;padding:8px 10px;display:flex;gap:10px;align-items:center"><span class="lbl" style="color:#9c5f45">meta</span><span class="ti">sans-type</span><div style="margin-left:auto;display:flex;gap:4px"><span class="chip">concept</span><span class="chip">claim</span></div></div>
+      <p class="ann" style="margin:2px 0 0">same tint language as the table, so the two screens feel like one product</p>
+    </div>
+  </div></div></div>
+</div>
+</div>
+
+<div class="dv-opt" id="2f">
+<div class="dv-olabel"><a class="dv-oid" href="#2f">2f</a>Link-graph table — edges always drawn; opening a card dims the table but keeps its own edges lit</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:640px;background:#fbfaf7;position:relative">
+<div class="wtop"><span style="font-weight:700;color:#26251f">table</span><span class="mut">edges: 8 real · 1 suggested</span><div style="flex:1"></div><span class="kb">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span><span class="kb">logs ↗</span><span style="display:flex;align-items:center;gap:4px;font:10px ui-monospace;color:#b0553a"><span style="width:16px;height:16px;border:1px solid #b0553a;display:flex;align-items:center;justify-content:center">6</span>loops</span></div>
+<div style="flex:1;position:relative;overflow:hidden">
+  <div style="position:absolute;inset:0;background:#fbfaf7"></div>
+  <svg style="position:absolute;inset:0" width="100%" height="100%">
+    <line x1="180" y1="118" x2="330" y2="196" stroke="#26251f" stroke-width="1.2"></line>
+    <line x1="330" y1="196" x2="560" y2="120" stroke="#26251f" stroke-width="1.2"></line>
+    <line x1="330" y1="220" x2="300" y2="380" stroke="#26251f" stroke-width="1.2"></line>
+    <line x1="560" y1="150" x2="620" y2="360" stroke="#d6d2ca"></line>
+    <line x1="300" y1="400" x2="700" y2="470" stroke="#b0553a" stroke-dasharray="5 4"></line>
+    <line x1="820" y1="150" x2="620" y2="360" stroke="#d6d2ca"></line>
+  </svg>
+  <div class="tc" style="position:absolute;left:96px;top:92px;width:170px;opacity:.35"><span class="lbl">person</span><span class="ti">Niklas Luhmann</span></div>
+  <div class="tc" style="position:absolute;left:480px;top:92px;width:180px;opacity:.35"><span class="lbl">concept</span><span class="ti">Zettelkasten</span></div>
+  <div class="tc" style="position:absolute;left:214px;top:352px;width:186px;opacity:.35"><span class="lbl">source</span><span class="ti">How to Take Smart Notes</span></div>
+  <div class="tc" style="position:absolute;left:540px;top:336px;width:170px;opacity:.35"><span class="lbl">project</span><span class="ti">Note system</span></div>
+  <div class="tc" style="position:absolute;left:750px;top:118px;width:180px;opacity:.35"><span class="lbl">idea</span><span class="ti">Les fichiers simples…</span></div>
+  <div class="tc" style="position:absolute;left:640px;top:444px;width:180px;background:#f6f5f1;opacity:.35"><span class="lbl">capture 2 d</span><span class="ti mut">capture-idee-canvas</span></div>
+  <div class="ov" style="position:absolute;left:250px;top:150px;width:500px;height:340px;display:flex;flex-direction:column">
+    <div style="padding:8px 14px;display:flex;gap:8px;align-items:center;border-bottom:1px solid #ece9e3"><span class="lbl">notes-atomiques</span><span class="chip">claim</span><div style="flex:1"></div><span class="kb">⌘K</span><span class="kb">logs ↗</span><span class="kb">esc</span></div>
+    <div style="flex:1;padding:22px 40px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 21px/1.2 'EB Garamond',Georgia,serif;margin-bottom:12px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:14px;line-height:1.6">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+    </div>
+    <div style="border-top:1px solid #ece9e3;padding:8px 14px;display:flex;gap:8px;align-items:center;font:10px ui-monospace;color:#6a675f"><span>— zettelkasten</span><span>— digest-smart-notes</span><span style="color:#b0553a">┄ capture-idee-canvas (suggested)</span></div>
+  </div>
+  <p class="ann" style="position:absolute;left:250px;top:498px;width:500px;margin:0">the dimmed table keeps its shape; only this card's own edges stay black, so you read its neighbourhood while writing</p>
+</div>
+</div>
+</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">logs — stream with links out</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#26251f">logs</span><span class="mut">no cards, no edges</span><div style="flex:1"></div><span class="kb">table ↗</span></div>
+    <div style="flex:1;padding:14px 20px;overflow:hidden" class="typ">
+      <div style="display:flex;gap:14px;padding-bottom:10px;border-bottom:1px solid #ece9e3"><span style="font:10px ui-monospace;color:#8a877f;width:74px">2026-07-23</span><div style="flex:1;font-size:12.5px;line-height:1.5">Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>. <span class="mut">☐ finir le gabarit</span></div></div>
+      <div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid #ece9e3"><span style="font:10px ui-monospace;color:#8a877f;width:74px">2026-07-22</span><div style="flex:1;font-size:12.5px;line-height:1.5">Lecture de <span class="lnk">smart-notes</span> → fiche <span class="lnk">notes-atomiques</span>.</div></div>
+      <div style="display:flex;gap:14px;padding:10px 0"><span style="font:10px ui-monospace;color:#8a877f;width:74px">2026-w30</span><div style="flex:1;font-size:12.5px;line-height:1.5">Retour sur <span class="lnk">2026-07-21</span> : démarrage du vault de test.</div></div>
+    </div>
+  </div></div></div>
+  <div style="flex:1"><div class="lbl" style="margin-bottom:6px">loops — debt shown on the graph</div>
+  <div class="dv-card" style="border:1.5px solid #2a2a28"><div class="w" style="height:250px">
+    <div class="wtop"><span style="font-weight:700;color:#b0553a">open loops 6</span><div style="flex:1"></div><span class="kb">esc</span></div>
+    <div style="flex:1;display:flex">
+      <div style="width:210px;border-right:1px solid #ddd9d0;padding:8px 0">
+        <div class="li" style="background:#f2f0eb"><span class="ti" style="font-size:11px">notes-evergreen</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">dangling</span></div>
+        <div class="li"><span class="ti mut" style="font-size:11px">capture-articles-zettel</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">3 d</span></div>
+        <div class="li"><span class="ti mut" style="font-size:11px">capture-idee-canvas</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">2 d</span></div>
+        <div class="li" style="border:0"><span class="ti" style="font-size:11px">sans-type</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">meta</span></div>
+      </div>
+      <div style="flex:1;position:relative">
+        <svg style="position:absolute;inset:0" width="100%" height="100%"><line x1="70" y1="60" x2="180" y2="120" stroke="#b0553a" stroke-dasharray="5 4"></line></svg>
+        <div class="tc" style="position:absolute;left:16px;top:40px;width:130px;font-size:11px"><span class="ti" style="font-size:11px">notes-atomiques</span></div>
+        <div style="position:absolute;left:150px;top:104px;width:120px;border:1px dashed #b0553a;padding:8px 10px;box-sizing:border-box;color:#b0553a;font:11px ui-sans-serif">notes-evergreen<div style="font:9px ui-monospace;margin-top:4px">does not exist</div></div>
+        <p class="ann" style="position:absolute;left:16px;bottom:8px;margin:0;width:250px">selecting a loop shows it in place on the table</p>
+      </div>
+    </div>
+  </div></div></div>
+</div>
+</div>
+
+</div>
+<p class="dv-next">Try next: "take <a class="dv-oid" href="#2b">2b</a> to hi-fi" · "keep <a class="dv-oid" href="#2a">2a</a>'s grid but <a class="dv-oid" href="#2d">2d</a>'s ink-only cards" · "show what the overlay looks like while writing a link in <a class="dv-oid" href="#2f">2f</a>"</p>
+</section>
+
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">v0 app shell — six information architectures</span></div>
+<div class="dv-opts">
+
+<div class="dv-opt" id="1a">
+<div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Shared system: type colours + the three zoom levels (reference, not a screen)</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w">
+<div class="wtop"><span>system.reference</span><span class="mut">— applies to every option below</span></div>
+<div style="display:flex">
+<div style="width:400px;padding:16px 18px;border-right:1px solid #ddd9d0;display:flex;flex-direction:column;gap:12px">
+<div class="lbl">type colour = one hue, one chroma</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#c98a72"></span><span style="font:11px ui-monospace">person</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#c9a86a"></span><span style="font:11px ui-monospace">organisation</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#a8b06a"></span><span style="font:11px ui-monospace">source</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#6fb08c"></span><span style="font:11px ui-monospace">concept</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#6fa8b0"></span><span style="font:11px ui-monospace">claim</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#7f96c9"></span><span style="font:11px ui-monospace">idea</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#a888c9"></span><span style="font:11px ui-monospace">personal</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#c988ae"></span><span style="font:11px ui-monospace">project</span></div>
+</div>
+<div style="height:1px;background:#ece9e3"></div>
+<div class="lbl">non-permanent = no hue, only value</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#b6b3ab"></span><span style="font:11px ui-monospace" class="mut">capture — grey until summarised</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:transparent;border:1.5px dashed #a09d95"></span><span style="font:11px ui-monospace" class="mut">generated — outline, disposable</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#26251f"></span><span style="font:11px ui-monospace" class="mut">time — ink, never on the canvas</span></div>
+<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:#fff;border:1.5px solid #b0553a"></span><span style="font:11px ui-monospace" class="mut">typeless — debt marker</span></div>
+</div>
+<p class="ann" style="margin:4px 0 0">8 permanent hues is a lot. Options below use the dot as the only colour — chrome stays grey.</p>
+</div>
+<div style="flex:1;padding:16px 18px;display:flex;flex-direction:column;gap:10px">
+<div class="lbl">semantic zoom (v1, but the card design starts here)</div>
+<div style="display:flex;gap:14px;align-items:stretch">
+<div style="flex:1;display:flex;flex-direction:column;gap:6px">
+<div style="font:9px ui-monospace;color:#8a877f">far — dots</div>
+<div style="height:200px;border:1px solid #ddd9d0;background:#faf9f5;position:relative">
+<span class="dot" style="position:absolute;left:38px;top:44px;background:#6fb08c;width:7px;height:7px"></span>
+<span class="dot" style="position:absolute;left:74px;top:70px;background:#6fa8b0;width:7px;height:7px"></span>
+<span class="dot" style="position:absolute;left:120px;top:38px;background:#c98a72;width:7px;height:7px"></span>
+<span class="dot" style="position:absolute;left:56px;top:118px;background:#a8b06a;width:7px;height:7px"></span>
+<span class="dot" style="position:absolute;left:140px;top:132px;background:#c988ae;width:7px;height:7px"></span>
+<span class="dot" style="position:absolute;left:96px;top:158px;background:#7f96c9;width:7px;height:7px"></span>
+<span class="dot" style="position:absolute;left:24px;top:166px;background:#b6b3ab;width:7px;height:7px"></span>
+<svg width="100%" height="100%" style="position:absolute;inset:0" viewBox="0 0 200 200" preserveAspectRatio="none"><line x1="41" y1="47" x2="77" y2="73" stroke="#c3bfb5"></line><line x1="77" y1="73" x2="123" y2="41" stroke="#c3bfb5"></line><line x1="59" y1="121" x2="77" y2="73" stroke="#c3bfb5"></line><line x1="99" y1="161" x2="143" y2="135" stroke="#c3bfb5" stroke-dasharray="3 3"></line></svg>
+</div>
+</div>
+<div style="flex:1.3;display:flex;flex-direction:column;gap:6px">
+<div style="font:9px ui-monospace;color:#8a877f">mid — title cards</div>
+<div style="height:200px;border:1px solid #ddd9d0;background:#faf9f5;padding:10px;display:flex;flex-direction:column;gap:8px">
+<div style="border:1px solid #d8d3c6;background:#fff;padding:7px 9px;display:flex;gap:8px;align-items:center;border-left:3px solid #6fb08c"><span class="ti">Zettelkasten</span><span class="mut" style="font:9px ui-monospace">3 ↔</span></div>
+<div style="border:1px solid #d8d3c6;background:#fff;padding:7px 9px;display:flex;gap:8px;align-items:center;border-left:3px solid #6fa8b0"><span class="ti">Les notes atomiques se recombinent…</span></div>
+<div style="border:1px solid #d8d3c6;background:#f3f1ec;padding:7px 9px;display:flex;gap:8px;align-items:center;border-left:3px solid #b6b3ab"><span class="ti mut">capture-idee-canvas</span></div>
+</div>
+</div>
+<div style="flex:1.5;display:flex;flex-direction:column;gap:6px">
+<div style="font:9px ui-monospace;color:#8a877f">close — rendered typst (real template.typ styling)</div>
+<div style="height:200px;border:1px solid #d8d3c6;background:#fff;padding:14px 16px" class="typ">
+<div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+<div style="font:600 15px/1.2 'EB Garamond',Georgia,serif;margin-bottom:8px">Les notes atomiques se recombinent mieux</div>
+<div style="font-size:13px;line-height:1.45">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span>.</div>
+</div>
+</div>
+</div>
+<p class="ann" style="margin:2px 0 0">The meta line, the purple links and the 14 cm measure are lifted from <span style="font-family:ui-monospace;font-size:11px">templates/template.typ</span> — the app should not invent a second visual language for note bodies.</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="dv-opt" id="1b">
+<div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Three panes, by the book — tree · list · editor, debt in a bottom drawer</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:660px">
+<div class="wtop"><span style="font-weight:700;color:#26251f">vault</span><span class="mut">~/notes</span><div style="flex:1"></div><span class="kb">ctrl+k</span><span class="kb">ctrl+n</span><span class="kb">ctrl+shift+c capture</span></div>
+<div style="flex:1;display:flex;min-height:0">
+  <div style="width:190px;border-right:1px solid #ddd9d0;background:#f8f7f3;padding:10px 0;display:flex;flex-direction:column;gap:2px">
+    <div class="lbl" style="padding:4px 12px 6px">categories</div>
+    <div class="li" style="border:0;background:#ece9e3"><span style="font:11px ui-monospace">permanent</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">9</span></div>
+    <div class="li" style="border:0"><span style="font:11px ui-monospace">time</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">4</span></div>
+    <div class="li" style="border:0"><span style="font:11px ui-monospace">capture</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">2</span></div>
+    <div class="li" style="border:0"><span style="font:11px ui-monospace">generated</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">1</span></div>
+    <div class="lbl" style="padding:14px 12px 6px">types</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;padding:0 12px">
+      <span class="chip" style="border-color:#c98a72">person 1</span><span class="chip" style="border-color:#6fb08c">concept 3</span><span class="chip" style="border-color:#6fa8b0">claim 1</span><span class="chip" style="border-color:#a8b06a">source 1</span><span class="chip" style="border-color:#7f96c9">idea 1</span><span class="chip" style="border-color:#c988ae">project 1</span>
+    </div>
+    <div class="lbl" style="padding:14px 12px 6px">tags</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;padding:0 12px">
+      <span class="chip">#méthode 2</span><span class="chip">#livre 1</span><span class="chip">#rust 1</span>
+    </div>
+  </div>
+  <div style="width:250px;border-right:1px solid #ddd9d0;display:flex;flex-direction:column">
+    <div style="padding:8px 10px;border-bottom:1px solid #ddd9d0;display:flex;gap:8px;align-items:center"><span class="lbl">permanent · 9</span><span class="mut" style="margin-left:auto;font:9px ui-monospace">created ↓</span></div>
+    <div style="overflow:hidden">
+      <div class="li" style="background:#f2f0eb"><span class="dot" style="background:#6fa8b0"></span><div><div class="ti">Les notes atomiques…</div><div class="mut" style="font:9px ui-monospace">notes-atomiques · 07-22</div></div></div>
+      <div class="li"><span class="dot" style="background:#6fb08c"></span><div><div class="ti">Zettelkasten</div><div class="mut" style="font:9px ui-monospace">zettelkasten · 07-21</div></div></div>
+      <div class="li"><span class="dot" style="background:#c98a72"></span><div><div class="ti">Niklas Luhmann</div><div class="mut" style="font:9px ui-monospace">luhmann · 07-21</div></div></div>
+      <div class="li"><span class="dot" style="background:#a8b06a"></span><div><div class="ti">How to Take Smart Notes</div><div class="mut" style="font:9px ui-monospace">smart-notes · 07-22</div></div></div>
+      <div class="li"><span class="dot" style="background:#7f96c9"></span><div><div class="ti">Les fichiers simples survivent…</div><div class="mut" style="font:9px ui-monospace">fichiers-simples · 07-23</div></div></div>
+      <div class="li"><span class="dot" style="background:#c988ae"></span><div><div class="ti">Note system</div><div class="mut" style="font:9px ui-monospace">note-system · 07-23</div></div></div>
+      <div class="li"><span class="dot" style="background:#6fb08c"></span><div><div class="ti">Liens pièges</div><div class="mut" style="font:9px ui-monospace">liens-pieges · 07-23</div></div></div>
+      <div class="li"><span class="dot" style="background:#fff;border:1.5px solid #b0553a"></span><div><div class="ti">Note sans type</div><div class="mut" style="font:9px ui-monospace">sans-type · no type field</div></div></div>
+      <div class="li"><span class="dot" style="background:#fff;border:1.5px solid #b0553a"></span><div><div class="ti mut">sans-meta.typ</div><div class="mut" style="font:9px ui-monospace">unparseable #meta</div></div></div>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <div style="padding:8px 14px;border-bottom:1px solid #ddd9d0;display:flex;align-items:center;gap:10px">
+      <span class="lbl">notes-atomiques.typ</span><span class="mut" style="font:9px ui-monospace">saved 12:04</span>
+      <div style="flex:1"></div>
+      <span class="kb">hybrid</span><span class="kb" style="opacity:.5">split</span>
+    </div>
+    <div style="flex:1;padding:22px 40px;overflow:hidden" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 20px/1.2 'EB Garamond',Georgia,serif;margin-bottom:12px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:14px;line-height:1.5;margin-bottom:14px">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif.</div>
+      <div style="border:1px solid #b0553a;background:#fdf6f3;padding:8px 10px;font:12px ui-monospace,Menlo,monospace;color:#3a3833">À rapprocher des #l("<span style="color:#b0553a">notes-evergreen</span>")<span style="border-left:1.5px solid #26251f;margin-left:1px">&nbsp;</span></div>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center"><span class="lbl" style="color:#b0553a">active block = raw source</span><span class="mut" style="font:9px ui-monospace">every other block is cached SVG</span></div>
+    </div>
+    <div style="border-top:1px solid #ddd9d0;padding:10px 14px;display:flex;gap:24px">
+      <div style="flex:1"><div class="lbl" style="margin-bottom:6px">backlinks · 2</div>
+        <div style="display:flex;flex-direction:column;gap:4px;font:11px ui-sans-serif">
+          <div style="display:flex;gap:7px;align-items:center"><span class="dot" style="background:#6fb08c;width:7px;height:7px"></span>Zettelkasten <span class="mut">« voir … »</span></div>
+          <div style="display:flex;gap:7px;align-items:center"><span class="dot" style="background:#b5b0a6;width:7px;height:7px"></span>digest-smart-notes</div>
+        </div>
+      </div>
+      <div style="flex:1"><div class="lbl" style="margin-bottom:6px">outgoing · 2</div>
+        <div style="display:flex;flex-direction:column;gap:4px;font:11px ui-sans-serif">
+          <div style="display:flex;gap:7px;align-items:center"><span class="dot" style="background:#6fb08c;width:7px;height:7px"></span>zettelkasten</div>
+          <div style="display:flex;gap:7px;align-items:center;color:#b0553a"><span style="font:10px ui-monospace">✕</span>notes-evergreen <span class="mut">dangling</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div style="border-top:1.5px solid #2a2a28;background:#f2f0eb;padding:7px 14px;display:flex;align-items:center;gap:14px;font:10px ui-monospace,Menlo,monospace;color:#6a675f">
+  <span style="font-weight:700;color:#b0553a">open loops 6</span>
+  <span>3 captures unsummarised</span><span>·</span><span>2 dangling</span><span>·</span><span>2 typeless</span>
+  <div style="flex:1"></div><span class="kb">⌃⌥o expand drawer</span>
+</div>
+</div>
+</div>
+</div>
+
+<div class="dv-opt" id="1c">
+<div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>Chromeless writing surface — the page is the app, everything else is a palette</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:660px;background:#f6f4ee;position:relative">
+  <div style="position:absolute;top:14px;left:16px;display:flex;gap:8px;align-items:center"><span class="lbl">notes-atomiques</span><span class="chip">claim</span></div>
+  <div style="position:absolute;top:14px;right:16px;display:flex;gap:8px;align-items:center">
+    <span style="display:flex;gap:5px;align-items:center;font:10px ui-monospace;color:#b0553a"><span style="width:7px;height:7px;border-radius:50%;background:#b0553a"></span>6</span>
+    <span class="kb">⌘K</span>
+  </div>
+  <div style="flex:1;display:flex;align-items:flex-start;justify-content:center;padding-top:64px">
+    <div style="width:530px" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 24px/1.2 'EB Garamond',Georgia,serif;margin-bottom:16px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:15px;line-height:1.55">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk">notes-evergreen</span><span style="color:#b0553a;font:10px ui-monospace;vertical-align:super">?</span>.</div>
+      <div style="font-size:15px;line-height:1.55;margin-top:12px;color:#26251f">La recombinaison suppose que chaque fiche tienne seule<span style="border-left:1.5px solid #26251f">&nbsp;</span><span style="color:#a8a49b">#l("fichiers-simples")<span class="kb" style="margin-left:6px">tab</span></span></div>
+      <p class="ann" style="margin:10px 0 0">ghost-text suggestion sits in the sentence you are already writing (v3, but the layout must leave room for it now)</p>
+    </div>
+  </div>
+  <div style="position:absolute;left:50%;top:96px;transform:translateX(300px);width:190px;display:flex;flex-direction:column;gap:14px">
+    <div><div class="lbl" style="margin-bottom:6px">linked here</div>
+      <div style="font:11px/1.7 ui-sans-serif;color:#6a675f">Zettelkasten<br>digest-smart-notes</div></div>
+    <div><div class="lbl" style="margin-bottom:6px">goes to</div>
+      <div style="font:11px/1.7 ui-sans-serif;color:#6a675f">zettelkasten<br><span style="color:#b0553a">notes-evergreen ✕</span></div></div>
+    <p class="ann" style="margin:0">margin notes, not a panel</p>
+  </div>
+  <div style="position:absolute;left:50%;bottom:0;transform:translate(-50%,0);margin-bottom:25px;width:520px;background:#fff;border:1.5px solid #2a2a28;border-bottom:0;box-shadow:0 -12px 30px rgba(0,0,0,.16)">
+    <div style="padding:10px 12px;border-bottom:1px solid #ddd9d0;font:13px ui-monospace,Menlo,monospace">zettel<span style="border-left:1.5px solid #26251f">&nbsp;</span><span class="mut" style="float:right;font-size:9px">jump · create · capture · today</span></div>
+    <div class="li"><span class="dot" style="background:#6fb08c"></span><span class="ti">Zettelkasten</span><span class="mut" style="font:9px ui-monospace;margin-left:auto">concept · open</span></div>
+    <div class="li"><span class="dot" style="background:#b6b3ab"></span><span class="ti mut">capture-articles-zettel</span><span class="mut" style="font:9px ui-monospace;margin-left:auto">capture · promote</span></div>
+    <div class="li"><span class="dot" style="background:#b5b0a6;border:1px dashed #a09d95;background:transparent"></span><span class="ti">Digest : How to Take Smart Notes</span><span class="mut" style="font:9px ui-monospace;margin-left:auto">generated</span></div>
+    <div class="li" style="border:0"><span style="font:10px ui-monospace;color:#b0553a">＋</span><span class="ti">create “zettel…” as</span><div style="display:flex;gap:5px;margin-left:auto"><span class="chip">concept</span><span class="chip">claim</span><span class="chip">idea</span></div></div>
+  </div>
+  <div style="border-top:1px solid #ddd9d0;padding:6px 14px;display:flex;gap:16px;font:10px ui-monospace,Menlo,monospace;color:#8a877f;background:#f2f0eb"><span>claim</span><span>#méthode</span><span>origin smart-notes</span><div style="flex:1"></div><span>2 backlinks</span><span style="color:#b0553a">1 dangling</span></div>
+</div>
+</div>
+</div>
+
+<div class="dv-opt" id="1d">
+<div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a>Literal card table — physical fiches from v0, list view is a drawer of cards</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:660px;background:#cfc7b4">
+<div class="wtop" style="background:#e3ddcd;border-bottom-color:#2a2a28"><span style="font-weight:700;color:#26251f">the table</span><span class="mut">9 fiches · permanent</span><div style="flex:1"></div><span class="chip" style="background:#fffdf6">filter: type</span><span class="chip" style="background:#fffdf6">#méthode</span><span class="kb" style="background:#fffdf6">⌘K jump</span></div>
+<div style="flex:1;position:relative;padding:22px;overflow:hidden">
+  <div class="paper" style="position:absolute;left:34px;top:34px;width:210px;height:132px;padding:12px 14px;transform:rotate(-1.4deg)">
+    <div style="font:9px ui-monospace;color:#98958d;border-bottom:.5px solid #c9c2b0;padding-bottom:4px;margin-bottom:8px">person · luhmann</div>
+    <div class="typ" style="font:600 15px/1.2 'EB Garamond',Georgia,serif">Niklas Luhmann</div>
+    <div class="typ" style="font-size:12px;line-height:18px;color:#4a483f;margin-top:6px">Sociologue allemand, créateur du <span class="lnk">zettelkasten</span> original sur fiches papier.</div>
+    <span class="dot" style="position:absolute;right:10px;top:10px;background:#c98a72"></span>
+  </div>
+  <div class="paper" style="position:absolute;left:290px;top:64px;width:230px;height:150px;padding:12px 14px;transform:rotate(.8deg)">
+    <div style="font:9px ui-monospace;color:#98958d;border-bottom:.5px solid #c9c2b0;padding-bottom:4px;margin-bottom:8px">concept · zettelkasten · #méthode</div>
+    <div class="typ" style="font:600 15px/1.2 'EB Garamond',Georgia,serif">Zettelkasten</div>
+    <div class="typ" style="font-size:12px;line-height:18px;color:#4a483f;margin-top:6px">Système de notes atomiques reliées entre elles, popularisé par <span class="lnk">luhmann</span>. La valeur vient des liens : voir <span class="lnk">notes-atomiques</span>.</div>
+  </div>
+  <div class="paper" style="position:absolute;left:560px;top:30px;width:200px;height:118px;padding:12px 14px;transform:rotate(-.6deg)">
+    <div style="font:9px ui-monospace;color:#98958d;border-bottom:.5px solid #c9c2b0;padding-bottom:4px;margin-bottom:8px">source · smart-notes · #livre</div>
+    <div class="typ" style="font:600 15px/1.2 'EB Garamond',Georgia,serif">How to Take Smart Notes</div>
+    <div class="typ" style="font-size:12px;line-height:18px;color:#4a483f;margin-top:6px">Sönke Ahrens, 2017.</div>
+  </div>
+  <div class="paper" style="position:absolute;left:78px;top:206px;width:236px;height:120px;padding:12px 14px;transform:rotate(1.2deg);background:#f3efe2;box-shadow:none;opacity:.85">
+    <div style="font:9px ui-monospace;color:#98958d;border-bottom:.5px solid #c9c2b0;padding-bottom:4px;margin-bottom:8px">capture · 07-22 · 3d unsummarised</div>
+    <div class="typ" style="font-size:12px;line-height:18px;color:#6a675f">« Zettelkasten method — a knowledge management system based on networked atomic notes. »</div>
+    <div style="position:absolute;right:10px;bottom:8px;font:9px ui-monospace;color:#b0553a">summary empty</div>
+  </div>
+  <div class="paper" style="position:absolute;left:600px;top:300px;width:200px;height:110px;padding:12px 14px;transform:rotate(-1deg);background:#fffdf6;border-style:dashed">
+    <div style="font:9px ui-monospace;color:#98958d;padding-bottom:4px;margin-bottom:6px">generated · disposable</div>
+    <div class="typ" style="font:600 14px/1.2 'EB Garamond',Georgia,serif">Digest : How to Take Smart Notes</div>
+  </div>
+  <div class="paper" style="position:absolute;left:352px;top:262px;width:250px;height:180px;padding:14px 16px;transform:rotate(0);box-shadow:0 14px 34px rgba(0,0,0,.28);z-index:3;border:1.5px solid #2a2a28">
+    <div style="font:9px ui-monospace;color:#98958d;border-bottom:.5px solid #c9c2b0;padding-bottom:4px;margin-bottom:8px">claim · notes-atomiques · from smart-notes</div>
+    <div class="typ" style="font:600 16px/1.2 'EB Garamond',Georgia,serif">Les notes atomiques se recombinent mieux</div>
+    <div class="typ" style="font-size:12px;line-height:18px;color:#4a483f;margin-top:8px">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span style="color:#b0553a">notes-evergreen</span>.</div>
+    <div style="position:absolute;left:14px;right:14px;bottom:10px;display:flex;gap:8px;align-items:center"><span class="kb">enter edit</span><span class="kb">esc put back</span></div>
+  </div>
+  <p class="ann" style="position:absolute;left:352px;top:450px;width:250px;margin:0">picked up card lifts, straightens and shadows; the table stays visible around it</p>
+  <div style="position:absolute;right:22px;top:22px;width:250px;background:#fffdf6;border:1.5px solid #2a2a28;padding:12px 14px">
+    <div class="lbl" style="margin-bottom:8px;color:#b0553a">open loops · 6</div>
+    <div style="display:flex;flex-direction:column;gap:7px;font:11px/1.35 ui-sans-serif">
+      <div style="display:flex;justify-content:space-between"><span>capture-articles-zettel</span><span class="mut" style="font:9px ui-monospace">3d</span></div>
+      <div style="display:flex;justify-content:space-between"><span>capture-idee-canvas</span><span class="mut" style="font:9px ui-monospace">2d</span></div>
+      <div style="height:1px;background:#e3ddcd"></div>
+      <div style="display:flex;justify-content:space-between"><span>notes-evergreen ✕</span><span class="mut" style="font:9px ui-monospace">dangling</span></div>
+      <div style="display:flex;justify-content:space-between"><span>sans-type</span><span class="mut" style="font:9px ui-monospace">no type</span></div>
+      <div style="display:flex;justify-content:space-between"><span>sans-meta.typ</span><span class="mut" style="font:9px ui-monospace">unparseable</span></div>
+    </div>
+    <p class="ann" style="margin:10px 0 0">debt as a pinned index card, not chrome</p>
+  </div>
+  <div style="position:absolute;left:22px;bottom:18px;display:flex;gap:6px;align-items:center"><span class="lbl">zoom</span><span class="kb" style="background:#fffdf6">dots</span><span class="kb" style="background:#fffdf6">titles</span><span class="kb" style="background:#26251f;color:#fff;border-color:#26251f">bodies</span></div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="dv-opt" id="1e">
+<div class="dv-olabel"><a class="dv-oid" href="#1e">1e</a>Journal spine — today is home, permanent notes are reached through what you wrote</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:660px">
+<div class="wtop"><span style="font-weight:700;color:#26251f">today</span><span class="mut">2026-07-23 · thursday · w30</span><div style="flex:1"></div><span class="kb">⌘K</span><span class="kb">⌘⇧C</span></div>
+<div style="flex:1;display:flex;min-height:0">
+  <div style="width:132px;border-right:1px solid #ddd9d0;background:#f8f7f3;padding:12px 0;display:flex;flex-direction:column">
+    <div class="lbl" style="padding:0 12px 8px">spine</div>
+    <div style="padding:5px 12px;font:11px ui-monospace;color:#8a877f">2026-w30</div>
+    <div style="padding:5px 12px;font:11px ui-monospace;color:#8a877f">07-21 mon</div>
+    <div style="padding:5px 12px;font:11px ui-monospace;color:#8a877f">07-22 wed</div>
+    <div style="padding:5px 12px;font:11px ui-monospace;background:#26251f;color:#fff">07-23 thu</div>
+    <div style="padding:5px 12px;font:11px ui-monospace;color:#c4c1b8">07-24 fri</div>
+    <div style="margin-top:auto;padding:0 12px"><p class="ann" style="margin:0">time notes never reach the canvas — they are the on-ramp</p></div>
+  </div>
+  <div style="flex:1.35;border-right:1px solid #ddd9d0;padding:22px 34px;min-width:0" class="typ">
+    <div class="mrule">2026-07-23 · daily</div>
+    <div style="font:600 22px/1.2 'EB Garamond',Georgia,serif;margin-bottom:4px">2026-07-23</div>
+    <div style="font:11px ui-monospace,Menlo,monospace;color:#8a877f;margin-bottom:18px"><span class="lnk">2026-07-22</span> | <span style="color:#c4c1b8">next</span></div>
+    <div style="font:600 12px ui-sans-serif;letter-spacing:.04em;color:#8a877f;margin-bottom:6px">CITATIONS</div>
+    <div class="ph" style="height:34px;margin-bottom:16px">empty section — stays empty, no nagging</div>
+    <div style="font:600 12px ui-sans-serif;letter-spacing:.04em;color:#8a877f;margin-bottom:6px">TÂCHES</div>
+    <div style="font-size:14px;line-height:1.7;margin-bottom:16px">☐ finir le gabarit du vault<br>☑ écrire les fiches d'exemple</div>
+    <div style="font:600 12px ui-sans-serif;letter-spacing:.04em;color:#8a877f;margin-bottom:6px">NOTES</div>
+    <div style="font-size:14px;line-height:1.55">Fini le gabarit du vault ; détails dans <span class="lnk">smart-notes</span>.</div>
+    <div style="margin-top:10px;border:1px solid #b0553a;background:#fdf6f3;padding:7px 10px;font:12px ui-monospace,Menlo,monospace">Idée de zoom sémantique pour le canevas de #l("note-system")<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+    <p class="ann" style="margin:8px 0 0">writing in today's note is the primary act; promotion happens from here</p>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <div style="display:flex;gap:0;border-bottom:1px solid #ddd9d0">
+      <div style="padding:8px 12px;border-bottom:2px solid #26251f;font:10px ui-monospace">mentioned today</div>
+      <div style="padding:8px 12px;font:10px ui-monospace;color:#8a877f">open loops 6</div>
+    </div>
+    <div style="padding:12px;display:flex;flex-direction:column;gap:8px">
+      <div style="border:1px solid #d8d3c6;padding:9px 11px;background:#fff;border-left:3px solid #a8b06a">
+        <div class="ti">How to Take Smart Notes</div>
+        <div class="typ mut" style="font-size:12px;line-height:1.4;margin-top:4px">Sönke Ahrens, 2017. Présente la méthode de <span class="lnk">luhmann</span>.</div>
+      </div>
+      <div style="border:1px solid #d8d3c6;padding:9px 11px;background:#fff;border-left:3px solid #c988ae">
+        <div class="ti">Note system</div>
+        <div class="typ mut" style="font-size:12px;line-height:1.4;margin-top:4px">Application Dioxus remplaçant Obsidian et le zettelkasten typst manuel.</div>
+      </div>
+      <div style="border:1px dashed #b6b3ab;padding:9px 11px;background:#f6f5f1">
+        <div class="ti mut">capture-idee-canvas</div>
+        <div class="mut" style="font:9px ui-monospace;margin-top:4px">captured 2 days ago · no summary</div>
+        <div style="display:flex;gap:6px;margin-top:7px"><span class="chip">promote → concept</span><span class="chip">idea</span></div>
+      </div>
+      <div class="ph" style="height:58px">strongest links of what you wrote today · candidates to promote</div>
+      <p class="ann" style="margin:2px 0 0">right rail is a consequence of the left, never a file browser</p>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="dv-opt" id="1f">
+<div class="dv-olabel"><a class="dv-oid" href="#1f">1f</a>Dense workbench — split source/render, tabbed panels, everything keyboard-labelled</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:660px;font-size:11px">
+<div class="wtop" style="padding:5px 10px"><span style="font-weight:700;color:#26251f">vault</span><span>9 permanent · 4 time · 2 capture · 1 generated</span><div style="flex:1"></div><span style="color:#b0553a">loops 6</span><span>idx ok 12:04</span><span>watcher ●</span></div>
+<div style="display:flex;border-bottom:1px solid #ddd9d0;background:#f8f7f3;font:10px ui-monospace,Menlo,monospace">
+  <div style="padding:5px 10px;background:#fff;border-right:1px solid #ddd9d0;border-bottom:1px solid #fff">notes-atomiques.typ</div>
+  <div style="padding:5px 10px;border-right:1px solid #ddd9d0;color:#8a877f">2026-07-23.typ</div>
+  <div style="padding:5px 10px;border-right:1px solid #ddd9d0;color:#8a877f">zettelkasten.typ</div>
+  <div style="padding:5px 10px;color:#b0553a">capture-idee-canvas.typ •</div>
+</div>
+<div style="flex:1;display:flex;min-height:0">
+  <div style="width:168px;border-right:1px solid #ddd9d0;padding:8px 0;font:10px ui-monospace,Menlo,monospace;color:#4a483f">
+    <div style="padding:3px 10px;color:#8a877f">vault/</div>
+    <div style="padding:3px 10px 3px 20px">templates/</div>
+    <div style="padding:3px 10px 3px 20px">time/ <span style="color:#8a877f">4</span></div>
+    <div style="padding:3px 10px 3px 20px">permanent/ <span style="color:#8a877f">9</span></div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#7f96c9"></span>fichiers-simples</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#6fb08c"></span>liens-pieges</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#c98a72"></span>luhmann</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center;background:#f2f0eb"><span class="dot" style="width:6px;height:6px;background:#6fa8b0"></span>notes-atomiques</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#c988ae"></span>note-system</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#fff;border:1px solid #b0553a"></span>sans-meta</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#fff;border:1px solid #b0553a"></span>sans-type</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#a8b06a"></span>smart-notes</div>
+    <div style="padding:2px 10px 2px 32px;display:flex;gap:6px;align-items:center"><span class="dot" style="width:6px;height:6px;background:#6fb08c"></span>zettelkasten</div>
+    <div style="padding:3px 10px 3px 20px">capture/ <span style="color:#b0553a">2</span></div>
+    <div style="padding:3px 10px 3px 20px">generated/ <span style="color:#8a877f">1</span></div>
+    <div style="padding:3px 10px 3px 20px;color:#8a877f">.index/</div>
+  </div>
+  <div style="flex:1;border-right:1px solid #ddd9d0;display:flex;flex-direction:column;min-width:0">
+    <div style="padding:4px 10px;border-bottom:1px solid #ddd9d0;background:#f8f7f3" class="lbl">source</div>
+    <div style="flex:1;padding:10px;font:11px/1.65 ui-monospace,Menlo,monospace;color:#3a3833;background:#fcfbf8">
+      <div style="color:#a8a49b">1&nbsp; #import "/templates/template.typ": *</div>
+      <div style="color:#a8a49b">2&nbsp; #show: note</div>
+      <div>3&nbsp; #meta(</div>
+      <div>4&nbsp; &nbsp; id: <span style="color:#6b7d3f">"notes-atomiques"</span>,</div>
+      <div>5&nbsp; &nbsp; type: <span style="color:#6b7d3f">"claim"</span>,</div>
+      <div>6&nbsp; &nbsp; created: <span style="color:#6b7d3f">"2026-07-22"</span>,</div>
+      <div>7&nbsp; &nbsp; tags: (<span style="color:#6b7d3f">"méthode"</span>,),</div>
+      <div>8&nbsp; &nbsp; origin: <span style="color:#6b7d3f">"smart-notes"</span>,</div>
+      <div>9&nbsp; )</div>
+      <div>10 = Les notes atomiques se recombinent mieux</div>
+      <div>11</div>
+      <div>12 Une note = une idée : c'est ce qui rend</div>
+      <div>13 le <span class="lnk">#l("zettelkasten")</span> génératif.</div>
+      <div style="background:#fdf6f3">14 À rapprocher des <span style="color:#b0553a">#l("notes-evergreen")</span><span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+    </div>
+  </div>
+  <div style="flex:1;border-right:1px solid #ddd9d0;display:flex;flex-direction:column;min-width:0">
+    <div style="padding:4px 10px;border-bottom:1px solid #ddd9d0;background:#f8f7f3;display:flex" class="lbl"><span>rendered</span><span style="margin-left:auto;text-transform:none;letter-spacing:0">recompiled 38 ms</span></div>
+    <div style="flex:1;padding:16px 20px;background:#fff" class="typ">
+      <div class="mrule">notes-atomiques · claim · from smart-notes · #méthode</div>
+      <div style="font:600 17px/1.2 'EB Garamond',Georgia,serif;margin-bottom:10px">Les notes atomiques se recombinent mieux</div>
+      <div style="font-size:13px;line-height:1.5">Une note = une idée : c'est ce qui rend le <span class="lnk">zettelkasten</span> génératif. À rapprocher des <span class="lnk" style="text-decoration:underline wavy #b0553a">notes-evergreen</span>.</div>
+    </div>
+  </div>
+  <div style="width:246px;display:flex;flex-direction:column">
+    <div style="display:flex;border-bottom:1px solid #ddd9d0;background:#f8f7f3;font:10px ui-monospace,Menlo,monospace">
+      <div style="padding:5px 8px;background:#fff;border-right:1px solid #ddd9d0">links</div>
+      <div style="padding:5px 8px;border-right:1px solid #ddd9d0;color:#b0553a">loops 6</div>
+      <div style="padding:5px 8px;color:#8a877f">meta</div>
+    </div>
+    <div style="padding:10px;display:flex;flex-direction:column;gap:10px">
+      <div><div class="lbl" style="margin-bottom:5px">in · 2</div>
+        <div style="font:11px/1.6 ui-sans-serif;color:#4a483f">zettelkasten <span class="mut">« voir … »</span><br>digest-smart-notes</div></div>
+      <div><div class="lbl" style="margin-bottom:5px">out · 2</div>
+        <div style="font:11px/1.6 ui-sans-serif;color:#4a483f">zettelkasten<br><span style="color:#b0553a">notes-evergreen — dangling</span></div></div>
+      <div style="height:1px;background:#ece9e3"></div>
+      <div><div class="lbl" style="margin-bottom:5px">insert link</div>
+        <div style="border:1px solid #d8d3c6;padding:5px 7px;font:11px ui-monospace">zett<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+        <div class="li" style="padding:4px 0;border:0"><span class="dot" style="width:6px;height:6px;background:#6fb08c"></span><span style="font:11px ui-sans-serif">zettelkasten</span><span class="kb" style="margin-left:auto">↵</span></div>
+        <div class="li" style="padding:4px 0;border:0"><span class="dot" style="width:6px;height:6px;background:#b6b3ab"></span><span style="font:11px ui-sans-serif">capture-articles-zettel</span></div>
+      </div>
+      <p class="ann" style="margin:0">no mode switch: source and render are always both true</p>
+    </div>
+  </div>
+</div>
+<div style="border-top:1px solid #ddd9d0;background:#f2f0eb;padding:4px 10px;display:flex;gap:14px;font:9px ui-monospace,Menlo,monospace;color:#6a675f"><span>INSERT</span><span>14:31</span><span>claim</span><span>autosave 1 s</span><div style="flex:1"></div><span class="kb">⌥1 links</span><span class="kb">⌥2 loops</span><span class="kb">⌥3 tree</span></div>
+</div>
+</div>
+</div>
+
+<div class="dv-opt" id="1g">
+<div class="dv-olabel"><a class="dv-oid" href="#1g">1g</a>Debt-first — home is the open-loops board; notes open as a slide-over</div>
+<div class="dv-card" style="width:1120px;border:1.5px solid #2a2a28">
+<div class="w" style="height:660px;background:#f6f4ee">
+<div class="wtop"><span style="font-weight:700;color:#26251f">open loops</span><span class="mut">6 items · oldest 3 days</span><div style="flex:1"></div><span class="chip">write</span><span class="chip">table</span><span class="chip" style="background:#26251f;color:#fff;border-color:#26251f">loops</span></div>
+<div style="flex:1;display:flex;gap:0;min-height:0">
+  <div style="flex:1;padding:16px;display:flex;gap:14px;min-width:0">
+    <div style="flex:1;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;align-items:baseline;gap:7px"><span class="lbl">captures to summarise</span><span style="font:9px ui-monospace;color:#b0553a">2</span></div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:10px 11px">
+        <div class="mut" style="font:9px ui-monospace;display:flex;justify-content:space-between"><span>capture-articles-zettel</span><span style="color:#b0553a">3 d</span></div>
+        <div class="typ" style="font-size:12px;line-height:1.45;margin-top:6px;color:#4a483f">« Zettelkasten method — a knowledge management system based on networked atomic notes. »</div>
+        <div style="display:flex;gap:5px;margin-top:9px"><span class="chip">write summary</span><span class="chip">promote</span><span class="chip">drop</span></div>
+        <div style="height:3px;background:#f0ece1;margin-top:9px"><div style="width:60%;height:3px;background:#b0553a"></div></div>
+      </div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:10px 11px">
+        <div class="mut" style="font:9px ui-monospace;display:flex;justify-content:space-between"><span>capture-idee-canvas</span><span>2 d</span></div>
+        <div class="typ" style="font-size:12px;line-height:1.45;margin-top:6px;color:#4a483f">points → titres → corps rendus, selon le niveau de zoom</div>
+        <div style="display:flex;gap:5px;margin-top:9px"><span class="chip">write summary</span><span class="chip">promote</span></div>
+        <div style="height:3px;background:#f0ece1;margin-top:9px"><div style="width:40%;height:3px;background:#c9a86a"></div></div>
+      </div>
+      <p class="ann" style="margin:0">age is a bar, not a red badge — it never blocks anything</p>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;align-items:baseline;gap:7px"><span class="lbl">dangling links</span><span style="font:9px ui-monospace;color:#b0553a">2</span></div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:10px 11px">
+        <div class="ti">notes-evergreen</div>
+        <div class="mut" style="font:9px ui-monospace;margin-top:4px">referenced by notes-atomiques</div>
+        <div class="typ mut" style="font-size:12px;margin-top:6px">« À rapprocher des <span style="color:#b0553a">notes-evergreen</span>. »</div>
+        <div style="display:flex;gap:5px;margin-top:9px"><span class="chip">create as claim</span><span class="chip">edit link</span></div>
+      </div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:10px 11px">
+        <div class="ti">2026-07-24</div>
+        <div class="mut" style="font:9px ui-monospace;margin-top:4px">next-day link in today's note</div>
+        <div style="display:flex;gap:5px;margin-top:9px"><span class="chip">expected — ignore</span></div>
+      </div>
+      <div class="ph" style="height:44px">links inside comments / raw blocks are not counted (liens-pieges)</div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;align-items:baseline;gap:7px"><span class="lbl">metadata anomalies</span><span style="font:9px ui-monospace;color:#b0553a">2</span></div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:10px 11px">
+        <div class="ti">sans-type</div>
+        <div class="mut" style="font:9px ui-monospace;margin-top:4px">#meta present · type missing</div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px"><span class="chip" style="border-color:#6fb08c">concept</span><span class="chip" style="border-color:#6fa8b0">claim</span><span class="chip" style="border-color:#7f96c9">idea</span><span class="chip" style="border-color:#a888c9">personal</span></div>
+      </div>
+      <div style="border:1px solid #d8d3c6;background:#fff;padding:10px 11px">
+        <div class="ti">sans-meta.typ</div>
+        <div class="mut" style="font:9px ui-monospace;margin-top:4px">no #meta call found · parsed, not crashed</div>
+        <div style="display:flex;gap:5px;margin-top:9px"><span class="chip">insert #meta</span><span class="chip">open file</span></div>
+      </div>
+      <p class="ann" style="margin:0">malformed meta is data, per the ADR — it lands here instead of erroring</p>
+    </div>
+  </div>
+  <div style="width:400px;border-left:1.5px solid #2a2a28;background:#fff;display:flex;flex-direction:column">
+    <div style="padding:8px 14px;border-bottom:1px solid #ddd9d0;display:flex;align-items:center;gap:8px"><span class="lbl">slide-over · capture-articles-zettel</span><span class="kb" style="margin-left:auto">esc</span></div>
+    <div style="flex:1;padding:20px 24px" class="typ">
+      <div class="mrule">capture-articles-zettel · capture · 2026-07-22</div>
+      <div style="font:600 12px ui-sans-serif;letter-spacing:.04em;color:#8a877f;margin-bottom:6px">RÉSUMÉ</div>
+      <div style="border:1px solid #b0553a;background:#fdf6f3;padding:9px 11px;font:12px ui-monospace,Menlo,monospace;min-height:52px">Le zettelkasten est d'abord un réseau<span style="border-left:1.5px solid #26251f">&nbsp;</span></div>
+      <div style="font:600 12px ui-sans-serif;letter-spacing:.04em;color:#8a877f;margin:16px 0 6px">ORIGINAL</div>
+      <div style="font-size:13px;line-height:1.5;color:#4a483f">Collé depuis le navigateur : « Zettelkasten method — a knowledge management system based on networked atomic notes. »</div>
+      <div style="margin-top:18px;border-top:1px solid #ece9e3;padding-top:12px;display:flex;flex-direction:column;gap:8px">
+        <div class="lbl">promote to permanent</div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px"><span class="chip" style="border-color:#6fb08c">concept</span><span class="chip" style="border-color:#6fa8b0">claim</span><span class="chip" style="border-color:#a8b06a">source</span><span class="chip" style="border-color:#7f96c9">idea</span></div>
+        <div class="mut" style="font:10px ui-monospace">original kept as an appendix block</div>
+      </div>
+      <p class="ann" style="margin:14px 0 0">writing the summary is the whole promotion — no accept button anywhere</p>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+</div>
+
+</div>
+<p class="dv-next">Try next: "take <a class="dv-oid" href="#1b">1b</a> to hi-fi" · "merge <a class="dv-oid" href="#1c">1c</a>'s margin backlinks into <a class="dv-oid" href="#1f">1f</a>" · "fewer type colours in <a class="dv-oid" href="#1a">1a</a>" · "show <a class="dv-oid" href="#1d">1d</a> at the dots and titles zoom levels"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;writingWidth&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:620,&quot;min&quot;:420,&quot;max&quot;:820,&quot;step&quot;:20,&quot;unit&quot;:&quot;px&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Card writing&quot;},&quot;backdropDim&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:0.4,&quot;min&quot;:0,&quot;max&quot;:0.85,&quot;step&quot;:0.05,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Card writing&quot;},&quot;cardColour&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;left bar&quot;,&quot;dot&quot;,&quot;none&quot;],&quot;default&quot;:&quot;left bar&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Cards&quot;},&quot;showNotes&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Cards&quot;},&quot;seasonBand&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Logs&quot;}}">class Component extends DCLogic {
+  renderVals() {
+    const p = this.props || {};
+    const mode = p.cardColour ?? "left bar";
+    return {
+      sheetW: (p.writingWidth ?? 620) + "px",
+      dimOpacity: String(p.backdropDim ?? 0.4),
+      barW: mode === "left bar" ? "3px" : "0px",
+      dotDisplay: mode === "dot" ? "block" : "none",
+      noteDisplay: (p.showNotes ?? true) ? "block" : "none",
+      seasonDisplay: (p.seasonBand ?? true) ? "flex" : "none"
+    };
+  }
+}</script>
+</body>
+</html>
