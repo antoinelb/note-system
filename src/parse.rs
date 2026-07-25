@@ -22,10 +22,16 @@ pub fn parse_note(source: &str) -> ParsedNote {
         {
             match name.as_str() {
                 "meta" => match &mut meta {
-                    MetaStatus::Missing => meta = MetaStatus::Present(extract_meta(call)),
-                    MetaStatus::Present(m) => m.anomalies.push(MetaAnomaly::DuplicateMeta),
+                    MetaStatus::Missing => {
+                        meta = MetaStatus::Present(extract_meta(call))
+                    }
+                    MetaStatus::Present(m) => {
+                        m.anomalies.push(MetaAnomaly::DuplicateMeta)
+                    }
                 },
-                "l" => links.extend(extract_link_target(call).map(|target| Link { target })),
+                "l" => links.extend(
+                    extract_link_target(call).map(|target| Link { target }),
+                ),
                 _ => {}
             }
         }
@@ -50,14 +56,18 @@ fn extract_meta(call: ast::FuncCall) -> Meta {
                     named.expr().to_untyped().full_text().to_string(),
                 )),
             },
-            ast::Arg::Pos(expr) => meta.anomalies.push(MetaAnomaly::MalformedField(
-                "<positional>".to_string(),
-                expr.to_untyped().full_text().to_string(),
-            )),
-            ast::Arg::Spread(spread) => meta.anomalies.push(MetaAnomaly::MalformedField(
-                "<spread>".to_string(),
-                spread.to_untyped().full_text().to_string(),
-            )),
+            ast::Arg::Pos(expr) => {
+                meta.anomalies.push(MetaAnomaly::MalformedField(
+                    "<positional>".to_string(),
+                    expr.to_untyped().full_text().to_string(),
+                ))
+            }
+            ast::Arg::Spread(spread) => {
+                meta.anomalies.push(MetaAnomaly::MalformedField(
+                    "<spread>".to_string(),
+                    spread.to_untyped().full_text().to_string(),
+                ))
+            }
         }
     }
     meta
@@ -197,7 +207,8 @@ mod tests {
 
     #[test]
     fn unparseable_created_keeps_other_fields() {
-        let meta = present(parse_note(r#"#meta(id: "x", created: "july 21st")"#));
+        let meta =
+            present(parse_note(r#"#meta(id: "x", created: "july 21st")"#));
         assert_eq!(meta.id, Some(NoteId("x".to_string())));
         assert_eq!(meta.created, None);
         assert_eq!(

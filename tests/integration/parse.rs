@@ -2,7 +2,9 @@
 //! notes and links (phase-2 exit criterion).
 
 use jiff::civil::date;
-use note_system::domain::{Link, Meta, MetaAnomaly, MetaStatus, NoteId, NoteType};
+use note_system::domain::{
+    Link, Meta, MetaAnomaly, MetaStatus, NoteId, NoteType,
+};
 use note_system::parse::{ParsedNote, parse_note};
 
 #[test]

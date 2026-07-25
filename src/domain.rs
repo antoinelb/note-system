@@ -3,7 +3,7 @@ use jiff::civil::Date;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteCategory {
     Permanent,
     Time,
@@ -19,6 +19,15 @@ impl NoteCategory {
             "capture" => Some(NoteCategory::Capture),
             "generated" => Some(NoteCategory::Generated),
             _ => None,
+        }
+    }
+
+    pub fn as_dir(&self) -> &'static str {
+        match self {
+            NoteCategory::Permanent => "permanent",
+            NoteCategory::Time => "time",
+            NoteCategory::Capture => "capture",
+            NoteCategory::Generated => "generated",
         }
     }
 }
@@ -56,6 +65,24 @@ impl NoteType {
             "seasonal" => NoteType::Seasonal,
             "generated" => NoteType::Generated,
             unknown_name => NoteType::Unknown(unknown_name.to_string()),
+        }
+    }
+
+    pub fn as_name(&self) -> &str {
+        match self {
+            NoteType::Person => "person",
+            NoteType::Organisation => "organisation",
+            NoteType::Source => "source",
+            NoteType::Concept => "concept",
+            NoteType::Claim => "claim",
+            NoteType::Idea => "idea",
+            NoteType::Personal => "personal",
+            NoteType::Project => "project",
+            NoteType::Daily => "daily",
+            NoteType::Weekly => "weekly",
+            NoteType::Seasonal => "seasonal",
+            NoteType::Generated => "generated",
+            NoteType::Unknown(name) => name,
         }
     }
 }
@@ -142,8 +169,60 @@ mod tests {
             ("generated", NoteType::Generated),
         ];
         for (name, expected) in cases {
-            assert_eq!(NoteType::from_name(name), expected, "for name {name:?}");
+            assert_eq!(
+                NoteType::from_name(name),
+                expected,
+                "for name {name:?}"
+            );
         }
+    }
+
+    #[test]
+    fn category_dir_names_roundtrip() {
+        let categories = [
+            NoteCategory::Permanent,
+            NoteCategory::Time,
+            NoteCategory::Capture,
+            NoteCategory::Generated,
+        ];
+        for category in categories {
+            assert_eq!(
+                NoteCategory::from_dir(category.as_dir()),
+                Some(category),
+                "for category {category:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn type_names_roundtrip_including_unknown() {
+        let types = [
+            NoteType::Person,
+            NoteType::Organisation,
+            NoteType::Source,
+            NoteType::Concept,
+            NoteType::Claim,
+            NoteType::Idea,
+            NoteType::Personal,
+            NoteType::Project,
+            NoteType::Daily,
+            NoteType::Weekly,
+            NoteType::Seasonal,
+            NoteType::Generated,
+            NoteType::Unknown("concpet".to_string()),
+        ];
+        for note_type in types {
+            assert_eq!(
+                NoteType::from_name(note_type.as_name()),
+                note_type,
+                "for type {note_type:?}"
+            );
+        }
+        // the unknown name is preserved verbatim, not normalized
+        assert_eq!(
+            NoteType::Unknown("Concept".to_string()).as_name(),
+            "Concept"
+        );
     }
 
     #[test]

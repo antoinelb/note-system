@@ -4,13 +4,13 @@ Task breakdown of `plan.md` § Roadmap, v0.
 The plan carries the *what* and *why*; this file carries the *order* and the *state*.
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 
-**Next step → Phase 3, first unchecked box.**
+**Next step → Phase 4, first unchecked box.**
 
 ## How we work
 
 - Unless tagged otherwise: **Antoine writes the code, Claude writes the unit tests and guides.**
 - Items marked **→ ADR** are decisions to take together at the start of the task, then record in `docs/adr/`.
-- A phase is done when its exit criterion holds and `make test` passes with 100% coverage (phases 2+).
+- A phase is done when its exit criterion holds and `make test` passes with 100% coverage (phases 2+); a shortfall on regions is diagnosed per instantiation before writing any test (`adr/2026-07-couverture-100-pourcent-lignes.md`).
 - Per-task loop: discuss approach → decisions become ADRs → Claude guides the implementation → Claude writes tests → Antoine implements until green → commit.
 
 ## Phase 0 — Scaffolding
@@ -56,12 +56,12 @@ Exit: parsing the phase-1 sample vault yields the expected notes and links; `mak
 
 Goal: a queryable index rebuilt from files and kept live by a watcher.
 
-- [ ] Design the schema: notes, links, tags. **→ ADR** (note: positions/suggestions tables are v1/v3 — leave room, don't build them).
-- [ ] Full rebuild: walk the vault, parse (phase 2), populate `.index/`.
-- [ ] Queries: list notes (by category/type/tag), backlinks of a note, dangling links, typeless notes.
-- [ ] File watcher (`notify` crate): update the index on create/modify/delete.
-  - [ ] Debounce bursts; on anything ambiguous, fall back to a full rebuild — it must always be cheap enough for that.
-- [ ] *(Claude)* Tests: rebuild is idempotent, dangling/typeless detection, watcher integration test on a temp vault.
+- [x] Design the schema: notes, links, tags. **→ ADR** (`adr/2026-07-index-rusqlite.md`, `adr/2026-07-schema-index-sqlite.md`, `adr/2026-07-index-jetable-user-version.md`)
+- [x] Full rebuild: walk the vault, parse (phase 2), populate `.index/`.
+- [x] Queries: list notes (by category/type/tag), backlinks of a note, dangling links, typeless notes.
+- [x] File watcher (`notify` crate): update the index on create/modify/delete. **→ ADR** (`adr/2026-07-surveillance-incrementale-du-vault.md`)
+  - [x] Debounce bursts; on anything ambiguous, fall back to a full rebuild — it must always be cheap enough for that.
+- [x] *(Claude)* Tests: rebuild is idempotent, dangling/typeless detection, watcher integration test on a temp vault.
 
 Exit: delete `.index/`, relaunch, everything is back — the invariant "index is always rebuildable" is now enforced by a test.
 
