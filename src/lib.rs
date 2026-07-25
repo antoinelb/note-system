@@ -3,4 +3,6 @@
 pub mod domain;
 pub mod index;
 pub mod parse;
+pub mod render;
+pub mod vault;
 pub mod watch;

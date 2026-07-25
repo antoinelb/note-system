@@ -10,6 +10,10 @@ notify-debouncer-full = "0.7"
 # "hooks" is only used by the fault-injection tests in src/index.rs, but cargo
 # features are not per-profile, so it has to be declared here
 rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "jiff"] }
+typst = "0.15.1"
+typst-kit = { version = "0.15.1", features = ["embedded-fonts"] }
+typst-layout = "0.15.1"
+typst-svg = "0.15.1"
 typst-syntax = "0.15"
 
 [lints.rust]

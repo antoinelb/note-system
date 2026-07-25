@@ -1,0 +1,298 @@
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use typst::diag::{FileError, FileResult, PackageError};
+use typst::foundations::{Bytes, Datetime, Duration};
+use typst::layout::Abs;
+use typst::syntax::{
+    FileId, RootedPath, Source, VirtualPath, VirtualRoot, VirtualizeError,
+};
+use typst::text::{Font, FontBook};
+use typst::utils::LazyHash;
+use typst::{Library, LibraryExt, World};
+use typst_kit::fonts::FontStore;
+use typst_layout::PagedDocument;
+use typst_svg::SvgOptions;
+
+static FONTS: LazyLock<FontStore> = LazyLock::new(|| {
+    let mut font_store = FontStore::new();
+    font_store.extend(typst_kit::fonts::embedded());
+    font_store
+});
+static LIBRARY: LazyLock<LazyHash<Library>> =
+    LazyLock::new(|| LazyHash::new(Library::default()));
+
+pub struct VaultWorld {
+    root: PathBuf,
+    main: FileId,
+    source: Source,
+}
+
+impl VaultWorld {
+    pub fn new(
+        root: &Path,
+        note: &Path,
+        text: String,
+    ) -> Result<VaultWorld, VirtualizeError> {
+        let vpath = VirtualPath::virtualize(root, note)?;
+        let main = RootedPath::new(VirtualRoot::Project, vpath).intern();
+        let source = Source::new(main, text);
+        Ok(VaultWorld {
+            root: root.to_path_buf(),
+            main,
+            source,
+        })
+    }
+
+    fn read(&self, id: FileId) -> FileResult<Vec<u8>> {
+        match id.root() {
+            VirtualRoot::Project => {
+                let path = faults::realize(id.vpath(), &self.root)?;
+                std::fs::read(&path)
+                    .map_err(|err| FileError::from_io(err, &path))
+            }
+            VirtualRoot::Package(spec) => {
+                Err(FileError::Package(PackageError::Other(Some(
+                    format!("{spec} - the vault doesn't use packages").into(),
+                ))))
+            }
+        }
+    }
+}
+
+impl World for VaultWorld {
+    fn library(&self) -> &LazyHash<Library> {
+        &LIBRARY
+    }
+
+    fn book(&self) -> &LazyHash<FontBook> {
+        FONTS.book()
+    }
+
+    fn main(&self) -> FileId {
+        self.main
+    }
+
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        if id == self.main {
+            Ok(self.source.clone())
+        } else {
+            Ok(Source::new(id, String::from_utf8(self.read(id)?)?))
+        }
+    }
+
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        self.read(id).map(Bytes::new)
+    }
+
+    fn font(&self, index: usize) -> Option<Font> {
+        FONTS.font(index)
+    }
+
+    fn today(&self, _: Option<Duration>) -> Option<Datetime> {
+        None
+    }
+}
+
+#[derive(Debug)]
+pub enum RenderError {
+    Path(VirtualizeError),
+    Compile(Vec<String>),
+}
+
+impl From<VirtualizeError> for RenderError {
+    fn from(error: VirtualizeError) -> RenderError {
+        RenderError::Path(error)
+    }
+}
+
+// the hash covers the note's own text, not templates/template.typ: editing
+// the template leaves stale SVGs until restart. Phase 5 wires the phase-3
+// watcher to clear the cache when anything under templates/ changes
+// (adr/2026-07-cache-svg-par-chemin.md)
+#[derive(Debug, Default)]
+pub struct SvgCache {
+    entries: HashMap<PathBuf, (u64, String)>, // note path -> (text hash, svg)
+}
+
+impl SvgCache {
+    pub fn render(
+        &mut self,
+        root: &Path,
+        note: &Path,
+        text: &str,
+    ) -> Result<String, RenderError> {
+        let hash = hash_text(text);
+        match self.entries.get(note) {
+            Some((other_hash, svg)) if hash == *other_hash => {
+                Ok(svg.to_string())
+            }
+            _ => {
+                let svg = render_svg(root, note, text)?;
+                self.entries.insert(note.to_path_buf(), (hash, svg.clone()));
+                Ok(svg)
+            }
+        }
+    }
+}
+
+pub fn render_svg(
+    root: &Path,
+    note: &Path,
+    text: &str,
+) -> Result<String, RenderError> {
+    let world = VaultWorld::new(root, note, text.to_string())?;
+
+    match typst::compile::<PagedDocument>(&world).output {
+        Ok(doc) => Ok(typst_svg::svg_merged(
+            &doc,
+            &SvgOptions::default(),
+            Abs::pt(0.0),
+        )),
+        Err(errors) => Err(RenderError::Compile(
+            errors.into_iter().map(|e| e.message.to_string()).collect(),
+        )),
+    }
+}
+
+/// Stable only within this process: `DefaultHasher` may change across Rust
+/// releases, so these hashes must never be persisted to `.index/`.
+fn hash_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Fault injection for the one error path no real Linux input reaches.
+///
+/// `VirtualPath::realize` fails only when a segment maps to something other
+/// than exactly one normal path component — Windows drive letters and
+/// reserved names. Normalized segments cannot contain `/`, so on Linux the
+/// error branch of the `?` in `read` is unreachable through any real path.
+/// Outside `cfg(test)` the function here is the identity, so the shipped
+/// call is the one the tests exercise. Excluded from coverage for the same
+/// reason as `index::faults`: it is scaffolding, and measuring it would only
+/// measure whichever arm this build compiled.
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod faults {
+    use std::path::{Path, PathBuf};
+
+    use typst::syntax::{RealizeError, VirtualPath};
+
+    #[cfg(not(test))]
+    pub(super) fn realize(
+        vpath: &VirtualPath,
+        root: &Path,
+    ) -> Result<PathBuf, RealizeError> {
+        vpath.realize(root)
+    }
+
+    #[cfg(test)]
+    pub(super) use armed::*;
+
+    #[cfg(test)]
+    mod armed {
+        use std::cell::Cell;
+
+        use super::*;
+
+        // a single fault site, so a flag rather than index::faults' enum
+        thread_local! {
+            static ARMED: Cell<bool> = const { Cell::new(false) };
+        }
+
+        /// Arms the fault until the returned guard drops, so a panicking
+        /// test cannot leak it into the next test on the same thread.
+        pub(in crate::render) fn arm() -> Guard {
+            ARMED.with(|armed| armed.set(true));
+            Guard
+        }
+
+        pub(in crate::render) struct Guard;
+
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                ARMED.with(|armed| armed.set(false));
+            }
+        }
+
+        pub(in crate::render) fn realize(
+            vpath: &VirtualPath,
+            root: &Path,
+        ) -> Result<PathBuf, RealizeError> {
+            if ARMED.with(|armed| armed.get()) {
+                Err(RealizeError::Invalid("armed test fault".into()))
+            } else {
+                vpath.realize(root)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::str::FromStr;
+
+    use typst::syntax::package::PackageSpec;
+
+    use super::*;
+
+    // These three tests exist so one compilation copy of `read` covers it
+    // entirely: llvm-cov folds the unit and integration copies by keeping
+    // the best single copy, and only this copy can reach the armed branch.
+
+    #[test]
+    fn a_project_file_is_read_through_the_sandbox() {
+        let bytes = fixture_world()
+            .read(file_id("/templates/template.typ"))
+            .expect("the template exists in the fixture vault");
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn a_package_file_is_refused_without_a_filesystem_read() {
+        let spec = PackageSpec::from_str("@preview/example:0.1.0")
+            .expect("a well-formed package spec");
+        let id = RootedPath::new(
+            VirtualRoot::Package(spec),
+            VirtualPath::new("/lib.typ").expect("a valid virtual path"),
+        )
+        .intern();
+
+        let error = fixture_world().read(id).unwrap_err();
+        assert!(matches!(error, FileError::Package(_)), "{error:?}");
+    }
+
+    #[test]
+    fn an_unrealizable_path_is_an_error_not_a_panic() {
+        // realize cannot fail on Linux — a normalized segment is always
+        // exactly one normal component — so the branch is reached by arming
+        // the fault
+        let world = fixture_world();
+        let _guard = faults::arm();
+        let error =
+            world.read(file_id("/templates/template.typ")).unwrap_err();
+        assert!(matches!(error, FileError::Realize(_)), "{error:?}");
+    }
+
+    fn fixture_world() -> VaultWorld {
+        let vault =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let note = vault.join("permanent/zettelkasten.typ");
+        // the text is irrelevant to `read`; an empty buffer keeps the
+        // fixture free of a disk read
+        VaultWorld::new(&vault, &note, String::new())
+            .expect("a fixture path inside the vault virtualizes")
+    }
+
+    fn file_id(virtual_path: &str) -> FileId {
+        RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new(virtual_path).expect("a valid virtual path"),
+        )
+        .intern()
+    }
+}
