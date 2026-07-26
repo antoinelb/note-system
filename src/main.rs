@@ -1,10 +1,7 @@
-use dioxus::prelude::*;
+use note_system::{ui, vault};
 
 fn main() {
-    dioxus::launch(App);
-}
-
-#[component]
-fn App() -> Element {
-    rsx! { "Hello world!"}
+    dioxus::LaunchBuilder::new()
+        .with_context(ui::VaultRoot(vault::vault_path()))
+        .launch(ui::App)
 }

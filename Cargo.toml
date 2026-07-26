@@ -24,4 +24,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
 manual_range_contains = "allow"
 
 [dev-dependencies]
+# markup assertions for the UI tests (adr/2026-07-ui-covered-at-100.md)
+dioxus-ssr = "0.7"
 tempfile = "3.27.0"
