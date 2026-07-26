@@ -33,7 +33,7 @@ Directories encode only the four **categories** (permanent, time-based, capture,
 
 ### Time-based notes
 
-Daily, weekly and season notes follow the current Obsidian pattern: prev/next navigation links, quotes section (manually written), task list, notes, "what I learned today". Created from a **template that is itself a note** — editable like any other file, one template per note type. No task engine in v0: tasks are just text; no recurrence, aggregation, or carryover logic yet. Time notes link *to* permanent notes but are excluded from the canvas. All three scales are v0, because the logs screen shows them side by side; the day/week/season chain is derived from the id convention (`2026-07-23`, `2026-w30`, `2026-été`), not from stored links.
+Daily, weekly and season notes follow the current Obsidian pattern: prev/next navigation links, quotes section (manually written), task list, notes, "what I learned today". Created from a **template that is itself a note** — editable like any other file, one template per note type. No task engine in v0: tasks are just text; no recurrence, aggregation, or carryover logic yet. Time notes link *to* permanent notes but are excluded from the canvas. All three scales are v0, because the logs screen shows them side by side; the day/week/season chain is derived from the id convention (`2026-07-23`, `2026-w30`, `2026-summer`), not from stored links.
 
 ### Capture notes
 
@@ -58,15 +58,21 @@ vault/
 ## Screens
 
 Design direction and wireframes: `design/wireframes-v0.md` (layout, palette, chrome and states; a few knobs — sheet width, dim, seasons — stay open until it runs). Decision: `adr/2026-07-two-screens-table-and-logs.md`.
+**On any conflict between this section and the wireframes, the wireframes win** (`adr/2026-07-plan-realigned-with-wireframes.md`).
 
-The app has exactly two screens, with a button each way:
+The app has exactly two screens, one 14×14 stroked icon each way — no text labels:
 
 1. **The table** — the spatial canvas of permanent notes. Where knowledge lives. **v1.**
-2. **The logs** — day, week and season notes on one screen: a time rail on the left where indentation carries the scale, the selected note rendered in the centre with its clickable scale chain, and a jump panel on the right (month calendar marking days that have a note, plus week and season chips). This is the only calendar in the app. **v0.**
+2. **The logs** — day, week and season notes on one screen: a time rail on the left where indentation carries the scale, the selected note rendered in the centre with its clickable scale chain above it and a "captured today" block below it listing that day's captures and generated notes, and a jump panel on the right (a month grid whose day cells encode existence, whose week-number gutter is clickable, and with a season row below it). This is the only calendar in the app. **v0.**
 
-Chrome is greyscale throughout. The only colours are the type bar on cards and a single alert hue for debt and dangling links. Note bodies are rendered typst — the app never restyles them, and the meta line comes from the note itself. Navigating never creates a file; clicking an empty day *offers* to create it from the template.
+Chrome is "one line": the two screen icons left, the open-loops ember right, nothing else.
+The palette is "Deep field" — an indigo void, not greyscale: link edges are constellations with star nodes, and the one warm element is the amber ember and caret.
+**Dark is the main mode and light is a first-class sibling**; every colour goes through a theme variable from the first styled rule (`adr/2026-07-design-language-own-phase.md`).
+Note bodies are rendered typst — the app never restyles them, the meta line is the note's own `#meta` output, and the design's prose typography is a `template.typ` requirement rather than an app one.
+Navigating never creates a file: selecting an empty day shows one line offering the template, and only `enter` writes it.
 
-Both screens carry the open-loops counter in the top bar; clicking it opens a flat list (`adr/2026-07-debt-counter-then-list.md`).
+Both screens carry the open-loops ember in the top line; clicking it opens a flat list (`adr/2026-07-debt-counter-then-list.md`).
+**Zero loops = zero indicator** — the number is absent, not zeroed. Absence is the reward.
 
 ## Editor
 
@@ -80,7 +86,7 @@ Both screens carry the open-loops counter in the top bar; clicking it opens a fl
 - **Persistent positions.** Every canvas note stores x/y. New notes auto-place near their strongest links; once moved by hand, position is permanent. Force-directed layout is at most an on-demand "arrange this cluster" command, never the default.
 - **Cards** are flat rectangles — no paper texture, no rotation. Type is a thin colour bar on the left edge, and that is the only colour on the screen.
 - **Semantic zoom, two levels.** Titles (default) and rendered typst body (cached SVGs). The "coloured dots" level is dropped. Viewport culling makes thousands of notes a non-issue for rendering.
-- **Enter/exit nodes.** Clicking a card opens a **writing sheet** — a tall panel, far larger than the card, that opens *beside* it with a line tethering it back. The rest of the table dims; the origin card and its tether stay lit. The sheet is chromeless: id and type in a thin header, the note, link counts in the footer, everything else a keystroke. Escape puts the card back. Writing happens at the size of a page while the sense of place stays visible around it.
+- **Enter/exit nodes.** Clicking a card opens a **writing sheet** — a tall panel, far larger than the card, that opens *beside* it with a line tethering it back. The rest of the table dims; the origin card and its tether stay lit. The sheet is chromeless and keeps exactly two lines of its own: the note's rendered `#meta` line at the top and a footer showing only backlinks ("← 2") — the sheet shows the note's own title, not the card's header, and everything else is a keystroke. Escape puts the card back. Writing happens at the size of a page while the sense of place stays visible around it.
 - **Findability**: filter by tag and by type (filtered-out cards dim, not disappear), plus jump-to-note search that pans/zooms to the card.
 - **Edges**: real links (`#l(..)`) as solid edges; AI-suggested links as dashed edges (see below).
 - Scale target: hundreds now, low thousands eventually.
@@ -89,12 +95,14 @@ Both screens carry the open-loops counter in the top bar; clicking it opens a fl
 
 One **open-loops panel**, always accessible, showing three kinds of debt:
 
-1. Captures without a self-written summary (with age).
-2. AI-suggested links neither written nor dismissed (with age).
+1. Captures without a self-written summary.
+2. AI-suggested links neither written nor dismissed.
 3. Dangling `#l(..)` references to notes that don't exist.
 4. Notes with missing or unparseable `#meta` (typeless notes) — load-bearing now that type lives only in metadata, not in the path.
 
-Nothing blocks saving or writing. The debt is simply always visible and ages visibly. Additional soft incentives can be layered later (e.g. counts on the canvas), but the panel is the mechanism.
+Nothing blocks saving or writing; the debt is simply always visible.
+The list itself carries no ages, no grouping and no per-item actions (`adr/2026-07-debt-counter-then-list.md`) — age surfaces on the table instead, in the capture card's own label ("capture · 3 d"), which is v1.
+Additional soft incentives can be layered later (e.g. counts on the canvas), but the panel is the mechanism.
 
 ## AI integration
 
@@ -105,7 +113,7 @@ Two separate mechanisms:
 
 ### Suggested links — the core friction design
 
-- Suggestions are stored in the sidecar index only. Discovery is free and ambient: dashed edges on the canvas, suggestion list per note.
+- Suggestions are stored in the sidecar index only. Discovery is free and ambient and never interrupts: dashed edges with a hollow star on the canvas, and — inside a note, on either screen — a single dashed line at the *end of the page* ("proposed · evergreen-notes → this note", with the app's only visible hint, "enter accept · x dismiss").
 - **Accepting = writing.** No accept button that edits the file for you. While editing a note, a relevant suggestion appears as gray ghost text at the cursor — press Tab to insert the `#l(..)` (code-completion style). You are still the one writing, in your own sentence, at a place you chose.
 - Soft incentive (not requirement) to embed the link in a phrase saying *why* the connection exists — e.g. the ghost text nudges toward sentence context rather than bare link insertion. Exact mechanism TBD during implementation; must not add typing overhead beyond the Tab.
 - Writing a suggested link (by Tab or manually) clears the suggestion; dismissing it clears it too. Un-actioned suggestions accumulate as visible debt.
@@ -123,7 +131,8 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 **v0 — daily driver for writing** (task breakdown and current state: `roadmap-v0.md`)
 - Vault structure, `#meta` / `#l` conventions, shared template
 - File CRUD, note creation from per-type templates, time notes (day/week/season) with template + prev/next
-- The logs screen: time rail, rendered centre pane with scale chain, month calendar
+- The design language: "Deep field" palette and type scale as theme variables, dark and light, the one-line chrome
+- The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid
 - Hybrid block editor with live typst rendering (split-view fallback)
 - Link index, backlinks panel, dangling-link detection
 - Capture notes (global hotkey, paste) + open-loops counter opening a flat list (captures + dangling links)
@@ -148,7 +157,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 
 ## Known risks
 
-1. **The editor is half the project.** Hybrid block editing + typst rendering + (later) vim on Dioxus primitives, with no existing editor widget. Mitigation: split-view fallback, strict buffer/UI separation, per-block rather than per-character ambitions. The fallback only works in v0, where the editor is full-window — it does not fit inside v1's writing sheet, so hybrid editing stops being optional when the table lands.
+1. **The editor is half the project.** Hybrid block editing + typst rendering + (later) vim on Dioxus primitives, with no existing editor widget. Mitigation: split-view fallback, strict buffer/UI separation, per-block rather than per-character ambitions. The fallback is narrower than it first looked: split view needs a full-window editor, and the design gives it one nowhere — v0's logs screen puts the editor in a three-pane centre column, v1 puts it in the writing sheet. So the split view is phase-5 scaffolding with a known deletion date, and hybrid editing stops being optional as soon as the logs screen lands, not when the table does.
 2. **Typst parsing for the index.** Extracting `#meta` and `#l` calls needs a real parse (the `typst-syntax` crate), not regex, to survive edge cases.
 3. **Canvas position durability.** Positions are user data disguised as index data — must not be lost on index rebuilds.
 4. **Scope creep at v1.** The canvas is where feature ideas multiply; the v1 list above is the ceiling, not the floor.

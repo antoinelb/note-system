@@ -47,7 +47,7 @@ Rust throughout — details and reasoning in `docs/plan.md`:
 ## Roadmap
 
 Four versions (`docs/plan.md` § Roadmap):
-- **v0 — daily driver for writing**: vault structure + `#meta`/`#l` conventions, file CRUD from per-type templates, daily notes, hybrid block editor (split-view fallback), link index + backlinks + dangling-link detection, capture notes + open-loops panel.
+- **v0 — daily driver for writing**: vault structure + `#meta`/`#l` conventions, file CRUD from per-type templates, daily notes, hybrid block editor (fallback: a single pane toggling source ⇄ rendered), the design language (palette + type scale as theme variables, dark and light), the logs screen, link index + backlinks + dangling-link detection, capture notes + open-loops panel.
 - **v1 — the table**: canvas with persistent positions, semantic zoom, modal card editing, filters, auto-placement. The v1 list is the ceiling, not the floor.
 - **v2 — vim**: modal editing layer on the existing buffer architecture.
 - **v3 — AI**: `claude` CLI integration (tags, link suggestions), ghost-text Tab-completion, MCP server exposing the vault.
@@ -56,6 +56,8 @@ Four versions (`docs/plan.md` § Roadmap):
 
 All spacing should use multiples of 4 and be coherent.
 All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`design/wireframes-v0.md` § Part I).
+**No colour literal appears outside `assets/theme.css`** — every colour is a custom property, and both themes (dark `:root`, light `:root[data-theme="light"]`) are filled in together (`adr/2026-07-design-language-own-phase.md`).
+On any conflict between `plan.md` and the wireframes, **the wireframes win** (`adr/2026-07-plan-realigned-with-wireframes.md`).
 
 ## Other instructions
 
