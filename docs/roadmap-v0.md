@@ -83,11 +83,11 @@ Exit: you can browse and read the real vault in the app.
 
 Goal: the app replaces Obsidian for daily notes — **start daily-driving at the end of this phase**.
 
-- [ ] Buffer layer: text buffer + edit operations, strictly separate from the widget (the v2 vim invariant starts here).
-  - [ ] Pick the buffer representation (suggestion: plain `String` — rope is YAGNI at note scale). **→ ADR**
-- [ ] Split-view editor: source pane | rendered pane, debounced recompile.
+- [x] Buffer layer: text buffer + edit operations, strictly separate from the widget (the v2 vim invariant starts here).
+  - [x] Pick the buffer representation (suggestion: plain `String` — rope is YAGNI at note scale). **→ ADR** (`adr/2026-07-buffer-is-path-plus-string.md`; edit operations deferred to phase 8, which is the first code that can call them)
+- [x] Split-view editor: source pane | rendered pane, debounced recompile.
   - Like the phase-4 list, this is **deliberate scaffolding with a known deletion date**: the design has no split view anywhere, and neither the phase-7 logs centre pane nor v1's writing sheet has room for two panes. It exists so writing can start before the real screen does, and it is deleted in phase 7 — the buffer underneath survives, the two-pane widget does not. Keep it dumb.
-- [ ] Saving: pick explicit save vs autosave. **→ ADR**
+- [x] Saving: pick explicit save vs autosave. **→ ADR** (`adr/2026-07-debounced-autosave.md` — one idle timer drives save then recompile)
 - [ ] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
   - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-id-scheme-kebab-frozen.md`, decided during phase 1)
 - [ ] Daily note: a "today" action creates today's note from the daily template if missing and wires prev/next links.
