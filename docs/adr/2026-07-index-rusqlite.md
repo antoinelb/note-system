@@ -12,4 +12,4 @@ The index is local, single-user, and every query touches at most a few thousand 
 ## Alternatives rejected
 
 - **sqlx** — async infects every caller for queries that take microseconds on a local file, and compile-time query checking needs a database at build time.
-- **diesel** — an ORM plus a migration system; migrations are useless here (see `2026-07-index-jetable-user-version.md`) and the ORM hides SQL worth keeping obvious.
+- **diesel** — an ORM plus a migration system; migrations are useless here (see `2026-07-disposable-index-user-version.md`) and the ORM hides SQL worth keeping obvious.

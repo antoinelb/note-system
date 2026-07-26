@@ -2,7 +2,7 @@
 
 ## Context
 
-`docs/design/` holds the first design pass: wireframes exploring six app shells (`1a`–`1g`), six table treatments (`2a`–`2f`) and six riffs (`3a`–`3f`), distilled into `ui-spec-table-and-logs.md` from `3a` (table + card writing) and `3e` (logs).
+`docs/design/` holds the first design pass: wireframes exploring six app shells (`1a`–`1g`), six table treatments (`2a`–`2f`) and six riffs (`3a`–`3f`), distilled into `ui-spec-table-and-logs.md` from `3a` (table + card writing) and `3e` (logs) — since superseded by `design/wireframes-v0.md`, which folds in the later mood, chrome and states turns (`4`–`6`).
 
 Two mismatches with the plan had to be settled.
 The wireframe file is titled *v0*, but `plan.md` § Roadmap puts the canvas in v1.

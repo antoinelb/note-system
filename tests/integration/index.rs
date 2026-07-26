@@ -248,7 +248,7 @@ fn notes_by_category_lists_vault_relative_paths_sorted() {
             .expect("query"),
         paths(&[
             "capture/capture-articles-zettel.typ",
-            "capture/capture-idee-canvas.typ",
+            "capture/capture-idea-canvas.typ",
         ])
     );
     assert_eq!(
@@ -270,12 +270,12 @@ fn notes_by_type_follows_meta_not_directory() {
             "time/2026-07-23.typ",
         ])
     );
-    // meta-double: the first #meta call won, so it is a concept
+    // duplicate-meta: the first #meta call won, so it is a concept
     assert_eq!(
         index.notes_by_type(&NoteType::Concept).expect("query"),
         paths(&[
-            "permanent/liens-pieges.typ",
-            "permanent/meta-double.typ",
+            "permanent/duplicate-meta.typ",
+            "permanent/link-traps.typ",
             "permanent/zettelkasten.typ",
         ])
     );
@@ -313,11 +313,8 @@ fn unknown_types_are_queryable_verbatim() {
 fn notes_by_tag_matches_exactly() {
     let (_dir, index) = fixture_index();
     assert_eq!(
-        index.notes_by_tag("méthode").expect("query"),
-        paths(&[
-            "permanent/notes-atomiques.typ",
-            "permanent/zettelkasten.typ",
-        ])
+        index.notes_by_tag("method").expect("query"),
+        paths(&["permanent/atomic-notes.typ", "permanent/zettelkasten.typ",])
     );
     assert_eq!(
         index.notes_by_tag("rust").expect("query"),
@@ -332,10 +329,10 @@ fn backlinks_resolve_target_ids_to_distinct_source_paths() {
     assert_eq!(
         index.backlinks(&id("zettelkasten")).expect("query"),
         paths(&[
-            "permanent/liens-pieges.typ",
+            "permanent/atomic-notes.typ",
+            "permanent/link-traps.typ",
             "permanent/luhmann.typ",
             "permanent/note-system.typ",
-            "permanent/notes-atomiques.typ",
             "time/2026-07-21.typ",
         ])
     );
@@ -425,8 +422,8 @@ fn dangling_links_surface_the_planted_fixture() {
     assert_eq!(
         index.dangling_links().expect("query"),
         vec![DanglingLink {
-            source: PathBuf::from("permanent/notes-atomiques.typ"),
-            target: id("notes-evergreen"),
+            source: PathBuf::from("permanent/atomic-notes.typ"),
+            target: id("evergreen-notes"),
         }]
     );
 }
@@ -488,7 +485,7 @@ fn typeless_notes_exclude_captures_but_include_missing_meta() {
     let (_dir, index) = fixture_index();
     assert_eq!(
         index.typeless_notes().expect("query"),
-        paths(&["permanent/sans-meta.typ", "permanent/sans-type.typ"])
+        paths(&["permanent/missing-meta.typ", "permanent/missing-type.typ"])
     );
 }
 
@@ -508,15 +505,15 @@ fn scalar_meta_fields_and_anomalies_are_stored_faithfully() {
     let row: (String, String, String, String) = conn
         .query_row(
             "SELECT id, type, created, origin FROM notes
-             WHERE path = 'permanent/notes-atomiques.typ'",
+             WHERE path = 'permanent/atomic-notes.typ'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .expect("read notes-atomiques row");
+        .expect("read atomic-notes row");
     assert_eq!(
         row,
         (
-            "notes-atomiques".to_string(),
+            "atomic-notes".to_string(),
             "claim".to_string(),
             "2026-07-22".to_string(),
             "smart-notes".to_string(),
@@ -525,15 +522,15 @@ fn scalar_meta_fields_and_anomalies_are_stored_faithfully() {
 
     let missing: (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT id, type FROM notes WHERE path = 'permanent/sans-meta.typ'",
+            "SELECT id, type FROM notes WHERE path = 'permanent/missing-meta.typ'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("read sans-meta row");
+        .expect("read missing-meta row");
     assert_eq!(missing, (None, None));
 
     assert_eq!(
-        anomaly_rows(&conn, "permanent/meta-double.typ"),
+        anomaly_rows(&conn, "permanent/duplicate-meta.typ"),
         vec![("duplicate-meta".to_string(), None, None)]
     );
     assert_eq!(
@@ -588,7 +585,7 @@ fn snapshot(index: &Index) -> Vec<Vec<PathBuf>> {
             .notes_by_category(&NoteCategory::Permanent)
             .expect("by category"),
         index.notes_by_type(&NoteType::Daily).expect("by type"),
-        index.notes_by_tag("méthode").expect("by tag"),
+        index.notes_by_tag("method").expect("by tag"),
         index.backlinks(&id("zettelkasten")).expect("backlinks"),
         index.typeless_notes().expect("typeless"),
         index

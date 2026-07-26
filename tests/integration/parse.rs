@@ -16,39 +16,39 @@ fn happy_path_extracts_full_meta_and_links_in_source_order() {
             id: Some(NoteId("zettelkasten".to_string())),
             note_type: Some(NoteType::Concept),
             created: Some(date(2026, 7, 21)),
-            tags: vec!["méthode".to_string()],
+            tags: vec!["method".to_string()],
             origin: None,
             anomalies: vec![],
         })
     );
-    assert_eq!(parsed.links, links(&["luhmann", "notes-atomiques"]));
+    assert_eq!(parsed.links, links(&["luhmann", "atomic-notes"]));
 }
 
 #[test]
 fn links_in_comments_strings_and_raw_do_not_count() {
-    let parsed = parse_fixture("permanent/liens-pieges.typ");
+    let parsed = parse_fixture("permanent/link-traps.typ");
     assert_eq!(parsed.links, links(&["zettelkasten"]));
 }
 
 #[test]
 fn missing_meta_is_data_not_an_error() {
-    let parsed = parse_fixture("permanent/sans-meta.typ");
+    let parsed = parse_fixture("permanent/missing-meta.typ");
     assert_eq!(parsed.meta, MetaStatus::Missing);
     assert_eq!(parsed.links, vec![]);
 }
 
 #[test]
 fn absent_type_field_is_none_without_anomaly() {
-    let meta = present(parse_fixture("permanent/sans-type.typ"));
+    let meta = present(parse_fixture("permanent/missing-type.typ"));
     assert_eq!(meta.note_type, None);
     assert_eq!(meta.anomalies, vec![]);
-    assert_eq!(meta.id, Some(NoteId("sans-type".to_string())));
+    assert_eq!(meta.id, Some(NoteId("missing-type".to_string())));
 }
 
 #[test]
 fn duplicate_meta_first_wins_and_is_flagged() {
-    let meta = present(parse_fixture("permanent/meta-double.typ"));
-    assert_eq!(meta.id, Some(NoteId("meta-double".to_string())));
+    let meta = present(parse_fixture("permanent/duplicate-meta.typ"));
+    assert_eq!(meta.id, Some(NoteId("duplicate-meta".to_string())));
     assert_eq!(meta.note_type, Some(NoteType::Concept));
     assert_eq!(meta.anomalies, vec![MetaAnomaly::DuplicateMeta]);
 }
@@ -72,7 +72,7 @@ fn origin_field_is_extracted() {
 
 #[test]
 fn capture_note_has_no_type_by_design() {
-    let meta = present(parse_fixture("capture/capture-idee-canvas.typ"));
+    let meta = present(parse_fixture("capture/capture-idea-canvas.typ"));
     assert_eq!(meta.note_type, None);
     assert_eq!(meta.anomalies, vec![]);
 }

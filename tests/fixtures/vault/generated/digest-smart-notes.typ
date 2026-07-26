@@ -7,6 +7,6 @@
   origin: "smart-notes",
 )
 
-= Digest : How to Take Smart Notes
+= Digest: How to Take Smart Notes
 
-Résumé généré (exemple) du livre #l("smart-notes").
+Generated summary (example) of the book #l("smart-notes").

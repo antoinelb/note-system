@@ -4,10 +4,10 @@
   id: "zettelkasten",
   type: "concept",
   created: "2026-07-21",
-  tags: ("méthode",),
+  tags: ("method",),
 )
 
 = Zettelkasten
 
-Système de notes atomiques reliées entre elles, popularisé par #l("luhmann").
-La valeur vient des liens, pas des notes isolées : voir #l("notes-atomiques").
+A system of atomic notes linked to each other, popularised by #l("luhmann").
+The value comes from the links, not from isolated notes: see #l("atomic-notes").

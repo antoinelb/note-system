@@ -13,14 +13,14 @@ As such, your responsibility are unit tests and guiding, and the user should wri
 ## Documents
 
 - `docs/plan.md` — **the standalone source of truth**: design principles, note model, storage layout, screens, editor, canvas, friction system, AI integration, roadmap, risks. Read it before writing code.
-- `docs/design/` — UI direction: wireframes plus `ui-spec-table-and-logs.md`, the two-screen layout (the table, v1; the logs, v0). Layout only — sizes, colours and editor behaviour stay open. Read it before writing any UI.
+- `docs/design/` — UI direction: the wireframe deck plus `wireframes-v0.md`, its full description — Part I is the operative spec (two screens: the table, v1; the logs, v0 — layout, palette, chrome, states), Part II the decision trail. Read Part I before writing any UI.
 - `docs/adr/` — decision records (see below).
 
 ## Decision records (ADR) — required practice
 
 Every decision taken from now on is documented in its own file under `docs/adr/`:
 
-- One decision per file, kebab-case name (e.g. `2026-07-positions-fichier-separe.md`).
+- One decision per file, kebab-case name (e.g. `2026-07-positions-separate-file.md`).
 - Keep it short: context, the decision, alternatives rejected and why.
 - When a decision changes the plan, update `docs/plan.md` *and* add the ADR — the plan carries the **what**, the ADR preserves the **why**.
 - When you (Claude) participate in a decision with the user, write the ADR as part of the same change; do not let decisions live only in conversation.
@@ -55,6 +55,7 @@ Four versions (`docs/plan.md` § Roadmap):
 ## Design
 
 All spacing should use multiples of 4 and be coherent.
+All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`design/wireframes-v0.md` § Part I).
 
 ## Other instructions
 

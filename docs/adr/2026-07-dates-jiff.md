@@ -8,7 +8,7 @@ Phase 2 had to decide whether the domain type stores it as written or parses it 
 ## Decision
 
 Parse `created` into `jiff::civil::Date`.
-A value that does not parse becomes `None` plus a recorded anomaly (see `2026-07-anomalies-meta-donnees-fines.md`).
+A value that does not parse becomes `None` plus a recorded anomaly (see `2026-07-meta-anomalies-fine-grained-data.md`).
 Library: **jiff** — modern API, first-class plain calendar dates (`civil::Date`), better parse errors than the alternatives.
 
 ## Alternatives rejected

@@ -52,12 +52,12 @@ vault/
 ```
 
 - Link syntax: `#l("note-id")` — valid typst, compiles standalone. Inserted via hotkey/autocomplete so it's cheap to type.
-- Canvas positions and AI suggestions live in `.index/`, never in note files. Positions live in their own file, separate from the index database, so the database stays disposable and rebuilding it cannot lose them (`adr/2026-07-positions-fichier-separe.md`).
+- Canvas positions and AI suggestions live in `.index/`, never in note files. Positions live in their own file, separate from the index database, so the database stays disposable and rebuilding it cannot lose them (`adr/2026-07-positions-separate-file.md`).
 - Index is rebuilt by parsing files; file watcher keeps it live.
 
 ## Screens
 
-Design direction and wireframes: `design/ui-spec-table-and-logs.md` (layout only — sizes, colours and editor behaviour stay open until it runs). Decision: `adr/2026-07-deux-ecrans-table-et-logs.md`.
+Design direction and wireframes: `design/wireframes-v0.md` (layout, palette, chrome and states; a few knobs — sheet width, dim, seasons — stay open until it runs). Decision: `adr/2026-07-two-screens-table-and-logs.md`.
 
 The app has exactly two screens, with a button each way:
 
@@ -66,7 +66,7 @@ The app has exactly two screens, with a button each way:
 
 Chrome is greyscale throughout. The only colours are the type bar on cards and a single alert hue for debt and dangling links. Note bodies are rendered typst — the app never restyles them, and the meta line comes from the note itself. Navigating never creates a file; clicking an empty day *offers* to create it from the template.
 
-Both screens carry the open-loops counter in the top bar; clicking it opens a flat list (`adr/2026-07-dette-compteur-puis-liste.md`).
+Both screens carry the open-loops counter in the top bar; clicking it opens a flat list (`adr/2026-07-debt-counter-then-list.md`).
 
 ## Editor
 
@@ -144,7 +144,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 - (later) generated-note pipeline
 
 **Later (unscheduled)**
-- Auto-rename: explicit action that re-derives the id from the current title, renames the file, and rewrites all inbound `#l` links via the index (ids stay frozen on ordinary title edits; see `adr/2026-07-schema-id-kebab-fige.md`)
+- Auto-rename: explicit action that re-derives the id from the current title, renames the file, and rewrites all inbound `#l` links via the index (ids stay frozen on ordinary title edits; see `adr/2026-07-id-scheme-kebab-frozen.md`)
 
 ## Known risks
 

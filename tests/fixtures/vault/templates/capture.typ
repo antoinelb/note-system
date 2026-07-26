@@ -5,7 +5,7 @@
   created: "{{created}}",
 )
 
-== Résumé
+== Summary
 
 == Original
 

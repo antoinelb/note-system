@@ -758,7 +758,7 @@ mod tests {
         // the tags, links and anomalies rows are only gone if the delete
         // cascaded — nothing here deletes them by name
         assert_eq!(
-            index.notes_by_tag("méthode").expect("by tag"),
+            index.notes_by_tag("method").expect("by tag"),
             Vec::<PathBuf>::new()
         );
         assert_eq!(
@@ -791,7 +791,7 @@ mod tests {
             Vec::<PathBuf>::new()
         );
         assert_eq!(
-            index.notes_by_tag("méthode").expect("by tag"),
+            index.notes_by_tag("method").expect("by tag"),
             Vec::<PathBuf>::new()
         );
     }
@@ -913,7 +913,7 @@ mod tests {
                 id: Some(NoteId("rich".to_string())),
                 note_type: Some(NoteType::Idea),
                 created: None,
-                tags: vec!["méthode".to_string()],
+                tags: vec!["method".to_string()],
                 origin: None,
                 anomalies: vec![
                     MetaAnomaly::DuplicateMeta,

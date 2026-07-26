@@ -3,7 +3,7 @@
 ## Context
 
 Phase 3 queries: notes by category/type/tag, backlinks, dangling links, typeless notes.
-Phase 2 decided malformed metadata is data (`2026-07-anomalies-meta-donnees-fines.md`): a note may have no id, no type, or share an id with another note, and the index must store that, never reject it.
+Phase 2 decided malformed metadata is data (`2026-07-meta-anomalies-fine-grained-data.md`): a note may have no id, no type, or share an id with another note, and the index must store that, never reject it.
 
 ## Decision
 
@@ -21,7 +21,7 @@ anomalies(note_path REFERENCES notes ON DELETE CASCADE, kind, field, raw)
 - **One row per `#l` occurrence** — mirrors the parser's `Vec<Link>`, keeps rebuild a dumb insert loop, preserves occurrence counts; deduplication is `SELECT DISTINCT` at query time.
 - **Anomalies as rows** (`kind` ∈ `duplicate-meta` / `invalid-created` / `malformed-field`, plus nullable `field` and `raw`) so the panel can join and count in SQL.
 - **Typeless notes** = `type IS NULL AND category != 'capture'`: captures are typeless by design until promoted (their debt signal is "unsummarized", phase 9); notes with a missing `#meta` are included — their absent type is real debt and stays visible without a dedicated missing-meta query.
-- No `MetaStatus` column: no phase-3 query needs it, and drop-and-rebuild (`2026-07-index-jetable-user-version.md`) makes adding columns later free.
+- No `MetaStatus` column: no phase-3 query needs it, and drop-and-rebuild (`2026-07-disposable-index-user-version.md`) makes adding columns later free.
 - Positions and suggestions tables are v1/v3 — not created now; nothing in this schema blocks adding them.
 
 ## Alternatives rejected

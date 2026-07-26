@@ -5,9 +5,9 @@
   created: "2026-07-22",
 )
 
-== Résumé
+== Summary
 
 == Original
 
-Collé depuis le navigateur : « Zettelkasten method — a knowledge management
-system based on networked atomic notes. »
+Pasted from the browser: "Zettelkasten method — a knowledge management
+system based on networked atomic notes."

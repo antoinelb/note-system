@@ -9,5 +9,5 @@
 
 = Note system
 
-Application Dioxus remplaçant Obsidian et le zettelkasten typst manuel.
-Fondé sur #l("fichiers-simples") et le modèle #l("zettelkasten").
+Dioxus application replacing Obsidian and the manual typst zettelkasten.
+Built on #l("plain-files") and the #l("zettelkasten") model.

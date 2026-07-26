@@ -7,6 +7,6 @@
   tags: (),
 )
 
-= Semaine 30
+= Week 30
 
-Retour sur #l("2026-07-21") : démarrage du vault de test.
+Looking back at #l("2026-07-21"): the test vault got started.

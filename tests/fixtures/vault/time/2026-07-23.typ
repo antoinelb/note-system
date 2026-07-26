@@ -13,4 +13,4 @@
 
 == Notes
 
-Fini le gabarit du vault ; détails dans #l("smart-notes").
+Finished the vault skeleton; details in #l("smart-notes").

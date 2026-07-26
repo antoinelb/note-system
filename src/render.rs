@@ -111,7 +111,7 @@ impl From<VirtualizeError> for RenderError {
 // the hash covers the note's own text, not templates/template.typ: editing
 // the template leaves stale SVGs until restart. Phase 5 wires the phase-3
 // watcher to clear the cache when anything under templates/ changes
-// (adr/2026-07-cache-svg-par-chemin.md)
+// (adr/2026-07-svg-cache-per-path.md)
 #[derive(Debug, Default)]
 pub struct SvgCache {
     entries: HashMap<PathBuf, (u64, String)>, // note path -> (text hash, svg)

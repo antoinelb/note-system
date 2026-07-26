@@ -11,9 +11,9 @@
 
 #l("{{prev}}") | #l("{{next}}")
 
-== Citations
+== Quotes
 
-== Tâches
+== Tasks
 
 - [ ]
 

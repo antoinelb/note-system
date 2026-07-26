@@ -54,7 +54,7 @@ fn a_missing_file_is_reported_with_the_path_that_was_searched() {
 fn a_file_that_is_not_utf8_is_refused_as_a_source() {
     // `file` hands back the raw bytes; only `source` has to decode them
     let world = world_for("permanent/zettelkasten.typ");
-    let id = file_id("/permanent/binaire-non-utf8.bin");
+    let id = file_id("/permanent/non-utf8-binary.bin");
 
     assert!(world.file(id).is_ok(), "raw bytes are always readable");
     assert!(matches!(world.source(id), Err(FileError::InvalidUtf8)));
@@ -106,7 +106,7 @@ fn a_dangling_import_surfaces_as_a_compilation_error() {
 fn the_world_has_no_clock() {
     // deliberate, not a stub: rendering must stay a pure function of the
     // vault's bytes or the content-hashed SVG cache goes silently stale
-    // (adr/2026-07-monde-typst-embarque.md)
+    // (adr/2026-07-embedded-typst-world.md)
     let world = world_for("permanent/zettelkasten.typ");
     assert!(world.today(None).is_none());
 }

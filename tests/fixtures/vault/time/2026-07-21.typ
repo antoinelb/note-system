@@ -13,4 +13,4 @@
 
 == Notes
 
-Lu sur le #l("zettelkasten").
+Read about the #l("zettelkasten").

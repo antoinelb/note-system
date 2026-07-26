@@ -2,7 +2,7 @@
 
 ## Context
 
-`adr/2026-07-emplacement-vaults-dev-test.md` split the fixture vault from the real one and deferred the real path to "configuration, phase 4".
+`adr/2026-07-dev-test-vault-locations.md` split the fixture vault from the real one and deferred the real path to "configuration, phase 4".
 Phase 4 opens a vault for the first time, so the deferral expires here.
 The app is single-user with no accounts and no settings UI; the only thing to configure today is one path.
 
@@ -19,7 +19,7 @@ pub fn resolve_vault_path(note_vault: Option<OsString>, home: Option<OsString>) 
 `None` means neither could be determined; the caller reports it and exits rather than guessing a path.
 Reading the environment happens once, at the single call site, with `var_os` rather than `var` — a path is bytes on Linux, and `var` turns a perfectly good non-UTF-8 path into `Err(NotUnicode)`, which would silently fall through to the default.
 
-The purity is forced by two constraints meeting: edition 2024 made `std::env::set_var` `unsafe` (and it was always process-global, so env-mutating tests race across the test threads), while `adr/2026-07-couverture-100-pourcent-lignes.md` requires every branch to be covered. A pure resolver is exercised exhaustively with zero `unsafe` and zero test interference.
+The purity is forced by two constraints meeting: edition 2024 made `std::env::set_var` `unsafe` (and it was always process-global, so env-mutating tests race across the test threads), while `adr/2026-07-coverage-100-percent-lines.md` requires every branch to be covered. A pure resolver is exercised exhaustively with zero `unsafe` and zero test interference.
 
 A missing or non-directory vault is an explicit, reported error state — never silently created, never silently empty. Creating directories on the user's behalf at a possibly-mistyped path is how notes end up in two places.
 

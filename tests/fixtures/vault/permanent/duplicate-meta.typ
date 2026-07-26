@@ -1,16 +1,16 @@
 #import "/templates/template.typ": *
 #show: note
 #meta(
-  id: "meta-double",
+  id: "duplicate-meta",
   type: "concept",
   created: "2026-07-23",
 )
 #meta(
-  id: "meta-double-bis",
+  id: "duplicate-meta-bis",
   type: "idea",
   created: "2026-07-23",
 )
 
-= Deux appels meta
+= Two meta calls
 
-Cas limite : le parseur doit choisir une politique (premier gagne?) sans planter.
+Edge case: the parser must pick a policy (first wins?) without crashing.

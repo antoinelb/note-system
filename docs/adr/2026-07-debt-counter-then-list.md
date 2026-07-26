@@ -2,7 +2,7 @@
 
 ## Context
 
-`docs/design/ui-spec-table-and-logs.md` scopes the friction system down to almost nothing: "open loops are out of scope: they appear as a counter in the corner and nothing more".
+The design pass (`docs/design/ui-spec-table-and-logs.md`, since superseded by `wireframes-v0.md`) scopes the friction system down to almost nothing: "open loops are out of scope: they appear as a counter in the corner and nothing more".
 Wireframe `3a` shows it as a bare `6` in the top bar.
 
 That conflicts with the v0 exit criteria, which require "capture notes + open-loops panel".

@@ -92,7 +92,7 @@ fn rewriting_a_note_drops_the_rows_of_its_previous_contents() {
     drain(&watcher, &mut index, dir.path());
 
     assert_eq!(
-        index.notes_by_tag("méthode").expect("by tag"),
+        index.notes_by_tag("method").expect("by tag"),
         Vec::<PathBuf>::new()
     );
     assert_eq!(
@@ -293,7 +293,7 @@ fn seeded_vault() -> (tempfile::TempDir, Index) {
         "permanent/seed.typ",
         "seed",
         "concept",
-        &["méthode"],
+        &["method"],
         &["elsewhere"],
     );
     index

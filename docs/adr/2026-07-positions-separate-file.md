@@ -3,11 +3,11 @@
 ## Context
 
 `CLAUDE.md` states the invariant: canvas positions are user data disguised as index data and must survive index rebuilds.
-`2026-07-index-jetable-user-version.md` makes the index deliberately disposable — dropped and rebuilt wholesale on a schema change or on anything ambiguous.
-`2026-07-schema-index-sqlite.md` deferred the positions table with "positions and suggestions tables are v1/v3 — not created now".
+`2026-07-disposable-index-user-version.md` makes the index deliberately disposable — dropped and rebuilt wholesale on a schema change or on anything ambiguous.
+`2026-07-sqlite-index-schema.md` deferred the positions table with "positions and suggestions tables are v1/v3 — not created now".
 `plan.md` § Storage layout left the fork open: "either a separate small positions file or excluded from 'derived' purges".
 
-The design pass (`docs/design/ui-spec-table-and-logs.md`) confirms positions are user-visible state, not a layout hint: "positions are persistent and only change when the user moves a card".
+The design pass (`docs/design/ui-spec-table-and-logs.md`, since superseded by `wireframes-v0.md`) confirms positions are user-visible state, not a layout hint: "positions are persistent and only change when the user moves a card".
 
 ## Decision
 
