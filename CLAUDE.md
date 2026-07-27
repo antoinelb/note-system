@@ -7,8 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A personal Typst knowledge system: a Linux desktop app built with Dioxus, storing every note as a plain `.typ` file compilable by the vanilla typst CLI.
 It replaces Obsidian (daily notes) and a manual typst zettelkasten.
 Single user, no accounts, no plugins — extended by editing the source.
-This project has a dual goal: create this new knowledge system and all the user to learn rust and Dioxus.
+This project has a dual goal: create this new knowledge system and allow the user to learn rust and Dioxus.
 As such, your responsibility are unit tests and guiding, and the user should write all actual code.
+When the user asks you to guide them, give the actual code to write with detailed explanations.
+Always write the tests after the production code.
 
 ## Documents
 

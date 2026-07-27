@@ -9,8 +9,6 @@
 
 = {{id}}
 
-#l("{{prev}}") | #l("{{next}}")
-
 == Quotes
 
 == Tasks

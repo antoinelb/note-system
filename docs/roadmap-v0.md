@@ -89,14 +89,16 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
   - Like the phase-4 list, this is **deliberate scaffolding with a known deletion date**: the design has no split view anywhere, and neither the phase-7 logs centre pane nor v1's writing sheet has room for two panes. It exists so writing can start before the real screen does, and it is deleted in phase 7 — the buffer underneath survives, the two-pane widget does not. Keep it dumb.
 - [x] Saving: pick explicit save vs autosave. **→ ADR** (`adr/2026-07-debounced-autosave.md` — one idle timer drives save then recompile)
 - [ ] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
-  - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-id-scheme-kebab-frozen.md`, decided during phase 1)
-- [ ] Daily note: a "today" action creates today's note from the daily template if missing and wires prev/next links.
+  - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-id-scheme-kebab-frozen.md`, decided during phase 1; collision suffix superseded by `adr/2026-07-id-collision-is-an-error.md`)
+  - [x] The `{{...}}` placeholder contract: which names exist, and what an unknown one does. **→ ADR** (`adr/2026-07-template-placeholders-closed-set.md`)
+- [ ] Daily note: a "today" action creates today's note from the daily template if missing.
+  - [ ] Previous/next movement resolves to the nearest *existing* daily note through the index; the template seeds no links (`adr/2026-07-time-navigation-derived-not-stored.md`).
 - [ ] Weekly + season notes (pulled into v0 by the logs screen, `adr/2026-07-two-screens-table-and-logs.md`):
   - [ ] `weekly.typ` and `seasonal.typ` templates, plus a season note in the fixture vault (only `daily.typ` and a `2026-w30` fixture exist today).
   - [ ] Define what a season *is* — the **boundaries**; the id form is already fixed at `2026-summer` by the design's rail rows (`design/wireframes-v0.md` § The logs screen), which also retires the accented `2026-été` that `adr/2026-07-repo-language-english.md` had earmarked as id-scheme coverage. **→ ADR**
   - [ ] Scale chain from a date: day → ISO week → season, resolved by `jiff` date math plus an index existence check, not by stored links.
 - [ ] Delete note (dangling links it causes become visible through the index).
-- [ ] *(Claude)* Tests: buffer ops, template instantiation, daily prev/next resolution across gaps, scale-chain resolution at year and season boundaries.
+- [ ] *(Claude)* Tests: template instantiation, unknown placeholders, refusing to overwrite an existing note, daily prev/next resolution across gaps, scale-chain resolution at year and season boundaries.
 
 Exit: a full day's workflow (open today, write, link, save) happens in the app, not Obsidian.
 
@@ -176,7 +178,7 @@ Exit: v0 checklist below is fully green.
 ## v0 exit criteria (from `plan.md`)
 
 - [ ] Vault structure + `#meta`/`#l` conventions + shared template (phase 1)
-- [ ] File CRUD, creation from per-type templates, time notes (day/week/season) with prev/next (phase 5)
+- [ ] File CRUD, creation from per-type templates, time notes (day/week/season) with derived prev/next movement (phase 5)
 - [ ] The design language: palette and type scale as theme variables, dark **and** light, the one-line chrome (phase 6)
 - [ ] The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid (phase 7)
 - [ ] Hybrid block editor with live rendering — or the source ⇄ rendered toggle via the declared fallback (phases 5, 8)

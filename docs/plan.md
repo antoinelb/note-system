@@ -33,7 +33,7 @@ Directories encode only the four **categories** (permanent, time-based, capture,
 
 ### Time-based notes
 
-Daily, weekly and season notes follow the current Obsidian pattern: prev/next navigation links, quotes section (manually written), task list, notes, "what I learned today". Created from a **template that is itself a note** — editable like any other file, one template per note type. No task engine in v0: tasks are just text; no recurrence, aggregation, or carryover logic yet. Time notes link *to* permanent notes but are excluded from the canvas. All three scales are v0, because the logs screen shows them side by side; the day/week/season chain is derived from the id convention (`2026-07-23`, `2026-w30`, `2026-summer`), not from stored links.
+Daily, weekly and season notes follow the current Obsidian pattern: quotes section (manually written), task list, notes, "what I learned today". Created from a **template that is itself a note** — editable like any other file, one template per note type, filled from a closed set of `{{id}}`/`{{created}}`/`{{title}}`/`{{content}}` placeholders (`adr/2026-07-template-placeholders-closed-set.md`). No task engine in v0: tasks are just text; no recurrence, aggregation, or carryover logic yet. Time notes link *to* permanent notes but are excluded from the canvas. All three scales are v0, because the logs screen shows them side by side; the day/week/season chain **and prev/next movement** are derived from the id convention (`2026-07-23`, `2026-w30`, `2026-summer`) plus an index existence check, never from links stored in the file — the templates seed no navigation (`adr/2026-07-time-navigation-derived-not-stored.md`).
 
 ### Capture notes
 
@@ -130,7 +130,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 
 **v0 — daily driver for writing** (task breakdown and current state: `roadmap-v0.md`)
 - Vault structure, `#meta` / `#l` conventions, shared template
-- File CRUD, note creation from per-type templates, time notes (day/week/season) with template + prev/next
+- File CRUD, note creation from per-type templates, time notes (day/week/season) with derived prev/next movement
 - The design language: "Deep field" palette and type scale as theme variables, dark and light, the one-line chrome
 - The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid
 - Hybrid block editor with live typst rendering (split-view fallback)
