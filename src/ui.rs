@@ -148,6 +148,38 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
            },
            "Today"
        }
+       button {
+           class: "delete-button",
+           onclick: {
+               let root = root.clone();
+               move |_| {
+                   let Some(file) = buffer.with(|open| {
+                       open.as_ref().map(|note| note.file().to_path_buf())
+                   }) else {
+                       return; // nothing open, nothing to delete
+                   };
+                   match delete_note(&root, &file) {
+                       Ok(()) => {
+                           // entry paths may be vault-relative or absolute;
+                           // join is a no-op on absolutes, so the comparison
+                           // handles both
+                           entries.with_mut(|list| {
+                               list.retain(|entry| {
+                                   root.join(&entry.path) != file
+                               })
+                           });
+                           // clearing the buffer also parks the pending
+                           // autosave: it re-reads the buffer at flush time,
+                           // so nothing resurrects the deleted file
+                           buffer.set(None);
+                           view.set(None);
+                       }
+                       Err(msg) => view.set(Some(Err(msg))),
+                   }
+               }
+           },
+           "Delete"
+       }
        }
                div { class: "editor",
                    {
@@ -281,6 +313,23 @@ fn daily_note(
     }
 }
 
+/// Deletes the note on disk, then forgets it in the index kept under the
+/// vault, so the running session matches what the next launch's rebuild
+/// would compute. Dangling links the deletion causes are the index's job
+/// to surface, not this function's.
+fn delete_note(root: &Path, file: &Path) -> Result<(), String> {
+    std::fs::remove_file(file)
+        .map_err(|err| format!("{}: {err}", file.display()))?;
+    // the index stores vault-relative paths; for a file outside the vault
+    // the full path simply matches no row, and remove_note is a no-op
+    let relative = file.strip_prefix(root).unwrap_or(file);
+    let mut index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("{}: {err:?}", file.display()))?;
+    index
+        .remove_note(relative)
+        .map_err(|err| format!("{}: {err:?}", file.display()))
+}
+
 /// The path may be vault-relative (from the index) or absolute (from a
 /// create) — the click handler's `root.join` is a no-op for absolute paths.
 fn entry_for(path: PathBuf) -> NoteEntry {
@@ -340,8 +389,8 @@ mod tests {
 
         assert_eq!(
             clicks.len(),
-            5,
-            "three notes, the create button and the today button: {html}"
+            6,
+            "three notes, then the create, today and delete buttons: {html}"
         );
         let alpha = html.find("alpha").expect("alpha is listed");
         let omega = html.find("omega").expect("omega is listed");
@@ -617,6 +666,130 @@ mod tests {
         assert!(html.contains("render-error"), "{html}");
         assert!(html.contains("UnknownTemplate"), "{html}");
         assert!(!vault.path().join(format!("time/{}.typ", today())).exists());
+    }
+
+    // -- delete: file and index rows gone, debt surfaces elsewhere -----------
+
+    #[test]
+    fn delete_note_removes_the_file_and_its_index_rows() {
+        let vault = temp_vault();
+        load_notes(vault.path()).expect("build the index");
+        let file = vault.path().join("permanent/alpha.typ");
+
+        delete_note(vault.path(), &file).expect("delete");
+
+        assert!(!file.exists());
+        let index = Index::open(&vault.path().join(".index/index.db"))
+            .expect("reopen the index");
+        assert!(
+            !index
+                .notes_by_category(&NoteCategory::Permanent)
+                .expect("query")
+                .contains(&PathBuf::from("permanent/alpha.typ")),
+            "the running index matches what a rebuild would compute"
+        );
+    }
+
+    #[test]
+    fn delete_note_reports_a_file_that_is_not_there() {
+        let vault = temp_vault();
+        let file = vault.path().join("permanent/ghost.typ");
+        let result = delete_note(vault.path(), &file);
+        assert!(matches!(result, Err(msg) if msg.contains("ghost.typ")));
+    }
+
+    #[test]
+    fn delete_note_reports_an_unopenable_index() {
+        // no load_notes: the .index directory was never created
+        let vault = temp_vault();
+        let file = vault.path().join("permanent/alpha.typ");
+        let result = delete_note(vault.path(), &file);
+        assert!(matches!(result, Err(msg) if msg.contains("alpha.typ")));
+        assert!(!file.exists(), "the file half still happened");
+    }
+
+    #[test]
+    fn delete_note_reports_an_index_it_cannot_write() {
+        let vault = temp_vault();
+        load_notes(vault.path()).expect("build the index");
+        let db = vault.path().join(".index/index.db");
+        let mut permissions = std::fs::metadata(&db)
+            .expect("stat the database")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&db, permissions)
+            .expect("make the database read-only");
+
+        let file = vault.path().join("permanent/alpha.typ");
+        let result = delete_note(vault.path(), &file);
+        assert!(matches!(result, Err(msg) if msg.contains("alpha.typ")));
+    }
+
+    #[test]
+    fn delete_note_outside_the_vault_touches_no_index_row() {
+        // the strip_prefix fallback: a full path matches no relative row
+        let vault = temp_vault();
+        load_notes(vault.path()).expect("build the index");
+        let outside = tempfile::tempdir().expect("a sibling temp dir");
+        let file = outside.path().join("stray.typ");
+        std::fs::write(&file, "= stray\n").expect("write the stray file");
+
+        delete_note(vault.path(), &file).expect("delete");
+
+        assert!(!file.exists());
+        let index = Index::open(&vault.path().join(".index/index.db"))
+            .expect("reopen the index");
+        assert_eq!(
+            index
+                .notes_by_category(&NoteCategory::Permanent)
+                .expect("query")
+                .len(),
+            2,
+            "no vault row was harmed"
+        );
+    }
+
+    #[test]
+    fn deleting_the_open_note_removes_it_everywhere() {
+        let vault = temp_vault();
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[0]);
+
+        click(&mut dom, clicks[5]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(!vault.path().join("permanent/alpha.typ").exists());
+        assert!(!html.contains("alpha"), "gone from the list too: {html}");
+        assert!(html.contains("Select a note"), "the pane is empty: {html}");
+        assert!(!html.contains("textarea"), "{html}");
+    }
+
+    #[test]
+    fn delete_with_nothing_open_does_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+
+        click(&mut dom, clicks[5]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("alpha"), "{html}");
+        assert!(html.contains("Select a note"), "{html}");
+        assert!(vault.path().join("permanent/alpha.typ").exists());
+    }
+
+    #[test]
+    fn a_delete_that_fails_reports_the_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[0]);
+        std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
+            .expect("pull the file out from under the app");
+
+        click(&mut dom, clicks[5]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("alpha.typ"), "{html}");
     }
 
     // -- load_notes: the happy path and every error edge --------------------

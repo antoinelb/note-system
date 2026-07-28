@@ -535,6 +535,34 @@ fn dangling_links_surface_the_planted_fixture() {
 }
 
 #[test]
+fn removing_a_linked_note_surfaces_its_backlinks_as_dangling() {
+    let (_dir, mut index) = fixture_index();
+    index
+        .remove_note(Path::new("permanent/zettelkasten.typ"))
+        .expect("remove the note");
+    // every former backlink source now points at nothing — visible debt,
+    // exactly what the delete action relies on instead of a confirmation
+    let dangle = |source: &str| DanglingLink {
+        source: PathBuf::from(source),
+        target: id("zettelkasten"),
+    };
+    assert_eq!(
+        index.dangling_links().expect("query"),
+        vec![
+            DanglingLink {
+                source: PathBuf::from("permanent/atomic-notes.typ"),
+                target: id("evergreen-notes"),
+            },
+            dangle("permanent/atomic-notes.typ"),
+            dangle("permanent/link-traps.typ"),
+            dangle("permanent/luhmann.typ"),
+            dangle("permanent/note-system.typ"),
+            dangle("time/2026-07-21.typ"),
+        ]
+    );
+}
+
+#[test]
 fn queries_report_sqlite_failures_instead_of_panicking() {
     let dir = tempdir();
     let db = dir.path().join("index.sqlite");
