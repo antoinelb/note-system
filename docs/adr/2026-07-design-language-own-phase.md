@@ -21,6 +21,7 @@ It ships no screen: it turns the frozen design into `assets/theme.css` plus the 
 
 **Both themes exist from the first styled rule.**
 Every colour goes through a custom property — `:root` for dark, `:root[data-theme="light"]` for light — and no colour literal ever appears outside `theme.css`.
+*(Amended by `2026-07-theme-attribute-on-app-root.md`: the attribute lives on the rendered `.app` root, not `<html>`, so the selectors are `.app` / `.app[data-theme="light"]`.)*
 That constraint is the whole point: it is nearly free while the rules are being written and expensive as a retrofit, and the design has already picked all ~20 light values, so there is nothing left to eyeball.
 
 Delivery is Dioxus' own mechanism, `document::Stylesheet { href: asset!("/assets/theme.css") }` (`.claude/dioxus.md` § Styles) — not inline `style:` attributes, which cannot express `:root` variables or a theme switch.

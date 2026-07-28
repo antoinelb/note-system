@@ -5,7 +5,7 @@ The plan carries the *what* and *why*; this file carries the *order* and the *st
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr/2026-07-two-screens-table-and-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
-**Next step → Phase 6, first unchecked box.**
+**Next step → Phase 7, first unchecked box.**
 
 ## How we work
 
@@ -109,14 +109,14 @@ Goal: the frozen design exists as code, so every screen after this one is built 
 Spec: `design/wireframes-v0.md` § Chrome, § Palette, § Typography. Decision: `adr/2026-07-design-language-own-phase.md`.
 Nothing here is a new screen — it is the vocabulary the logs screen is then written in.
 
-- [ ] `assets/theme.css`: the "Deep field" palette as custom properties, **both themes from the first rule** — `:root` dark, `:root[data-theme="light"]` light. No colour literal appears outside this file, ever.
-  - [ ] Decide how the theme is chosen: OS `prefers-color-scheme`, an explicit toggle, or both. **→ ADR**
-- [ ] Type scale: `ui-sans-serif` chrome, `ui-monospace` 9–10px for all metadata/labels/rail/calendar (uppercase + `.09em` for type labels and the month header).
-- [ ] The one-line chrome: two 14×14 stroked icons (table · logs) left, current lit and the other dim; the open-loops ember right. **Zero loops renders nothing at all** — absence, not a zero.
-- [ ] Normalize the mockups' spacing to multiples of 4 (`design/wireframes-v0.md` § Implementation notes: 9/11/18 → 8/12/16/20), keeping proportions rather than pixel values.
-- [ ] Note prose lives in `templates/template.typ`, not in the app: give it the design's serif body and title scale (`§ Typography`), since the app never restyles rendered note bodies.
-- [ ] Wire the stylesheet in: `document::Stylesheet { href: asset!("/assets/theme.css") }`.
-- [ ] Tests: the ember is absent at zero and present at non-zero, the lit icon follows the current screen, the theme attribute switches the resolved variables.
+- [x] `assets/theme.css`: the "Deep field" palette as custom properties, **both themes from the first rule** — the attribute lives on the rendered app root, `.app` dark and `.app[data-theme="light"]` light (`adr/2026-07-theme-attribute-on-app-root.md`). No colour literal appears outside this file, ever.
+  - [x] Decide how the theme is chosen: OS `prefers-color-scheme`, an explicit toggle, or both. **→ ADR** (`adr/2026-07-theme-keystroke-toggle.md` — Ctrl+T toggle only, dark default, session-only)
+- [x] Type scale: `ui-sans-serif` chrome, `ui-monospace` 9–10px for all metadata/labels/rail/calendar (uppercase + `.09em` for type labels and the month header).
+- [x] The one-line chrome: two 14×14 stroked icons (table · logs) left, current lit and the other dim; the open-loops ember right. **Zero loops renders nothing at all** — absence, not a zero. (The v0 count is typeless notes + dangling links; unsummarized captures and the live watcher feed are phase 10.)
+- [x] Normalize the mockups' spacing to multiples of 4 (`design/wireframes-v0.md` § Implementation notes: 9/11/18 → 8/12/16/20), keeping proportions rather than pixel values.
+- [x] Note prose lives in `templates/template.typ`, not in the app: give it the design's serif body and title scale (`§ Typography`), since the app never restyles rendered note bodies. (Libertinus Serif — the embedded default — per `adr/2026-07-embedded-typst-world.md`; the wireframes' EB Garamond was a stand-in.)
+- [x] Wire the stylesheet in: `document::Stylesheet { href: asset!("/assets/theme.css") }`.
+- [x] Tests: the ember is absent at zero and present at non-zero, the lit icon follows the current screen, the theme attribute switches the resolved variables.
 
 Exit: both themes render the phase-4 shell in the real palette, and `grep` finds no colour literal outside `theme.css`.
 

@@ -1,0 +1,147 @@
+/*
+ * Deep field — design/wireframes-v0.md § Palette, § Typography, § Chrome.
+ * Every colour in the app lives in this file
+ * (adr/2026-07-design-language-own-phase.md); the theme attribute sits on
+ * the rendered .app root, not <html>
+ * (adr/2026-07-theme-attribute-on-app-root.md).
+ */
+
+.app {
+  --bg: #0d0b18;
+  --border: #2a2545;
+  --ink: #c9c4dd;
+  --ink-bright: #e4e0f2;
+  --ink-muted: #6f6a8c;
+  --ink-faint: #4a4566;
+  --ink-faintest: #332c52;
+  --hairline: #1b1730;
+  --hairline-strong: #332c52;
+  --ember: #d9b06a;
+}
+
+.app[data-theme="light"] {
+  --bg: #f5f4f9;
+  --border: #dbd8e6;
+  --ink: #45415a;
+  --ink-bright: #45415a;
+  --ink-muted: #8b87a0;
+  --ink-faint: #a5a1b8;
+  --ink-faintest: #d5d2e0;
+  --hairline: #e5e2ee;
+  --hairline-strong: #d0cdda;
+  --ember: #b08a4a;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  box-sizing: border-box;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* focusable only so the theme keystroke has somewhere to land */
+.app:focus {
+  outline: none;
+}
+
+/* -- the one-line chrome: two icons, one number --------------------------- */
+
+/* mockup padding 10px 18px, normalized to multiples of 4 */
+.chrome {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  color: var(--ink-muted);
+}
+
+.chrome svg.lit {
+  color: var(--ink-bright);
+}
+
+.ember {
+  margin-left: auto;
+  font: 10px ui-monospace, Menlo, monospace;
+  color: var(--ember);
+}
+
+/* -- phase-4/5 scaffolding: just enough palette to prove the theme; the
+      list and the split view are deleted with the phase-7 logs screen ------ */
+
+.note-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.note-entry {
+  padding: 4px 0;
+  font: 10px ui-monospace, Menlo, monospace;
+  cursor: pointer;
+}
+
+.create-note {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.create-type,
+.create-title,
+.create-button,
+.today-button,
+.delete-button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--ink);
+  font: 10px ui-monospace, Menlo, monospace;
+  padding: 4px 8px;
+}
+
+.create-title::placeholder {
+  color: var(--ink-muted);
+}
+
+.editor {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+}
+
+.source {
+  flex: 1;
+  min-height: 320px;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--ink);
+  font: 12px ui-monospace, Menlo, monospace;
+  padding: 8px;
+}
+
+.rendered {
+  flex: 1;
+}
+
+/* the one warm hue doubles as the alert hue */
+.vault-error,
+.render-error {
+  padding: 16px;
+  font: 10px ui-monospace, Menlo, monospace;
+  color: var(--ember);
+}
+
+/* -- type scale: metadata labels (design § Typography) --------------------
+      kept last so it wins over the scaffolding element styles above */
+
+.type-label {
+  font: 600 9px ui-monospace, Menlo, monospace;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}

@@ -37,15 +37,42 @@ struct NoteEntry {
 pub fn App() -> Element {
     let vault = use_context::<VaultRoot>();
     let loaded = use_hook(|| load(vault.0));
-    match loaded {
-        Ok((root, entries)) => rsx! { Shell {root,entries}},
-        Err(msg) => rsx! { div { class: "vault-error", "{msg}"}},
+    let mut light = use_signal(|| false);
+    rsx! {
+        document::Stylesheet { href: asset!("/assets/theme.css") }
+        div {
+            class: "app",
+            // always "dark" or "light", never absent: the theme is a fact of
+            // the tree, not an absence to interpret
+            // (adr/2026-07-theme-attribute-on-app-root.md)
+            "data-theme": if light() { "light" } else { "dark" },
+            // focusable so the theme keystroke lands here; keydowns from the
+            // editor bubble up, so the chord also works while writing
+            tabindex: "0",
+            autofocus: true,
+            onkeydown: move |event| {
+                if event.modifiers().ctrl()
+                    && event.key() == Key::Character("t".to_string())
+                {
+                    light.set(!light());
+                }
+            },
+            {
+                match loaded {
+                    Ok((root, entries, loops)) => {
+                        rsx! { Shell { root, entries, loops } }
+                    }
+                    Err(msg) => rsx! { div { class: "vault-error", "{msg}" } },
+                }
+            }
+        }
     }
 }
 
 #[component]
-fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
+fn Shell(root: PathBuf, entries: Vec<NoteEntry>, loops: usize) -> Element {
     let mut entries = use_signal(|| entries);
+    let mut loops = use_signal(|| loops);
 
     let mut cache = use_signal(SvgCache::default);
     let mut view = use_signal(|| None::<Result<String, String>>);
@@ -74,6 +101,7 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
         }
     });
     rsx! {
+               Chrome { screen: Screen::Logs, loops: loops() }
                ul { class: "note-list",
                    for entry in entries() {
                        li {
@@ -89,7 +117,7 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
            div {
        class: "create-note",
            select {
-           class: "create-type",
+           class: "create-type type-label",
            onchange: move |event| new_type.set(event.value()),
            for name in PERMANENT_TYPES {
            option { value: "{name}", selected: name == new_type(), "{name}"}
@@ -159,7 +187,7 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
                        return; // nothing open, nothing to delete
                    };
                    match delete_note(&root, &file) {
-                       Ok(()) => {
+                       Ok(count) => {
                            // entry paths may be vault-relative or absolute;
                            // join is a no-op on absolutes, so the comparison
                            // handles both
@@ -173,6 +201,7 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
                            // so nothing resurrects the deleted file
                            buffer.set(None);
                            view.set(None);
+                           loops.set(count);
                        }
                        Err(msg) => view.set(Some(Err(msg))),
                    }
@@ -213,23 +242,78 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
            }
 }
 
-fn load(root: Option<PathBuf>) -> Result<(PathBuf, Vec<NoteEntry>), String> {
+/// v0 has one screen — the proto-logs list — so the table icon stays dim
+/// until v1 mounts it; neither icon navigates before the phase-7 logs screen.
+#[derive(Clone, Copy, PartialEq)]
+enum Screen {
+    Table,
+    Logs,
+}
+
+/// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
+/// current screen's lit, and the open-loops ember. Zero loops renders
+/// nothing at all — absence, not a zero.
+#[component]
+fn Chrome(screen: Screen, loops: usize) -> Element {
+    rsx! {
+        header { class: "chrome",
+            svg {
+                class: if screen == Screen::Table { "icon-table lit" } else { "icon-table" },
+                width: "14",
+                height: "14",
+                view_box: "0 0 14 14",
+                rect { x: "1", y: "2", width: "5", height: "4", fill: "none", stroke: "currentColor" }
+                rect { x: "8", y: "5", width: "5", height: "4", fill: "none", stroke: "currentColor" }
+                rect { x: "3", y: "9", width: "5", height: "4", fill: "none", stroke: "currentColor" }
+            }
+            svg {
+                class: if screen == Screen::Logs { "icon-logs lit" } else { "icon-logs" },
+                width: "14",
+                height: "14",
+                view_box: "0 0 14 14",
+                rect { x: "1.5", y: "2.5", width: "11", height: "10", fill: "none", stroke: "currentColor" }
+                line { x1: "1.5", y1: "5.5", x2: "12.5", y2: "5.5", stroke: "currentColor" }
+                line { x1: "4.5", y1: "1", x2: "4.5", y2: "3.5", stroke: "currentColor" }
+                line { x1: "9.5", y1: "1", x2: "9.5", y2: "3.5", stroke: "currentColor" }
+            }
+            if loops > 0 {
+                span { class: "ember", "{loops}" }
+            }
+        }
+    }
+}
+
+fn load(
+    root: Option<PathBuf>,
+) -> Result<(PathBuf, Vec<NoteEntry>, usize), String> {
     match root {
         Some(root) => match load_notes(&root) {
-            Ok(entries) => Ok((root, entries)),
+            Ok((entries, loops)) => Ok((root, entries, loops)),
             Err(err) => Err(format!("the index could not be built: {err:?}")),
         },
         None => Err("no vault: define NOTE_VAULT or HOME".to_string()),
     }
 }
 
-fn load_notes(root: &Path) -> Result<Vec<NoteEntry>, IndexError> {
+fn load_notes(root: &Path) -> Result<(Vec<NoteEntry>, usize), IndexError> {
     let notes = crate::index::scan_vault(root)?;
     let index_path = root.join(".index");
     std::fs::create_dir_all(&index_path)?;
     let mut index = Index::open(&index_path.join("index.db"))?;
     index.rebuild(&notes)?;
-    list_entries(&index)
+    survey(&index)
+}
+
+fn survey(index: &Index) -> Result<(Vec<NoteEntry>, usize), IndexError> {
+    Ok((list_entries(index)?, loop_count(index)?))
+}
+
+/// The v0 open-loops count: typeless notes + dangling links
+/// (adr/2026-07-debt-counter-then-list.md). Unsummarized captures join in
+/// phase 10, which also moves the count onto the watcher; until then delete
+/// is the one in-session action that can change it.
+fn loop_count(index: &Index) -> Result<usize, IndexError> {
+    Ok(index.typeless_notes()?.len() + index.dangling_links()?.len())
 }
 
 fn list_entries(index: &Index) -> Result<Vec<NoteEntry>, IndexError> {
@@ -316,8 +400,9 @@ fn daily_note(
 /// Deletes the note on disk, then forgets it in the index kept under the
 /// vault, so the running session matches what the next launch's rebuild
 /// would compute. Dangling links the deletion causes are the index's job
-/// to surface, not this function's.
-fn delete_note(root: &Path, file: &Path) -> Result<(), String> {
+/// to surface, not this function's — it only reports the refreshed loop
+/// count, since a delete is what can change it.
+fn delete_note(root: &Path, file: &Path) -> Result<usize, String> {
     std::fs::remove_file(file)
         .map_err(|err| format!("{}: {err}", file.display()))?;
     // the index stores vault-relative paths; for a file outside the vault
@@ -327,6 +412,7 @@ fn delete_note(root: &Path, file: &Path) -> Result<(), String> {
         .map_err(|err| format!("{}: {err:?}", file.display()))?;
     index
         .remove_note(relative)
+        .and_then(|()| loop_count(&index))
         .map_err(|err| format!("{}: {err:?}", file.display()))
 }
 
@@ -361,6 +447,10 @@ mod tests {
 
     use super::*;
 
+    /// Only a typst-rendered note carries the SVG namespace — the chrome's
+    /// rsx icons don't — so this is the "a note is rendered" marker.
+    const RENDERED_NOTE: &str = r#"xmlns="http://www.w3.org/2000/svg""#;
+
     // -- the App component, driven headlessly through a VirtualDom ----------
 
     #[test]
@@ -379,6 +469,117 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("vault-error"), "{html}");
         assert!(html.contains("the index could not be built"), "{html}");
+    }
+
+    // -- the theme: one keystroke, one attribute -----------------------------
+
+    #[test]
+    fn ctrl_t_toggles_the_theme_and_back() {
+        let (mut dom, keydown) = theme_app();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="dark""#), "{html}");
+
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="dark""#), "{html}");
+    }
+
+    #[test]
+    fn other_keys_leave_the_theme_alone() {
+        let (mut dom, keydown) = theme_app();
+        // a bare t (no modifier) and a chord on the wrong key: neither half
+        // of the Ctrl+T check may fire alone
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("t".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("x".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="dark""#), "{html}");
+    }
+
+    // -- the chrome: two icons and the ember ---------------------------------
+
+    #[test]
+    fn the_lit_icon_follows_the_current_screen() {
+        for (screen, lit, dim) in [
+            (Screen::Table, "icon-table lit", "icon-logs lit"),
+            (Screen::Logs, "icon-logs lit", "icon-table lit"),
+        ] {
+            let mut dom = VirtualDom::new_with_props(
+                Chrome,
+                ChromeProps { screen, loops: 0 },
+            );
+            dom.rebuild_to_vec();
+            let html = dioxus_ssr::render(&dom);
+            assert!(html.contains(lit), "{html}");
+            assert!(!html.contains(dim), "{html}");
+            assert!(!html.contains("ember"), "zero renders nothing: {html}");
+        }
+    }
+
+    #[test]
+    fn the_ember_is_absent_when_no_loops_are_open() {
+        let vault = temp_vault();
+        let (dom, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("ember"), "absence, not a zero: {html}");
+    }
+
+    #[test]
+    fn the_ember_shows_the_open_loop_count() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/linky.typ"),
+            format!("{}#l(\"ghost\")\n", note("linky")),
+        )
+        .expect("the dangling note is written");
+        let (dom, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"<span class="ember">1</span>"#), "{html}");
+    }
+
+    #[test]
+    fn deleting_the_last_loop_extinguishes_the_ember() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/linky.typ"),
+            format!("{}#l(\"ghost\")\n", note("linky")),
+        )
+        .expect("the dangling note is written");
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"<span class="ember">1</span>"#), "{html}");
+
+        // permanent notes list alphabetically — alpha, linky, omega — and
+        // the delete button is the last click listener
+        click(&mut dom, clicks[1]);
+        click(&mut dom, clicks[6]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(!vault.path().join("permanent/linky.typ").exists());
+        assert!(!html.contains("ember"), "the reward is absence: {html}");
     }
 
     #[test]
@@ -401,7 +602,7 @@ mod tests {
         assert!(html.contains("New note title"), "{html}");
 
         // nothing is rendered before a click
-        assert!(!html.contains("<svg"), "{html}");
+        assert!(!html.contains(RENDERED_NOTE), "{html}");
         assert!(html.contains("Select a note"), "{html}");
     }
 
@@ -411,7 +612,7 @@ mod tests {
         let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[0]);
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("<svg"), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
@@ -421,7 +622,7 @@ mod tests {
         click(&mut dom, clicks[2]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
-        assert!(!html.contains("<svg"), "{html}");
+        assert!(!html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
@@ -448,7 +649,7 @@ mod tests {
         type_into(&mut dom, inputs[0], &note("renamed"));
 
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("<svg"), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
         assert!(!html.contains("render-error"), "{html}");
         assert_eq!(
             std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
@@ -468,7 +669,7 @@ mod tests {
 
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
-        assert!(!html.contains("<svg"), "{html}");
+        assert!(!html.contains(RENDERED_NOTE), "{html}");
         // no hard blocks: a note that cannot compile is still the user's file
         assert_eq!(
             std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
@@ -530,7 +731,10 @@ mod tests {
         click(&mut dom, clicks[3]);
 
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("<svg"), "the new note opens rendered: {html}");
+        assert!(
+            html.contains(RENDERED_NOTE),
+            "the new note opens rendered: {html}"
+        );
         assert!(
             html.contains("deep-modules"),
             "the new note is listed: {html}"
@@ -622,7 +826,7 @@ mod tests {
         click(&mut dom, clicks[4]);
 
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("<svg"), "today opens rendered: {html}");
+        assert!(html.contains(RENDERED_NOTE), "today opens rendered: {html}");
         assert!(html.contains(&today()), "today is listed: {html}");
         let written = std::fs::read_to_string(
             vault.path().join(format!("time/{}.typ", today())),
@@ -643,7 +847,7 @@ mod tests {
         click(&mut dom, clicks[4]);
 
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("<svg"), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
         assert!(!html.contains("render-error"), "{html}");
         // the date also sits in the textarea source, so count list entries
         assert_eq!(
@@ -797,7 +1001,7 @@ mod tests {
     #[test]
     fn load_notes_lists_categories_in_fixed_order_then_paths() {
         let vault = temp_vault();
-        let entries =
+        let (entries, loops) =
             load_notes(vault.path()).expect("the temp vault indexes");
         let paths: Vec<&Path> =
             entries.iter().map(|entry| entry.path.as_path()).collect();
@@ -812,6 +1016,9 @@ mod tests {
         let labels: Vec<&str> =
             entries.iter().map(|entry| entry.label.as_str()).collect();
         assert_eq!(labels, ["alpha", "omega", "broken"]);
+        // broken.typ is a capture: a capture without a type is phase-10
+        // "unsummarized" debt, not a typeless note, so nothing is open here
+        assert_eq!(loops, 0);
     }
 
     #[test]
@@ -876,6 +1083,26 @@ mod tests {
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
+    #[test]
+    fn a_sabotaged_notes_table_fails_the_survey_and_the_count() {
+        let vault = temp_vault();
+        let index = sabotaged_index(vault.path(), "DROP TABLE notes");
+        let error = survey(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+        let error = loop_count(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_sabotaged_links_table_fails_the_survey_count() {
+        // the listing half survives on the notes table; the count is what
+        // reaches the links table and fails
+        let vault = temp_vault();
+        let index = sabotaged_index(vault.path(), "DROP TABLE links");
+        let error = survey(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
     // -- harness -------------------------------------------------------------
 
     /// Builds the App headlessly with the vault injected as root context —
@@ -899,6 +1126,66 @@ mod tests {
         let inputs = listeners(&mutations, "input");
         let changes = listeners(&mutations, "change");
         (dom, clicks, inputs, changes)
+    }
+
+    /// Mounts the App without a vault — the theme wrapper encloses the error
+    /// screen too, so this is the cheapest mount — and returns the keydown
+    /// target on the `.app` root.
+    fn theme_app() -> (VirtualDom, ElementId) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(None)));
+        let mutations = dom.rebuild_to_vec();
+        let keydown = listeners(&mutations, "keydown")[0];
+        (dom, keydown)
+    }
+
+    /// Fires a keydown on the app root. The physical code is irrelevant to
+    /// the theme chord, which reads only the key and its modifiers.
+    fn press(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        key: Key,
+        modifiers: Modifiers,
+    ) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedKeyboardData::new(
+                    key,
+                    Code::KeyT,
+                    Location::Standard,
+                    false,
+                    modifiers,
+                    false,
+                ),
+            )));
+            dom.runtime().handle_event(
+                "keydown",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// An index built over the vault, then vandalised through a second
+    /// connection — how the survey's error paths are reached.
+    fn sabotaged_index(vault: &Path, sabotage: &str) -> Index {
+        let notes =
+            crate::index::scan_vault(vault).expect("the temp vault scans");
+        let index_dir = vault.join(".index");
+        std::fs::create_dir_all(&index_dir)
+            .expect("the index directory is created");
+        let mut index = Index::open(&index_dir.join("index.db"))
+            .expect("the database opens");
+        index.rebuild(&notes).expect("the rebuild succeeds");
+        let saboteur = rusqlite::Connection::open(index_dir.join("index.db"))
+            .expect("a second connection opens");
+        saboteur
+            .execute_batch(sabotage)
+            .expect("the sabotage succeeds");
+        index
     }
 
     fn listeners(mutations: &Mutations, wanted: &str) -> Vec<ElementId> {
@@ -1071,9 +1358,9 @@ mod tests {
         )
     }
 
-    /// Only mouse and form events are real: the shell listens for clicks on
-    /// the note list and input on the editor, so every other conversion is
-    /// unreachable in these tests.
+    /// Only mouse, form and keyboard events are real: the shell listens for
+    /// clicks on the note list, input on the editor and keydown on the app
+    /// root, so every other conversion is unreachable in these tests.
     struct TestEvents;
 
     impl HtmlEventConverter for TestEvents {
@@ -1132,9 +1419,13 @@ mod tests {
 
         fn convert_keyboard_data(
             &self,
-            _: &PlatformEventData,
+            event: &PlatformEventData,
         ) -> KeyboardData {
-            unreachable!("the shell only listens for clicks")
+            event
+                .downcast::<SerializedKeyboardData>()
+                .cloned()
+                .map(KeyboardData::from)
+                .expect("the tests only fire serialized keyboard events")
         }
 
         fn convert_media_data(&self, _: &PlatformEventData) -> MediaData {
