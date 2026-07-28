@@ -9,16 +9,16 @@ UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr
 
 ## How we work
 
-- Unless tagged otherwise: **Antoine writes the code, Claude writes the unit tests and guides.**
+- The only goal is building the note system (`adr/2026-07-goal-build-only.md`) — whoever is at the keyboard writes whatever gets it done.
 - Items marked **→ ADR** are decisions to take together at the start of the task, then record in `docs/adr/`.
 - A phase is done when its exit criterion holds and `make test` passes with 100% coverage (phases 2+); a shortfall on regions is diagnosed per instantiation before writing any test (`adr/2026-07-coverage-100-percent-lines.md`).
-- Per-task loop: discuss approach → decisions become ADRs → Claude guides the implementation → Claude writes tests → Antoine implements until green → commit.
+- Per-task loop: discuss approach → decisions become ADRs → implement with tests until green → commit.
 
 ## Phase 0 — Scaffolding
 
 Goal: an empty Dioxus window opens and `make test` runs.
 
-- [x] Read `.claude/dioxus.md` before any Dioxus code (both of us, every time).
+- [x] Read `.claude/dioxus.md` before any Dioxus code (every time).
 - [x] Init cargo project, add Dioxus 0.7 desktop, render an empty window.
 - [x] `makefile` with `make test` = tests + coverage report.
   - [x] Pick the coverage tool (suggestion: `cargo-llvm-cov`). **→ ADR** (`adr/2026-07-coverage-cargo-llvm-cov.md`)
@@ -49,7 +49,7 @@ Goal: given a `.typ` file, extract metadata and links; malformed input is data, 
 - [x] Parse with `typst-syntax` (never regex):
   - [x] locate the `#meta(..)` call and extract its fields;
   - [x] extract all `#l("...")` calls and their targets.
-- [x] *(Claude)* Unit tests: happy path, no meta, malformed meta args, unknown type, duplicate `#meta`, `#l` inside strings/comments, empty file.
+- [x] Unit tests: happy path, no meta, malformed meta args, unknown type, duplicate `#meta`, `#l` inside strings/comments, empty file.
 
 Exit: parsing the phase-1 sample vault yields the expected notes and links; `make test` 100%.
 
@@ -62,7 +62,7 @@ Goal: a queryable index rebuilt from files and kept live by a watcher.
 - [x] Queries: list notes (by category/type/tag), backlinks of a note, dangling links, typeless notes.
 - [x] File watcher (`notify` crate): update the index on create/modify/delete. **→ ADR** (`adr/2026-07-incremental-vault-watching.md`)
   - [x] Debounce bursts; on anything ambiguous, fall back to a full rebuild — it must always be cheap enough for that.
-- [x] *(Claude)* Tests: rebuild is idempotent, dangling/typeless detection, watcher integration test on a temp vault.
+- [x] Tests: rebuild is idempotent, dangling/typeless detection, watcher integration test on a temp vault.
 
 Exit: delete `.index/`, relaunch, everything is back — the invariant "index is always rebuildable" is now enforced by a test.
 
@@ -75,7 +75,7 @@ Goal: open the app, see the note list, click a note, read it rendered.
 - [x] Compile note → SVG with an in-memory cache keyed by content hash; invalidate on change. **→ ADR** (`adr/2026-07-svg-cache-per-path.md`)
 - [x] Dioxus shell: note list from the index, click → rendered SVG view. **→ ADR** (`adr/2026-07-ui-covered-at-100.md`)
   - The list is deliberate scaffolding — the finished app has no list. It exists to prove the typst `World` works, and is deleted in phase 7; keep it dumb, don't grow features on it.
-- [x] *(Claude)* Tests: compile a sample note to SVG, cache hit/invalidation logic, UI wiring via `VirtualDom` + `dioxus_ssr`.
+- [x] Tests: compile a sample note to SVG, cache hit/invalidation logic, UI wiring via `VirtualDom` + `dioxus_ssr`.
 
 Exit: you can browse and read the real vault in the app.
 
@@ -88,7 +88,7 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
 - [x] Split-view editor: source pane | rendered pane, debounced recompile.
   - Like the phase-4 list, this is **deliberate scaffolding with a known deletion date**: the design has no split view anywhere, and neither the phase-7 logs centre pane nor v1's writing sheet has room for two panes. It exists so writing can start before the real screen does, and it is deleted in phase 7 — the buffer underneath survives, the two-pane widget does not. Keep it dumb.
 - [x] Saving: pick explicit save vs autosave. **→ ADR** (`adr/2026-07-debounced-autosave.md` — one idle timer drives save then recompile)
-- [ ] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
+- [x] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
   - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-id-scheme-kebab-frozen.md`, decided during phase 1; collision suffix superseded by `adr/2026-07-id-collision-is-an-error.md`)
   - [x] The `{{...}}` placeholder contract: which names exist, and what an unknown one does. **→ ADR** (`adr/2026-07-template-placeholders-closed-set.md`)
 - [ ] Daily note: a "today" action creates today's note from the daily template if missing.
@@ -98,7 +98,7 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
   - [ ] Define what a season *is* — the **boundaries**; the id form is already fixed at `2026-summer` by the design's rail rows (`design/wireframes-v0.md` § The logs screen), which also retires the accented `2026-été` that `adr/2026-07-repo-language-english.md` had earmarked as id-scheme coverage. **→ ADR**
   - [ ] Scale chain from a date: day → ISO week → season, resolved by `jiff` date math plus an index existence check, not by stored links.
 - [ ] Delete note (dangling links it causes become visible through the index).
-- [ ] *(Claude)* Tests: template instantiation, unknown placeholders, refusing to overwrite an existing note, daily prev/next resolution across gaps, scale-chain resolution at year and season boundaries.
+- [ ] Tests: template instantiation, unknown placeholders, refusing to overwrite an existing note, daily prev/next resolution across gaps, scale-chain resolution at year and season boundaries.
 
 Exit: a full day's workflow (open today, write, link, save) happens in the app, not Obsidian.
 
@@ -116,7 +116,7 @@ Nothing here is a new screen — it is the vocabulary the logs screen is then wr
 - [ ] Normalize the mockups' spacing to multiples of 4 (`design/wireframes-v0.md` § Implementation notes: 9/11/18 → 8/12/16/20), keeping proportions rather than pixel values.
 - [ ] Note prose lives in `templates/template.typ`, not in the app: give it the design's serif body and title scale (`§ Typography`), since the app never restyles rendered note bodies.
 - [ ] Wire the stylesheet in: `document::Stylesheet { href: asset!("/assets/theme.css") }`.
-- [ ] *(Claude)* Tests: the ember is absent at zero and present at non-zero, the lit icon follows the current screen, the theme attribute switches the resolved variables.
+- [ ] Tests: the ember is absent at zero and present at non-zero, the lit icon follows the current screen, the theme attribute switches the resolved variables.
 
 Exit: both themes render the phase-4 shell in the real palette, and `grep` finds no colour literal outside `theme.css`.
 
@@ -134,7 +134,7 @@ Spec: `design/wireframes-v0.md` § The logs screen (wireframe states `6c`–`6e`
 - [ ] Selecting in the rail or calendar swaps the centre pane. A selected empty day is **outlined, not filled** (selection ≠ existence) and shows one centred line offering the template — only `enter` writes the file, navigating never does.
 - [ ] Delete the phase-4 scaffolding list **and the phase-5 split-view widget**; the buffer moves into the centre pane.
 - [ ] Decide whether the rail scrolls continuously or pages by month (design leaves it open). **→ ADR**
-- [ ] *(Claude)* Tests: range query, rail ordering across scales, "note exists" marking, "captured today" contents, empty-day creation offered but not taken.
+- [ ] Tests: range query, rail ordering across scales, "note exists" marking, "captured today" contents, empty-day creation offered but not taken.
 
 Exit: you navigate a month of logs without touching the filesystem, and the app has no list left in it.
 
@@ -145,7 +145,7 @@ Goal: the block under the cursor shows source; every other block shows rendered 
 - [ ] Block segmentation from the `typst-syntax` tree (top-level markup nodes, never line-based).
 - [ ] Map cursor position → active block; render inactive blocks as cached SVG fragments.
 - [ ] Recompute block boundaries when the cursor leaves a block or on idle.
-- [ ] *(Claude)* Tests: segmentation on multi-line constructs, cursor→block mapping at boundaries.
+- [ ] Tests: segmentation on multi-line constructs, cursor→block mapping at boundaries.
 
 Exit: hybrid editing feels better than plain source for daily writing.
 Pre-declared fallback (`plan.md` § Known risks): if this stalls, the logs centre pane ships as a **single pane toggling source ⇄ rendered** and this phase moves after v1.
@@ -158,7 +158,7 @@ Goal: links are cheap to write and visible in both directions.
 - [ ] `#l` insertion: hotkey + autocomplete over note ids/titles from the index.
 - [ ] Backlinks panel on the open note.
 - [ ] Dangling links visibly marked (in the panel at minimum).
-- [ ] *(Claude)* Tests: autocomplete filtering, backlink query wiring.
+- [ ] Tests: autocomplete filtering, backlink query wiring.
 
 Exit: you never type a full `#l("...")` by hand.
 
@@ -171,7 +171,7 @@ Goal: zero-friction capture in, visible debt out — v0 complete.
 - [ ] Define what marks a capture "summarized" (suggestion: a non-empty summary block from the capture template). **→ ADR**
 - [ ] Feed the phase-6 ember its real count, and make clicking it open a flat list of unsummarized captures, dangling links and typeless notes. No ages, no grouping, no per-item actions — the queries already exist from phase 3 (`adr/2026-07-debt-counter-then-list.md`).
   - **Known design gap**: the deck never drew the open-loops screen ("show the loops screen in this language" is in its own *try next*). The flat list is therefore designed here, in phase-6 vocabulary, not transcribed from a wireframe.
-- [ ] *(Claude)* Tests: capture creation, summarized-detection, counter total matches the list.
+- [ ] Tests: capture creation, summarized-detection, counter total matches the list.
 
 Exit: v0 checklist below is fully green.
 

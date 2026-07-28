@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::domain::NoteCategory;
+use crate::domain::{NoteCategory, NoteType};
 use crate::editor::{Buffer, apply_edit};
 use crate::index::{Index, IndexError};
 use crate::render::SvgCache;
@@ -12,6 +12,17 @@ use crate::render::SvgCache;
 const QUIET: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const QUIET: Duration = Duration::from_millis(1);
+
+const PERMANENT_TYPES: [&str; 8] = [
+    "person",
+    "organisation",
+    "source",
+    "concept",
+    "claim",
+    "idea",
+    "personal",
+    "project",
+];
 
 #[derive(Clone, Debug)]
 pub struct VaultRoot(pub Option<PathBuf>);
@@ -34,9 +45,15 @@ pub fn App() -> Element {
 
 #[component]
 fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
+    let mut entries = use_signal(|| entries);
+
     let mut cache = use_signal(SvgCache::default);
     let mut view = use_signal(|| None::<Result<String, String>>);
     let mut buffer = use_signal(|| None::<Buffer>);
+
+    let mut new_type = use_signal(|| "concept".to_string());
+    let mut new_title = use_signal(String::new);
+
     let _autosave = use_resource({
         let root = root.clone();
         move || {
@@ -57,63 +74,91 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
         }
     });
     rsx! {
-        ul { class: "note-list",
-            for entry in entries {
-                li {
-                    class: "note-entry",
-                    onclick: {
-                        let root = root.clone();
-                        let path = entry.path.clone();
-                        move |_| match Buffer::open(root.join(&path)) {
-                            Ok(note) => {
-                                let rendered = cache
-                                    .with_mut(|cache| render_buffer(&root, &note, cache));
-                                view.set(Some(rendered));
-                                buffer.set(Some(note));
-                            }
-                            Err(err) => {
-                                buffer.set(None);
-                                view.set(Some(Err(format!(
-                                    "{}: {err}",
-                                    path.display()
-                                ))));
-                            }
-                        }
-                    },
-                    "{entry.label}"
-                }
-            }
-        }
-        div { class: "editor",
-            {
-                let open = buffer.read();
-                match open.as_ref() {
-                    Some(note) => rsx! {
-                        textarea {
-                            key: "{note.file().display()}",
-                            class: "source",
-                            initial_value: "{note.text()}",
-                            oninput: move |event| {
-                                buffer.with_mut(|current| {
-                                    apply_edit(current, event.value())
-                                });
-                            },
-                        }
-                    },
-                    None => rsx! {},
-                }
-            }
-            div { class: "rendered",
-                {
-                    match view() {
-                        Some(Ok(svg)) => rsx! { div { dangerous_inner_html: "{svg}" } },
-                        Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
-                        None => rsx! { p { "Select a note" } },
-                    }
-                }
-            }
-        }
-    }
+               ul { class: "note-list",
+                   for entry in entries() {
+                       li {
+                           class: "note-entry",
+                           onclick: {
+                               let root = root.clone();
+                               let path = entry.path.clone();
+                       move |_| open_note(&root,root.join(&path),cache,view,buffer)                    },
+                           "{entry.label}"
+                       }
+                   }
+               }
+           div {
+       class: "create-note",
+           select {
+           class: "create-type",
+           onchange: move |event| new_type.set(event.value()),
+           for name in PERMANENT_TYPES {
+           option { value: "{name}", selected: name == new_type(), "{name}"}
+       }
+       }
+    input {
+           class: "create-title",
+           placeholder: "New note title",
+           value: "{new_title}",
+           oninput: move |event| new_title.set(event.value()),
+       }
+       button {
+           class: "create-button",
+           onclick: {
+               let root = root.clone();
+               move |_| {
+                   let note_type = NoteType::from_name(&new_type());
+                   match crate::template::create(
+                       &root,
+                       &NoteCategory::Permanent,
+                       &note_type,
+                       &new_title(),
+                       &today(),
+                       "",
+                   ) {
+                       Ok(path) => {
+                           entries.with_mut(|list| list.push(entry_for(path.clone())));
+                           new_title.set(String::new());
+                           open_note(&root, path, cache, view, buffer);
+                       }
+                       Err(err) => {
+                           view.set(Some(Err(format!("create: {err:?}"))));
+                       }
+                   }
+               }
+           },
+           "Create"
+       }
+       }
+               div { class: "editor",
+                   {
+                       let open = buffer.read();
+                       match open.as_ref() {
+                           Some(note) => rsx! {
+                               textarea {
+                                   key: "{note.file().display()}",
+                                   class: "source",
+                                   initial_value: "{note.text()}",
+                                   oninput: move |event| {
+                                       buffer.with_mut(|current| {
+                                           apply_edit(current, event.value())
+                                       });
+                                   },
+                               }
+                           },
+                           None => rsx! {},
+                       }
+                   }
+                   div { class: "rendered",
+                       {
+                           match view() {
+                               Some(Ok(svg)) => rsx! { div { dangerous_inner_html: "{svg}" } },
+                               Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
+                               None => rsx! { p { "Select a note" } },
+                           }
+                       }
+                   }
+               }
+           }
 }
 
 fn load(root: Option<PathBuf>) -> Result<(PathBuf, Vec<NoteEntry>), String> {
@@ -144,14 +189,7 @@ fn list_entries(index: &Index) -> Result<Vec<NoteEntry>, IndexError> {
         NoteCategory::Generated,
     ] {
         for path in index.notes_by_category(&category)? {
-            entries.push(NoteEntry {
-                label: path
-                    .file_stem()
-                    .unwrap_or(path.as_os_str())
-                    .to_string_lossy()
-                    .into_owned(),
-                path,
-            });
+            entries.push(entry_for(path));
         }
     }
     Ok(entries)
@@ -175,6 +213,46 @@ fn flush(
     note.save()
         .map_err(|err| format!("{}: {err}", note.file().display()))?;
     render_buffer(root, note, cache)
+}
+
+fn open_note(
+    root: &Path,
+    file: PathBuf,
+    mut cache: Signal<SvgCache>,
+    mut view: Signal<Option<Result<String, String>>>,
+    mut buffer: Signal<Option<Buffer>>,
+) {
+    match Buffer::open(file.clone()) {
+        Ok(note) => {
+            let rendered =
+                cache.with_mut(|cache| render_buffer(root, &note, cache));
+            view.set(Some(rendered));
+            buffer.set(Some(note));
+        }
+        Err(err) => {
+            buffer.set(None);
+            view.set(Some(Err(format!("{}: {err}", file.display()))));
+        }
+    }
+}
+
+/// The path may be vault-relative (from the index) or absolute (from a
+/// create) — the click handler's `root.join` is a no-op for absolute paths.
+fn entry_for(path: PathBuf) -> NoteEntry {
+    NoteEntry {
+        label: path
+            .file_stem()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+        path,
+    }
+}
+
+/// The one clock read in the app: creation dates enter at this edge, so
+/// everything below it stays deterministic (`created` is always a parameter).
+fn today() -> String {
+    jiff::Zoned::now().date().to_string()
 }
 
 #[cfg(test)]
@@ -215,11 +293,18 @@ mod tests {
         let (dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
 
-        assert_eq!(clicks.len(), 3, "{html}");
+        assert_eq!(
+            clicks.len(),
+            4,
+            "three notes and the create button: {html}"
+        );
         let alpha = html.find("alpha").expect("alpha is listed");
         let omega = html.find("omega").expect("omega is listed");
         let broken = html.find("broken").expect("broken is listed");
         assert!(alpha < omega && omega < broken, "{html}");
+
+        // the create bar is mounted after the list
+        assert!(html.contains("New note title"), "{html}");
 
         // nothing is rendered before a click
         assert!(!html.contains("<svg"), "{html}");
@@ -338,6 +423,69 @@ mod tests {
         );
     }
 
+    // -- the create bar: type + title in, a filled note out ------------------
+
+    #[test]
+    fn creating_a_note_fills_the_template_and_opens_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, inputs, _) =
+            mounted_app(Some(vault.path().to_path_buf()));
+        assert_eq!(inputs.len(), 1, "the create bar mounts one title input");
+
+        type_into(&mut dom, inputs[0], "Deep Modules");
+        click(&mut dom, clicks[3]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("<svg"), "the new note opens rendered: {html}");
+        assert!(
+            html.contains("deep-modules"),
+            "the new note is listed: {html}"
+        );
+        let written = std::fs::read_to_string(
+            vault.path().join("permanent/deep-modules.typ"),
+        )
+        .expect("the created note reached disk");
+        assert!(written.contains("= Deep Modules"), "{written}");
+        assert!(written.contains(&today()), "{written}");
+        assert!(
+            !written.contains("{{"),
+            "every placeholder is filled: {written}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_title_is_an_error_not_a_second_file() {
+        let vault = temp_vault();
+        let (mut dom, clicks, inputs, _) =
+            mounted_app(Some(vault.path().to_path_buf()));
+
+        type_into(&mut dom, inputs[0], "Twice");
+        click(&mut dom, clicks[3]);
+        type_into(&mut dom, inputs[0], "Twice");
+        click(&mut dom, clicks[3]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("AlreadyExists"), "{html}");
+    }
+
+    #[test]
+    fn a_type_without_a_template_reports_the_create_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, inputs, changes) =
+            mounted_app(Some(vault.path().to_path_buf()));
+        assert_eq!(changes.len(), 1, "the create bar mounts one type select");
+
+        change_type(&mut dom, changes[0], "idea");
+        type_into(&mut dom, inputs[0], "An Idea");
+        click(&mut dom, clicks[3]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("UnknownTemplate"), "{html}");
+        assert!(!vault.path().join("permanent/an-idea.typ").exists());
+    }
+
     // -- load_notes: the happy path and every error edge --------------------
 
     #[test]
@@ -428,12 +576,23 @@ mod tests {
     /// the same channel `main` uses — and returns the click targets found in
     /// the initial mutations, in document order.
     fn rendered_app(root: Option<PathBuf>) -> (VirtualDom, Vec<ElementId>) {
+        let (dom, clicks, _, _) = mounted_app(root);
+        (dom, clicks)
+    }
+
+    /// Like `rendered_app`, but also returns the create bar's `input` (title)
+    /// and `change` (type select) listeners from the initial mutations.
+    fn mounted_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, Vec<ElementId>, Vec<ElementId>) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
         let mutations = dom.rebuild_to_vec();
         let clicks = listeners(&mutations, "click");
-        (dom, clicks)
+        let inputs = listeners(&mutations, "input");
+        let changes = listeners(&mutations, "change");
+        (dom, clicks, inputs, changes)
     }
 
     fn listeners(mutations: &Mutations, wanted: &str) -> Vec<ElementId> {
@@ -483,6 +642,22 @@ mod tests {
                 target,
             );
             settle(dom).await;
+        });
+    }
+
+    /// Fires a `change` event on the type select — the picker's only channel.
+    fn change_type(dom: &mut VirtualDom, target: ElementId, value: &str) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedFormData::new(value.to_string(), Vec::new()),
+            )));
+            dom.runtime().handle_event(
+                "change",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            dom.render_immediate_to_vec();
         });
     }
 
@@ -539,6 +714,17 @@ mod tests {
                     "tags: (), origin: none) = []\n",
                     "#let l(id) = [#id]\n",
                     "#let note(doc) = doc\n",
+                )
+                .to_string(),
+            ),
+            (
+                "templates/concept.typ",
+                concat!(
+                    "#import \"/templates/template.typ\": *\n",
+                    "#show: note\n",
+                    "#meta(id: \"{{id}}\", type: \"concept\", ",
+                    "created: \"{{created}}\")\n",
+                    "\n= {{title}}\n",
                 )
                 .to_string(),
             ),

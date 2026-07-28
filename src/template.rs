@@ -123,7 +123,8 @@ mod tests {
 
     #[test]
     fn fill_substitutes_every_placeholder_including_repeats() {
-        let template = "#meta(id: \"{{id}}\", created: \"{{created}}\")\n= {{id}}\n";
+        let template =
+            "#meta(id: \"{{id}}\", created: \"{{created}}\")\n= {{id}}\n";
         assert_eq!(
             fill(template, ALL_VALUES).expect("fill"),
             "#meta(id: \"deep-modules\", created: \"2026-07-27\")\n= deep-modules\n"
@@ -146,7 +147,10 @@ mod tests {
     #[test]
     fn an_unterminated_placeholder_is_plain_text() {
         // the ADR's known ceiling: no closing delimiter, nothing to recognize
-        assert_eq!(fill("= {{titel\n", ALL_VALUES).expect("fill"), "= {{titel\n");
+        assert_eq!(
+            fill("= {{titel\n", ALL_VALUES).expect("fill"),
+            "= {{titel\n"
+        );
     }
 
     #[test]
@@ -198,7 +202,8 @@ mod tests {
     fn vault_with(template_name: &str, template: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("create tempdir");
         for sub in ["templates", "permanent", "time", "capture", "generated"] {
-            std::fs::create_dir(dir.path().join(sub)).expect("create vault dir");
+            std::fs::create_dir(dir.path().join(sub))
+                .expect("create vault dir");
         }
         std::fs::write(
             dir.path()
@@ -243,9 +248,12 @@ mod tests {
             )
         };
         let first = today().expect("first create");
-        std::fs::write(&first, "= 2026-07-27\nEdited by hand.\n").expect("edit note");
+        std::fs::write(&first, "= 2026-07-27\nEdited by hand.\n")
+            .expect("edit note");
         let result = today();
-        assert!(matches!(result, Err(TemplateError::AlreadyExists(path)) if path == first));
+        assert!(
+            matches!(result, Err(TemplateError::AlreadyExists(path)) if path == first)
+        );
         assert_eq!(
             std::fs::read_to_string(&first).expect("read note"),
             "= 2026-07-27\nEdited by hand.\n"
@@ -263,7 +271,9 @@ mod tests {
             "2026-07-27",
             "",
         );
-        assert!(matches!(result, Err(TemplateError::EmptyId(title)) if title == "???"));
+        assert!(
+            matches!(result, Err(TemplateError::EmptyId(title)) if title == "???")
+        );
     }
 
     #[test]
@@ -293,14 +303,17 @@ mod tests {
             "2026-07-27",
             "",
         );
-        assert!(matches!(result, Err(TemplateError::UnknownTemplate(name)) if name == "daily"));
+        assert!(
+            matches!(result, Err(TemplateError::UnknownTemplate(name)) if name == "daily")
+        );
     }
 
     #[test]
     fn an_unreadable_template_is_io_not_unknown() {
         let dir = vault_with("concept", "");
         // a directory where a file should be: reading fails, but not with NotFound
-        std::fs::create_dir(dir.path().join("templates/daily.typ")).expect("create decoy dir");
+        std::fs::create_dir(dir.path().join("templates/daily.typ"))
+            .expect("create decoy dir");
         let result = create(
             dir.path(),
             &NoteCategory::Time,
@@ -315,7 +328,8 @@ mod tests {
     #[test]
     fn a_missing_category_dir_is_io() {
         let dir = vault_with("concept", "");
-        std::fs::remove_dir(dir.path().join("permanent")).expect("remove category dir");
+        std::fs::remove_dir(dir.path().join("permanent"))
+            .expect("remove category dir");
         let result = create(
             dir.path(),
             &NoteCategory::Permanent,
