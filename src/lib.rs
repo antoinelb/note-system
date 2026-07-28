@@ -6,6 +6,7 @@ pub mod index;
 pub mod parse;
 pub mod render;
 pub mod template;
+pub mod time;
 pub mod ui;
 pub mod vault;
 pub mod watch;
