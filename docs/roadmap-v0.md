@@ -91,7 +91,7 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
 - [x] Create note from template: pick type → instantiate template with `id`/`created` filled → open in editor.
   - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-id-scheme-kebab-frozen.md`, decided during phase 1; collision suffix superseded by `adr/2026-07-id-collision-is-an-error.md`)
   - [x] The `{{...}}` placeholder contract: which names exist, and what an unknown one does. **→ ADR** (`adr/2026-07-template-placeholders-closed-set.md`)
-- [ ] Daily note: a "today" action creates today's note from the daily template if missing.
+- [x] Daily note: a "today" action creates today's note from the daily template if missing.
   - [x] Previous/next movement resolves to the nearest *existing* daily note through the index; the template seeds no links (`adr/2026-07-time-navigation-derived-not-stored.md`; logic only in phase 5 — the phase-4 list stays the navigation surface until the logs screen consumes `daily_before`/`daily_after`).
 - [ ] Weekly + season notes (pulled into v0 by the logs screen, `adr/2026-07-two-screens-table-and-logs.md`):
   - [x] `weekly.typ` and `seasonal.typ` templates, plus a season note in the fixture vault (only `daily.typ` and a `2026-w30` fixture exist today).

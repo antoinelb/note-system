@@ -128,6 +128,26 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>) -> Element {
            },
            "Create"
        }
+       button {
+           class: "today-button",
+           onclick: {
+               let root = root.clone();
+               move |_| match daily_note(&root, &today()) {
+                   Ok((path, created)) => {
+                       if created {
+                           entries.with_mut(|list| {
+                               list.push(entry_for(path.clone()))
+                           });
+                       }
+                       open_note(&root, path, cache, view, buffer);
+                   }
+                   Err(err) => {
+                       view.set(Some(Err(format!("today: {err:?}"))));
+                   }
+               }
+           },
+           "Today"
+       }
        }
                div { class: "editor",
                    {
@@ -236,6 +256,31 @@ fn open_note(
     }
 }
 
+/// Today's daily note: created from the template when missing, reused when
+/// present — `AlreadyExists` carries the existing path, so "already there"
+/// is an answer here, not an error. The bool reports whether a file was
+/// written, so the caller knows to add a list entry.
+fn daily_note(
+    root: &Path,
+    date: &str,
+) -> Result<(PathBuf, bool), crate::template::TemplateError> {
+    // the id IS the date: kebab_id leaves "2026-07-27" unchanged
+    match crate::template::create(
+        root,
+        &NoteCategory::Time,
+        &NoteType::Daily,
+        date,
+        date,
+        "",
+    ) {
+        Ok(path) => Ok((path, true)),
+        Err(crate::template::TemplateError::AlreadyExists(path)) => {
+            Ok((path, false))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// The path may be vault-relative (from the index) or absolute (from a
 /// create) — the click handler's `root.join` is a no-op for absolute paths.
 fn entry_for(path: PathBuf) -> NoteEntry {
@@ -295,8 +340,8 @@ mod tests {
 
         assert_eq!(
             clicks.len(),
-            4,
-            "three notes and the create button: {html}"
+            5,
+            "three notes, the create button and the today button: {html}"
         );
         let alpha = html.find("alpha").expect("alpha is listed");
         let omega = html.find("omega").expect("omega is listed");
@@ -484,6 +529,94 @@ mod tests {
         assert!(html.contains("render-error"), "{html}");
         assert!(html.contains("UnknownTemplate"), "{html}");
         assert!(!vault.path().join("permanent/an-idea.typ").exists());
+    }
+
+    // -- the today action: create or open today's daily note -----------------
+
+    #[test]
+    fn daily_note_creates_once_then_reuses_without_touching_the_file() {
+        let vault = temp_vault();
+        let (path, created) =
+            daily_note(vault.path(), "2026-07-27").expect("first call");
+        assert!(created);
+        assert_eq!(path, vault.path().join("time/2026-07-27.typ"));
+
+        std::fs::write(&path, "= edited by hand\n").expect("edit the note");
+        let (again, created) =
+            daily_note(vault.path(), "2026-07-27").expect("second call");
+        assert!(!created, "already there is an answer, not a write");
+        assert_eq!(again, path);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read the note"),
+            "= edited by hand\n"
+        );
+    }
+
+    #[test]
+    fn daily_note_passes_other_errors_through() {
+        let vault = temp_vault();
+        std::fs::remove_file(vault.path().join("templates/daily.typ"))
+            .expect("remove the template");
+        let result = daily_note(vault.path(), "2026-07-27");
+        assert!(matches!(
+            result,
+            Err(crate::template::TemplateError::UnknownTemplate(name))
+                if name == "daily"
+        ));
+    }
+
+    #[test]
+    fn clicking_today_creates_and_opens_the_daily_note() {
+        let vault = temp_vault();
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+
+        click(&mut dom, clicks[4]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("<svg"), "today opens rendered: {html}");
+        assert!(html.contains(&today()), "today is listed: {html}");
+        let written = std::fs::read_to_string(
+            vault.path().join(format!("time/{}.typ", today())),
+        )
+        .expect("today's note reached disk");
+        assert!(
+            !written.contains("{{"),
+            "every placeholder filled: {written}"
+        );
+    }
+
+    #[test]
+    fn clicking_today_twice_opens_the_existing_note_once_listed() {
+        let vault = temp_vault();
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+
+        click(&mut dom, clicks[4]);
+        click(&mut dom, clicks[4]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("<svg"), "{html}");
+        assert!(!html.contains("render-error"), "{html}");
+        // the date also sits in the textarea source, so count list entries
+        assert_eq!(
+            html.matches(&format!(">{}</li>", today())).count(),
+            1,
+            "one list entry, not one per click: {html}"
+        );
+    }
+
+    #[test]
+    fn a_missing_daily_template_reports_the_today_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_file(vault.path().join("templates/daily.typ"))
+            .expect("remove the template");
+
+        click(&mut dom, clicks[4]);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("UnknownTemplate"), "{html}");
+        assert!(!vault.path().join(format!("time/{}.typ", today())).exists());
     }
 
     // -- load_notes: the happy path and every error edge --------------------
@@ -728,6 +861,17 @@ mod tests {
                 )
                 .to_string(),
             ),
+            (
+                "templates/daily.typ",
+                concat!(
+                    "#import \"/templates/template.typ\": *\n",
+                    "#show: note\n",
+                    "#meta(id: \"{{id}}\", type: \"daily\", ",
+                    "created: \"{{created}}\")\n",
+                    "\n= {{id}}\n",
+                )
+                .to_string(),
+            ),
             ("permanent/alpha.typ", note("alpha")),
             ("permanent/omega.typ", note("omega")),
             ("capture/broken.typ", "#let x = (\n".to_string()),
@@ -739,6 +883,9 @@ mod tests {
             .expect("the category directory is created");
             std::fs::write(path, text).expect("the note is written");
         }
+        // template::create writes into root/time without creating it
+        std::fs::create_dir(root.join("time"))
+            .expect("the time directory is created");
         dir
     }
 
