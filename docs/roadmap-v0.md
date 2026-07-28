@@ -94,7 +94,7 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
 - [ ] Daily note: a "today" action creates today's note from the daily template if missing.
   - [ ] Previous/next movement resolves to the nearest *existing* daily note through the index; the template seeds no links (`adr/2026-07-time-navigation-derived-not-stored.md`).
 - [ ] Weekly + season notes (pulled into v0 by the logs screen, `adr/2026-07-two-screens-table-and-logs.md`):
-  - [ ] `weekly.typ` and `seasonal.typ` templates, plus a season note in the fixture vault (only `daily.typ` and a `2026-w30` fixture exist today).
+  - [x] `weekly.typ` and `seasonal.typ` templates, plus a season note in the fixture vault (only `daily.typ` and a `2026-w30` fixture exist today).
   - [x] Define what a season *is* — the **boundaries**; the id form is already fixed at `2026-summer` by the design's rail rows (`design/wireframes-v0.md` § The logs screen), which also retires the accented `2026-été` that `adr/2026-07-repo-language-english.md` had earmarked as id-scheme coverage. **→ ADR** (`adr/2026-07-seasons-school-semesters.md` — school semesters: winter Jan–Apr, summer May–Aug, autumn Sep–Dec, no spring)
   - [ ] Scale chain from a date: day → ISO week → season, resolved by `jiff` date math plus an index existence check, not by stored links.
 - [ ] Delete note (dangling links it causes become visible through the index).

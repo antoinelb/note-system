@@ -235,6 +235,40 @@ mod tests {
     }
 
     #[test]
+    fn the_fixture_time_templates_instantiate_cleanly() {
+        // read the real fixture templates, so a placeholder typo in either
+        // file fails this build instead of the first "today" in production
+        for (name, note_type, id) in [
+            ("weekly", NoteType::Weekly, "2026-w31"),
+            ("seasonal", NoteType::Seasonal, "2026-autumn"),
+        ] {
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    format!("tests/fixtures/vault/templates/{name}.typ"),
+                ),
+            )
+            .expect("read fixture template");
+            let dir = vault_with(name, &text);
+            let path = create(
+                dir.path(),
+                &NoteCategory::Time,
+                &note_type,
+                id,
+                "2026-07-27",
+                "",
+            )
+            .expect("create");
+            assert_eq!(path, dir.path().join(format!("time/{id}.typ")));
+            let written = std::fs::read_to_string(&path).expect("read note");
+            assert!(written.contains(&format!("= {id}")), "{written}");
+            assert!(
+                !written.contains("{{"),
+                "every placeholder filled: {written}"
+            );
+        }
+    }
+
+    #[test]
     fn a_colliding_id_is_refused_and_the_existing_note_untouched() {
         let dir = vault_with("daily", "= {{id}}\n");
         let today = || {

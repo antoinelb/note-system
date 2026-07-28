@@ -15,7 +15,7 @@ use note_system::index::{
 #[test]
 fn scan_finds_every_note_sorted_and_skips_templates_and_non_typ_files() {
     let notes = scan_fixture();
-    assert_eq!(notes.len(), 17);
+    assert_eq!(notes.len(), 18);
     let all: Vec<&Path> = notes.iter().map(|n| n.path.as_path()).collect();
     assert!(all.contains(&Path::new("permanent/zettelkasten.typ")));
     assert!(!all.iter().any(|p| p.starts_with("templates")));
@@ -37,7 +37,7 @@ fn scan_assigns_category_from_top_level_directory() {
     assert_eq!(count(NoteCategory::Capture), 2);
     assert_eq!(count(NoteCategory::Generated), 1);
     assert_eq!(count(NoteCategory::Permanent), 10);
-    assert_eq!(count(NoteCategory::Time), 4);
+    assert_eq!(count(NoteCategory::Time), 5);
 }
 
 #[test]
@@ -282,6 +282,10 @@ fn notes_by_type_follows_meta_not_directory() {
     assert_eq!(
         index.notes_by_type(&NoteType::Weekly).expect("query"),
         paths(&["time/2026-w30.typ"])
+    );
+    assert_eq!(
+        index.notes_by_type(&NoteType::Seasonal).expect("query"),
+        paths(&["time/2026-summer.typ"])
     );
 }
 
