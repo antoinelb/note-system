@@ -1,4 +1,7 @@
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -27,6 +30,20 @@ const PERMANENT_TYPES: [&str; 8] = [
 #[derive(Clone, Debug)]
 pub struct VaultRoot(pub Option<PathBuf>);
 
+/// How Ctrl+Q reaches the windowing system: `main` injects the real
+/// window-close call, the headless tests inject a recorder — the same
+/// root-context channel as `VaultRoot`
+/// (adr/2026-07-ctrl-q-flushes-then-closes.md).
+#[derive(Clone)]
+pub struct Closer(pub Arc<dyn Fn() + Send + Sync>);
+
+/// The quit chord lands on the `.app` root, but the open buffer lives in
+/// `Shell` — so `Shell` registers its flush here for `App` to call before
+/// closing. A plain cell, not a signal: it is only ever read inside the
+/// event handler, so nothing needs to re-render when it is set.
+#[derive(Clone, Default)]
+struct QuitFlush(Rc<RefCell<Option<Callback<(), bool>>>>);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NoteEntry {
     path: PathBuf,
@@ -38,6 +55,9 @@ pub fn App() -> Element {
     let vault = use_context::<VaultRoot>();
     let loaded = use_hook(|| load(vault.0));
     let mut light = use_signal(|| false);
+    let quit_flush = use_context_provider(QuitFlush::default);
+    // absent in the headless tests, where there is no window to close
+    let closer = try_consume_context::<Closer>();
     rsx! {
         document::Stylesheet { href: asset!("/assets/theme.css") }
         div {
@@ -55,6 +75,18 @@ pub fn App() -> Element {
                     && event.key() == Key::Character("t".to_string())
                 {
                     light.set(!light());
+                } else if event.modifiers().ctrl()
+                    && event.key() == Key::Character("q".to_string())
+                {
+                    // flush before close, so a quit inside the autosave's
+                    // quiet window cannot drop the last keystrokes; a save
+                    // that fails cancels the quit and surfaces its error
+                    // (adr/2026-07-ctrl-q-flushes-then-closes.md)
+                    let flush = *quit_flush.0.borrow();
+                    let saved = flush.is_none_or(|flush| flush.call(()));
+                    if saved && let Some(closer) = &closer {
+                        (closer.0)();
+                    }
                 }
             },
             {
@@ -80,6 +112,30 @@ fn Shell(root: PathBuf, entries: Vec<NoteEntry>, loops: usize) -> Element {
 
     let mut new_type = use_signal(|| "concept".to_string());
     let mut new_title = use_signal(String::new);
+
+    // the Ctrl+Q flush: reports whether the open note reached disk, so a
+    // failed save can hold the app open instead of losing the buffer
+    let quit_flush = use_callback({
+        let root = root.clone();
+        move |()| {
+            let flushed = buffer.with(|open| {
+                let note = open.as_ref()?;
+                Some(cache.with_mut(|cache| flush(&root, note, cache)))
+            });
+            match flushed {
+                None => true, // nothing open, nothing to lose
+                Some(result) => {
+                    let saved = result.is_ok();
+                    view.set(Some(result));
+                    saved
+                }
+            }
+        }
+    });
+    let register = use_context::<QuitFlush>();
+    // once is enough: the Callback's identity is stable across re-renders,
+    // only its captured closure is refreshed
+    use_hook(move || register.0.borrow_mut().replace(quit_flush));
 
     let _autosave = use_resource({
         let root = root.clone();
@@ -440,6 +496,7 @@ fn today() -> String {
 mod tests {
     use std::any::Any;
     use std::rc::Rc;
+    use std::sync::atomic::Ordering;
 
     use dioxus::dioxus_core::{ElementId, Event, Mutation, Mutations};
     use dioxus::html::*;
@@ -513,6 +570,105 @@ mod tests {
             &mut dom,
             keydown,
             Key::Character("x".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="dark""#), "{html}");
+    }
+
+    // -- the quit chord: flush, then close -----------------------------------
+
+    #[test]
+    fn ctrl_q_asks_the_window_to_close() {
+        let vault = temp_vault();
+        let (mut dom, _, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(closed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ctrl_q_flushes_unsaved_edits_before_closing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        let inputs = open_note(&mut dom, clicks[0]);
+        edit_without_settling(&mut dom, inputs[0], &note("renamed"));
+
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(
+            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
+                .expect("the note is readable"),
+            note("renamed"),
+            "the quit flush reached disk without waiting out the debounce"
+        );
+    }
+
+    #[test]
+    fn ctrl_q_with_a_note_that_cannot_save_stays_open_with_the_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        let inputs = open_note(&mut dom, clicks[0]);
+
+        let note_path = vault.path().join("permanent/alpha.typ");
+        let mut permissions = std::fs::metadata(&note_path)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&note_path, permissions)
+            .expect("the note is made read-only");
+        edit_without_settling(&mut dom, inputs[0], &note("renamed"));
+
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "an unsavable note holds the app open"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("alpha.typ"), "{html}");
+    }
+
+    #[test]
+    fn ctrl_q_on_the_vault_error_screen_closes_immediately() {
+        // no Shell mounts, so no flush is ever registered
+        let (mut dom, _, keydown, closed) = quit_app(None);
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(closed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ctrl_q_without_a_window_to_close_is_harmless() {
+        // the headless default: no Closer in context, the chord is a no-op
+        let (mut dom, keydown) = theme_app();
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
             Modifiers::CONTROL,
         );
         let html = dioxus_ssr::render(&dom);
@@ -1126,6 +1282,52 @@ mod tests {
         let inputs = listeners(&mutations, "input");
         let changes = listeners(&mutations, "change");
         (dom, clicks, inputs, changes)
+    }
+
+    /// Like `rendered_app`, but with a recording `Closer` injected — the
+    /// harness for the quit chord — returning the app-root keydown target
+    /// and the flag the closer sets.
+    fn quit_app(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        ElementId,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let recorder = closed.clone();
+        dom.insert_any_root_context(Box::new(Closer(Arc::new(move || {
+            recorder.store(true, Ordering::SeqCst);
+        }))));
+        let mutations = dom.rebuild_to_vec();
+        let clicks = listeners(&mutations, "click");
+        let keydown = listeners(&mutations, "keydown")[0];
+        (dom, clicks, keydown, closed)
+    }
+
+    /// Fires an input event without driving the debounced autosave, leaving
+    /// the buffer dirty on purpose — how the quit tests create unsaved
+    /// edits.
+    fn edit_without_settling(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        text: &str,
+    ) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedFormData::new(text.to_string(), Vec::new()),
+            )));
+            dom.runtime().handle_event(
+                "input",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+        });
     }
 
     /// Mounts the App without a vault — the theme wrapper encloses the error
