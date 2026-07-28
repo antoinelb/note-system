@@ -12,7 +12,7 @@ notify-debouncer-full = "0.7"
 rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "jiff"] }
 tokio = { version = "1", features = ["time"] }
 typst = "0.15.1"
-typst-kit = { version = "0.15.1", features = ["embedded-fonts"] }
+typst-kit = { version = "0.15.1", features = ["embedded-fonts", "scan-fonts"] }
 typst-layout = "0.15.1"
 typst-svg = "0.15.1"
 typst-syntax = "0.15"

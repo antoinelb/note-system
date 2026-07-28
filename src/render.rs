@@ -19,6 +19,9 @@ use typst_svg::SvgOptions;
 static FONTS: LazyLock<FontStore> = LazyLock::new(|| {
     let mut font_store = FontStore::new();
     font_store.extend(typst_kit::fonts::embedded());
+    // system fonts too, so templates can use the same families the vanilla
+    // typst CLI would find (it scans the system by default)
+    font_store.extend(typst_kit::fonts::system());
     font_store
 });
 static LIBRARY: LazyLock<LazyHash<Library>> =

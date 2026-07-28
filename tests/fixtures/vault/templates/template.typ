@@ -29,7 +29,7 @@
 
 #let note(doc) = {
   set page(width: 14cm, height: auto, margin: 1.5cm)
-  set text(font: "Libertinus Serif", size: 11.25pt, fill: rgb("#45415a"))
+  set text(font: "Parisienne", size: 11.25pt, fill: rgb("#45415a"))
   set par(leading: 0.75em)
   show heading.where(level: 1): set text(size: 19.5pt, weight: 600)
   doc
