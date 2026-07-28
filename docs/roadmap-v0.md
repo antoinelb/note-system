@@ -92,11 +92,11 @@ Goal: the app replaces Obsidian for daily notes — **start daily-driving at the
   - [x] Id + filename scheme. **→ ADR** (`adr/2026-07-id-scheme-kebab-frozen.md`, decided during phase 1; collision suffix superseded by `adr/2026-07-id-collision-is-an-error.md`)
   - [x] The `{{...}}` placeholder contract: which names exist, and what an unknown one does. **→ ADR** (`adr/2026-07-template-placeholders-closed-set.md`)
 - [ ] Daily note: a "today" action creates today's note from the daily template if missing.
-  - [ ] Previous/next movement resolves to the nearest *existing* daily note through the index; the template seeds no links (`adr/2026-07-time-navigation-derived-not-stored.md`).
+  - [x] Previous/next movement resolves to the nearest *existing* daily note through the index; the template seeds no links (`adr/2026-07-time-navigation-derived-not-stored.md`; logic only in phase 5 — the phase-4 list stays the navigation surface until the logs screen consumes `daily_before`/`daily_after`).
 - [ ] Weekly + season notes (pulled into v0 by the logs screen, `adr/2026-07-two-screens-table-and-logs.md`):
   - [x] `weekly.typ` and `seasonal.typ` templates, plus a season note in the fixture vault (only `daily.typ` and a `2026-w30` fixture exist today).
   - [x] Define what a season *is* — the **boundaries**; the id form is already fixed at `2026-summer` by the design's rail rows (`design/wireframes-v0.md` § The logs screen), which also retires the accented `2026-été` that `adr/2026-07-repo-language-english.md` had earmarked as id-scheme coverage. **→ ADR** (`adr/2026-07-seasons-school-semesters.md` — school semesters: winter Jan–Apr, summer May–Aug, autumn Sep–Dec, no spring)
-  - [ ] Scale chain from a date: day → ISO week → season, resolved by `jiff` date math plus an index existence check, not by stored links.
+  - [x] Scale chain from a date: day → ISO week → season, resolved by `jiff` date math plus an index existence check, not by stored links.
 - [ ] Delete note (dangling links it causes become visible through the index).
 - [ ] Tests: template instantiation, unknown placeholders, refusing to overwrite an existing note, daily prev/next resolution across gaps, scale-chain resolution at year and season boundaries.
 

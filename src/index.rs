@@ -167,6 +167,55 @@ impl Index {
         )
     }
 
+    pub fn path_for_id(
+        &self,
+        id: &NoteId,
+    ) -> Result<Option<PathBuf>, IndexError> {
+        query_first(
+            &self.connection,
+            // ORDER BY path: duplicate ids are stored, not rejected, so the
+            // answer must at least be deterministic
+            "SELECT path FROM notes WHERE id = ?1 ORDER BY path LIMIT 1",
+            [id.0.as_str()],
+        )
+    }
+
+    /// The nearest daily note strictly before `day`, or `None` at the edge.
+    /// Daily ids sort lexicographically = chronologically (`YYYY-MM-DD`), so
+    /// the comparison *is* the gap resolution — `day` itself need not exist.
+    pub fn daily_before(
+        &self,
+        day: &NoteId,
+    ) -> Result<Option<PathBuf>, IndexError> {
+        query_first(
+            &self.connection,
+            // 'daily' stays a literal: a second parameter would mint a new
+            // generic instantiation of the query helpers (coverage cost)
+            concat!(
+                "SELECT path FROM notes ",
+                "WHERE type = 'daily' AND id < ?1 ",
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            [day.0.as_str()],
+        )
+    }
+
+    /// The nearest daily note strictly after `day`; see `daily_before`.
+    pub fn daily_after(
+        &self,
+        day: &NoteId,
+    ) -> Result<Option<PathBuf>, IndexError> {
+        query_first(
+            &self.connection,
+            concat!(
+                "SELECT path FROM notes ",
+                "WHERE type = 'daily' AND id > ?1 ",
+                "ORDER BY id ASC LIMIT 1"
+            ),
+            [day.0.as_str()],
+        )
+    }
+
     pub fn dangling_links(&self) -> Result<Vec<DanglingLink>, IndexError> {
         query_rows(
             &self.connection,
@@ -329,6 +378,14 @@ fn insert_note(
         )?;
     }
     Ok(())
+}
+
+fn query_first(
+    connection: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Option<PathBuf>, IndexError> {
+    Ok(query_paths(connection, sql, params)?.into_iter().next())
 }
 
 fn query_paths(

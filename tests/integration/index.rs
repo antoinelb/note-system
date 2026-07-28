@@ -9,6 +9,7 @@ use note_system::domain::{
 use note_system::index::{
     DanglingLink, Index, IndexError, SCHEMA_VERSION, scan_vault,
 };
+use note_system::time;
 
 // ---------------------------------------------------------------- scan
 
@@ -418,6 +419,107 @@ fn duplicate_ids_are_stored_not_rejected() {
         index.backlinks(&id("twin")).expect("query"),
         paths(&["permanent/c.typ"])
     );
+    // a duplicated id still resolves to one deterministic path
+    assert_eq!(
+        index.path_for_id(&id("twin")).expect("query"),
+        Some(PathBuf::from("permanent/a.typ"))
+    );
+    assert_eq!(index.path_for_id(&id("nowhere")).expect("query"), None);
+}
+
+#[test]
+fn daily_prev_next_resolve_across_gaps() {
+    let (_dir, mut index) = temp_index();
+    let daily = |path: &str, day: &str| {
+        note(
+            path,
+            NoteCategory::Time,
+            Some(day),
+            Some(NoteType::Daily),
+            &[],
+            &[],
+        )
+    };
+    let notes = vec![
+        daily("time/2026-07-01.typ", "2026-07-01"),
+        daily("time/2026-07-04.typ", "2026-07-04"),
+        daily("time/2026-07-10.typ", "2026-07-10"),
+        // a weekly note sorting after every daily id: without the type
+        // filter it would be the "next" of 2026-07-10
+        note(
+            "time/2026-w28.typ",
+            NoteCategory::Time,
+            Some("2026-w28"),
+            Some(NoteType::Weekly),
+            &[],
+            &[],
+        ),
+    ];
+    index.rebuild(&notes).expect("rebuild");
+    let before = |day: &str| index.daily_before(&id(day)).expect("query");
+    let after = |day: &str| index.daily_after(&id(day)).expect("query");
+    // gaps are crossed in both directions
+    assert_eq!(
+        before("2026-07-04"),
+        Some(PathBuf::from("time/2026-07-01.typ"))
+    );
+    assert_eq!(
+        after("2026-07-04"),
+        Some(PathBuf::from("time/2026-07-10.typ"))
+    );
+    // the anchor day need not exist
+    assert_eq!(
+        before("2026-07-06"),
+        Some(PathBuf::from("time/2026-07-04.typ"))
+    );
+    assert_eq!(
+        after("2026-07-06"),
+        Some(PathBuf::from("time/2026-07-10.typ"))
+    );
+    // past the edges there is nothing — the weekly note is not a daily step
+    assert_eq!(before("2026-07-01"), None);
+    assert_eq!(after("2026-07-10"), None);
+}
+
+#[test]
+fn daily_prev_next_walk_the_fixture_days() {
+    let (_dir, index) = fixture_index();
+    assert_eq!(
+        index.daily_before(&id("2026-07-22")).expect("query"),
+        Some(PathBuf::from("time/2026-07-21.typ"))
+    );
+    assert_eq!(
+        index.daily_after(&id("2026-07-22")).expect("query"),
+        Some(PathBuf::from("time/2026-07-23.typ"))
+    );
+}
+
+#[test]
+fn the_scale_chain_of_a_fixture_day_fully_resolves() {
+    let (_dir, index) = fixture_index();
+    let date = "2026-07-23".parse().expect("valid date");
+    let resolved: Vec<Option<PathBuf>> = time::scale_chain(date)
+        .iter()
+        .map(|scale_id| index.path_for_id(&id(scale_id)).expect("query"))
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![
+            Some(PathBuf::from("time/2026-07-23.typ")),
+            Some(PathBuf::from("time/2026-w30.typ")),
+            Some(PathBuf::from("time/2026-summer.typ")),
+        ]
+    );
+}
+
+#[test]
+fn a_scale_chain_with_no_notes_resolves_to_nothing() {
+    // derivation is total; existence is the index's answer
+    let (_dir, index) = fixture_index();
+    let date = "2027-01-01".parse().expect("valid date");
+    for scale_id in time::scale_chain(date) {
+        assert_eq!(index.path_for_id(&id(&scale_id)).expect("query"), None);
+    }
 }
 
 #[test]
@@ -448,6 +550,23 @@ fn queries_report_sqlite_failures_instead_of_panicking() {
     assert!(matches!(index.dangling_links(), Err(IndexError::Sqlite(_))));
     assert!(matches!(
         index.backlinks(&id("zettelkasten")),
+        Err(IndexError::Sqlite(_))
+    ));
+    {
+        let conn = rusqlite::Connection::open(&db).expect("raw open");
+        conn.execute_batch("DROP TABLE notes;")
+            .expect("drop notes table");
+    }
+    assert!(matches!(
+        index.path_for_id(&id("2026-07-22")),
+        Err(IndexError::Sqlite(_))
+    ));
+    assert!(matches!(
+        index.daily_before(&id("2026-07-22")),
+        Err(IndexError::Sqlite(_))
+    ));
+    assert!(matches!(
+        index.daily_after(&id("2026-07-22")),
         Err(IndexError::Sqlite(_))
     ));
 }
