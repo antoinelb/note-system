@@ -220,21 +220,16 @@ body {
   gap: 8px;
 }
 
+/* the same quiet 16px as the dates and the seasons row — the header
+   controls never shout */
 .cal-arrow,
 .cal-today {
   background: none;
   border: none;
   padding: 0;
-  font: inherit;
+  font: 16px Lato, sans-serif;
   color: var(--ink-muted);
   cursor: pointer;
-}
-
-/* the type-label look at the grid's date size */
-.cal-today {
-  font: 600 16px Lato, sans-serif;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
 }
 
 .cal-arrow:hover,
