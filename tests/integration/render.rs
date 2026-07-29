@@ -4,9 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use note_system::render::{
-    FragmentCache, RenderError, SvgCache, VaultWorld, render_svg,
-};
+use note_system::render::{FragmentCache, RenderError, VaultWorld, render_svg};
 use typst::World;
 use typst::diag::FileError;
 use typst::syntax::package::PackageSpec;
@@ -155,73 +153,6 @@ fn a_note_outside_the_vault_is_a_path_error_not_a_compile_error() {
 // makes recompilation impossible, so a successful render can only be a hit.
 
 #[test]
-fn a_cache_hit_serves_the_svg_without_recompiling() {
-    let vault = temp_vault();
-    let note = vault.path().join("permanent/a.typ");
-    let mut cache = SvgCache::default();
-
-    let first = cache
-        .render(vault.path(), &note, NOTE_A)
-        .expect("the first render compiles");
-    remove_template(&vault);
-    let second = cache
-        .render(vault.path(), &note, NOTE_A)
-        .expect("a hit must not recompile");
-    assert_eq!(first, second);
-}
-
-#[test]
-fn changed_text_recompiles_and_replaces_the_entry() {
-    let vault = temp_vault();
-    let note = vault.path().join("permanent/a.typ");
-    let mut cache = SvgCache::default();
-
-    cache
-        .render(vault.path(), &note, NOTE_A)
-        .expect("the first text compiles");
-    cache
-        .render(vault.path(), &note, NOTE_B)
-        .expect("the changed text compiles");
-    remove_template(&vault);
-
-    // one entry per note: B replaced A rather than joining it
-    assert!(cache.render(vault.path(), &note, NOTE_B).is_ok());
-    assert!(cache.render(vault.path(), &note, NOTE_A).is_err());
-}
-
-#[test]
-fn notes_are_cached_independently_of_each_other() {
-    let vault = temp_vault();
-    let a = vault.path().join("permanent/a.typ");
-    let b = vault.path().join("permanent/b.typ");
-    let mut cache = SvgCache::default();
-
-    cache.render(vault.path(), &a, NOTE_A).expect("a compiles");
-    cache.render(vault.path(), &b, NOTE_B).expect("b compiles");
-    remove_template(&vault);
-
-    // same text, both paths still cached: the key is the path, not the hash
-    assert!(cache.render(vault.path(), &a, NOTE_A).is_ok());
-    assert!(cache.render(vault.path(), &b, NOTE_B).is_ok());
-}
-
-#[test]
-fn a_failed_render_is_retried_not_cached() {
-    let vault = temp_vault();
-    let note = vault.path().join("permanent/a.typ");
-    let mut cache = SvgCache::default();
-
-    remove_template(&vault);
-    assert!(cache.render(vault.path(), &note, NOTE_A).is_err());
-
-    // the same text must be retried once the vault is repaired
-    restore_template(&vault);
-    assert!(cache.render(vault.path(), &note, NOTE_A).is_ok());
-}
-
-// The fragment cache reuses the same trick, plus sweeps between generations.
-
-#[test]
 fn a_fragment_hit_serves_the_svg_without_recompiling() {
     let vault = temp_vault();
     let note = vault.path().join("permanent/a.typ");
@@ -230,7 +161,11 @@ fn a_fragment_hit_serves_the_svg_without_recompiling() {
     let first = cache
         .render(vault.path(), &note, NOTE_A)
         .expect("the first render compiles");
-    assert!(first.starts_with("<svg"), "{}", &first[..first.len().min(80)]);
+    assert!(
+        first.starts_with("<svg"),
+        "{}",
+        &first[..first.len().min(80)]
+    );
     remove_template(&vault);
     let second = cache
         .render(vault.path(), &note, NOTE_A)

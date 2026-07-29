@@ -7,10 +7,12 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use jiff::civil::Date;
 
+use crate::blocks;
 use crate::domain::{NoteCategory, NoteType};
+use crate::editor::Editor;
 use crate::index::{Index, IndexError};
 use crate::logs::{self, Selection};
-use crate::render::SvgCache;
+use crate::render::FragmentCache;
 use crate::time;
 
 #[derive(Clone, Debug)]
@@ -83,21 +85,37 @@ fn Shell(
     loops: usize,
     today: Date,
 ) -> Element {
+    // the editor opens today's note before the signal takes the notes list;
+    // the initializer runs once, so the launch open costs no signal write
+    let mut editor = use_signal({
+        let root = root.clone();
+        let id = time::day_id(today);
+        let exists = notes.iter().any(|(existing, _)| existing == &id);
+        move || open_selected(&root, exists, &id)
+    });
     let mut notes = use_signal(|| notes);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
-    let mut notice = use_signal(|| None::<String>);
-    // the SVG cache is a memo store, not UI state: nothing should re-render
-    // when it fills, so a plain hook value rather than a signal
-    let cache = use_hook(|| Rc::new(RefCell::new(SvgCache::default())));
+    // the fragment cache is a memo store, not UI state: nothing should
+    // re-render when it fills, so a plain hook value rather than a signal
+    let fragments = use_hook(|| Rc::new(RefCell::new(FragmentCache::default())));
 
-    let select = use_callback(move |target: Selection| {
-        let anchor = logs::selection_date(&target.0, &target.1);
-        // every selectable id comes from our own formatters, so the today
-        // fallback guards the type system, not a reachable path
-        month.set(anchor.unwrap_or(today).first_of_month());
-        selected.set(target);
-        notice.set(None);
+    let select = use_callback({
+        let root = root.clone();
+        let fragments = fragments.clone();
+        move |target: Selection| {
+            let anchor = logs::selection_date(&target.0, &target.1);
+            // every selectable id comes from our own formatters, so the today
+            // fallback guards the type system, not a reachable path
+            month.set(anchor.unwrap_or(today).first_of_month());
+            let exists = notes
+                .peek()
+                .iter()
+                .any(|(existing, _)| existing == &target.1);
+            editor.set(open_selected(&root, exists, &target.1));
+            fragments.borrow_mut().sweep();
+            selected.set(target);
+        }
     });
 
     let (scale, id) = selected();
@@ -105,8 +123,8 @@ fn Shell(
     let exists = note_list.iter().any(|(existing, _)| existing == &id);
     let rows = logs::rail_rows(&note_list, Some(&(scale.clone(), id.clone())));
     let crumbs = logs::breadcrumbs(&scale, &id);
-    let rendered =
-        exists.then(|| render_note(&root, &id, &mut cache.borrow_mut()));
+    let panes = block_panes(&editor.read(), &root, &mut fragments.borrow_mut());
+    let notice = editor.read().notice().map(str::to_string);
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
     let day_ids: HashSet<&str> =
@@ -116,6 +134,7 @@ fn Shell(
 
     let keyboard = {
         let root = root.clone();
+        let fragments = fragments.clone();
         move |event: KeyboardEvent| {
             match event.key() {
                 // months page by keystroke as well as by scrolling; arrows
@@ -144,10 +163,16 @@ fn Shell(
                         &created.to_string(),
                         "",
                     ) {
-                        Ok(_) => notes.with_mut(|list| list.push((id, scale))),
-                        Err(err) => {
-                            notice.set(Some(format!("create: {err:?}")))
+                        Ok(_) => {
+                            editor.set(Editor::open(time_note_path(
+                                &root, &id,
+                            )));
+                            fragments.borrow_mut().sweep();
+                            notes.with_mut(|list| list.push((id, scale)));
                         }
+                        Err(err) => editor
+                            .write()
+                            .set_notice(format!("create: {err:?}")),
                     }
                 }
                 _ => {}
@@ -202,19 +227,80 @@ fn Shell(
                     }
                 }
                 {
-                    match notice() {
+                    match &notice {
                         Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
                         None => rsx! {},
                     }
                 }
                 {
-                    match &rendered {
-                        Some(Ok(svg)) => rsx! {
-                            div { class: "note", dangerous_inner_html: "{svg}" }
+                    match panes {
+                        Some(panes) => rsx! {
+                            div { class: "note-blocks",
+                                for pane in panes {
+                                    {
+                                        match pane {
+                                            Pane::Source { start, text } => {
+                                                let rows = text.split('\n').count();
+                                                rsx! {
+                                                    textarea {
+                                                        key: "{start}",
+                                                        class: "block-active",
+                                                        rows: "{rows}",
+                                                        spellcheck: "false",
+                                                        autofocus: true,
+                                                        initial_value: "{text}",
+                                                        oninput: move |event| {
+                                                            editor.write().edit(&event.value());
+                                                        },
+                                                        onkeydown: {
+                                                            let fragments = fragments.clone();
+                                                            move |event: KeyboardEvent| {
+                                                                if event.key() == Key::Escape {
+                                                                    editor.write().deactivate();
+                                                                    fragments.borrow_mut().sweep();
+                                                                } else if !event.modifiers().ctrl() {
+                                                                    // keystrokes belong to the caret: keep
+                                                                    // arrows off the month paging and enter
+                                                                    // off the create handler below; the ctrl
+                                                                    // chords still bubble to the app root
+                                                                    event.stop_propagation();
+                                                                }
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                            Pane::Fragment { start, rendered } => rsx! {
+                                                div {
+                                                    key: "{start}",
+                                                    class: "block",
+                                                    onclick: {
+                                                        let fragments = fragments.clone();
+                                                        move |_| {
+                                                            editor.write().activate(start);
+                                                            fragments.borrow_mut().sweep();
+                                                        }
+                                                    },
+                                                    {
+                                                        match rendered {
+                                                            Ok(svg) => rsx! {
+                                                                div { class: "note", dangerous_inner_html: "{svg}" }
+                                                            },
+                                                            Err(msg) => rsx! {
+                                                                p { class: "render-error", "{msg}" }
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                        }
+                                    }
+                                }
+                            }
                         },
-                        Some(Err(msg)) => rsx! {
-                            p { class: "render-error", "{msg}" }
-                        },
+                        // the note exists but would not open: the notice
+                        // above carries the error, the pane stays bare
+                        None if exists => rsx! {},
                         // empty is honest: no ghost template, one line
                         None => rsx! {
                             p { class: "empty-note",
@@ -422,21 +508,65 @@ fn loop_count(index: &Index) -> Result<usize, IndexError> {
     Ok(index.typeless_notes()?.len() + index.dangling_links()?.len())
 }
 
-/// The centre pane's note: a time note's id is its stem, so the path needs
-/// no index round-trip. Read from disk, compiled through the cache.
-fn render_note(
+/// The selected note's editor: opened when the index says the note exists,
+/// closed otherwise — selection ≠ existence, so an empty selection must not
+/// touch the filesystem.
+fn open_selected(root: &Path, exists: bool, id: &str) -> Editor {
+    if exists {
+        Editor::open(time_note_path(root, id))
+    } else {
+        Editor::closed()
+    }
+}
+
+/// A time note's id is its stem, so the path needs no index round-trip.
+fn time_note_path(root: &Path, id: &str) -> PathBuf {
+    root.join(NoteCategory::Time.as_dir())
+        .join(format!("{id}.typ"))
+}
+
+/// One centre-pane slot: the active block as raw source for the textarea,
+/// every other as its cached fragment, tagged with its start byte so a
+/// click activates by coordinate rather than by shiftable index.
+enum Pane {
+    Source { start: usize, text: String },
+    Fragment { start: usize, rendered: Result<String, String> },
+}
+
+fn block_panes(
+    editor: &Editor,
     root: &Path,
-    id: &str,
-    cache: &mut SvgCache,
-) -> Result<String, String> {
-    let file = root
-        .join(NoteCategory::Time.as_dir())
-        .join(format!("{id}.typ"));
-    let text = std::fs::read_to_string(&file)
-        .map_err(|err| format!("{}: {err}", file.display()))?;
-    cache
-        .render(root, &file, &text)
-        .map_err(|err| format!("{err:?}"))
+    cache: &mut FragmentCache,
+) -> Option<Vec<Pane>> {
+    let (file, text) = editor.note()?;
+    Some(
+        editor
+            .blocks()
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                let start = block.range.start;
+                if editor.active() == Some(index) {
+                    Pane::Source {
+                        start,
+                        text: text
+                            .get(block.range.clone())
+                            .unwrap_or("")
+                            .to_string(),
+                    }
+                } else {
+                    Pane::Fragment {
+                        start,
+                        rendered: cache.render(
+                            root,
+                            file,
+                            &blocks::fragment_source(text, block),
+                        ),
+                    }
+                }
+            })
+            .collect(),
+    )
 }
 
 /// The "captured today" block: the capture and generated notes the index
@@ -478,19 +608,22 @@ mod tests {
     /// Initial click-listener layout, established empirically (see the
     /// mounted-app doc): registration runs jump-panel first — the header's
     /// ‹ today › buttons, the three seasons, then each grid row as gutter +
-    /// day cells — then the two crumb jumps, then the five rail rows top to
-    /// bottom.
+    /// day cells — then the centre's two inactive blocks (today's preamble
+    /// and heading), then the two crumb jumps, then the five rail rows top
+    /// to bottom.
     const CAL_BACK: usize = 0;
     const CAL_TODAY: usize = 1;
     const CAL_FORWARD: usize = 2;
     const SEASON_AUTUMN: usize = 5;
     const GUTTER_W31: usize = 36;
-    const CRUMB_WEEK: usize = 42;
-    const RAIL_SUMMER: usize = 44;
-    const RAIL_W30: usize = 45;
-    const RAIL_DAY_23: usize = 46;
-    const RAIL_DAY_22: usize = 47;
-    const RAIL_DAY_21: usize = 48;
+    const BLOCK_PREAMBLE: usize = 42;
+    const BLOCK_HEADING: usize = 43;
+    const CRUMB_WEEK: usize = 44;
+    const RAIL_SUMMER: usize = 46;
+    const RAIL_W30: usize = 47;
+    const RAIL_DAY_23: usize = 48;
+    const RAIL_DAY_22: usize = 49;
+    const RAIL_DAY_21: usize = 50;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
     /// one gutter per started week row.
     const fn day_cell(day: usize) -> usize {
@@ -678,8 +811,9 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            49,
-            "3 header + 3 seasons + 5 gutters + 31 days + 2 crumbs + 5 rail: {html}"
+            51,
+            "3 header + 3 seasons + 5 gutters + 31 days + 2 crumbs \
+             + 2 blocks + 5 rail: {html}"
         );
     }
 
@@ -713,14 +847,16 @@ mod tests {
     }
 
     #[test]
-    fn a_note_that_cannot_compile_shows_the_render_error() {
+    fn a_block_that_cannot_compile_fails_alone() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[RAIL_DAY_21]);
         let html = dioxus_ssr::render(&dom);
+        // the broken `#let x = (` block shows its diagnostic inline while
+        // the preamble block still renders — per-block honesty
         assert!(html.contains("render-error"), "{html}");
-        assert!(!html.contains(RENDERED_NOTE), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
@@ -864,6 +1000,120 @@ mod tests {
             std::fs::read_to_string(vault.path().join("time/2026-autumn.typ"))
                 .expect("enter wrote the seasonal note");
         assert!(written.contains("2026-09-01"), "the first day: {written}");
+    }
+
+    // -- the hybrid editor: click to source, type, escape to rendered --------
+
+    #[test]
+    fn clicking_a_block_opens_its_source_in_place() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[BLOCK_HEADING]);
+        let html = dioxus_ssr::render(&dom);
+
+        assert!(html.contains("block-active"), "{html}");
+        assert!(html.contains("= 2026-07-23"), "the raw source: {html}");
+        assert!(
+            html.contains(RENDERED_NOTE),
+            "the preamble block stays rendered: {html}"
+        );
+    }
+
+    #[test]
+    fn typing_updates_the_buffer_and_escape_writes_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        type_into(&mut dom, input, "= renamed\n\nencore\n");
+        let file = vault.path().join("time/2026-07-23.typ");
+        let untouched =
+            std::fs::read_to_string(&file).expect("the note is readable");
+        assert!(!untouched.contains("renamed"), "typing alone never writes");
+
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("block-active"), "escape closes it: {html}");
+        // the blank line split the heading block: preamble + two prose
+        assert_eq!(html.matches(r#"class="block""#).count(), 3, "{html}");
+        let saved =
+            std::fs::read_to_string(&file).expect("the note is readable");
+        assert!(saved.contains("= renamed"), "{saved}");
+        assert!(saved.contains("encore"), "{saved}");
+    }
+
+    #[test]
+    fn an_unwritable_note_surfaces_the_flush_error_on_activation() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+
+        // activation flushes before moving, and the failure is the notice
+        click(&mut dom, clicks[BLOCK_HEADING]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("2026-07-23.typ"), "{html}");
+    }
+
+    #[test]
+    fn caret_keys_stay_in_the_source_while_ctrl_chords_escape_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        // arrows move the caret, not the month grid below
+        press(&mut dom, keys, Key::ArrowLeft, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("july 2026"), "no paging: {html}");
+        // enter in the source must not reach the create handler either
+        press(&mut dom, keys, Key::Enter, Modifiers::empty());
+        assert!(html.contains("block-active"), "still editing: {html}");
+
+        // the theme chord still bubbles to the app root
+        press(
+            &mut dom,
+            keys,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+    }
+
+    #[test]
+    fn switching_blocks_flushes_and_moves_the_source() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        type_into(&mut dom, input, "= renamed\n");
+
+        // the still-rendered preamble block is the first click target again
+        let mutations =
+            click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
+        assert_eq!(
+            listeners(&mutations, "input").len(),
+            1,
+            "the source moved to the preamble block"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "the preamble source: {html}");
+        let saved = std::fs::read_to_string(
+            vault.path().join("time/2026-07-23.typ"),
+        )
+        .expect("the note is readable");
+        assert!(saved.contains("= renamed"), "the move flushed: {saved}");
     }
 
     // -- the scale chain jumps -----------------------------------------------
@@ -1213,13 +1463,44 @@ mod tests {
     }
 
     fn click(dom: &mut VirtualDom, target: ElementId) {
+        click_for_mutations(dom, target);
+    }
+
+    /// Like `click`, but hands back the mutations it caused — how the
+    /// listeners a click mounts (the active textarea's input and keydown)
+    /// are harvested, since they are never in the initial table.
+    fn click_for_mutations(dom: &mut VirtualDom, target: ElementId) -> Mutations {
         let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
             SerializedMouseData::default(),
         )));
         dom.runtime()
             .handle_event("click", Event::new(data, true), target);
         dom.process_events();
+        dom.render_immediate_to_vec()
+    }
+
+    /// Fires an input event carrying the textarea's whole new value — the
+    /// shape the oninput handler reads through `event.value()`.
+    fn type_into(dom: &mut VirtualDom, target: ElementId, text: &str) {
+        let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+            SerializedFormData::new(text.to_string(), Vec::new()),
+        )));
+        dom.runtime()
+            .handle_event("input", Event::new(data, true), target);
+        dom.process_events();
         dom.render_immediate_to_vec();
+    }
+
+    /// Activates a block and returns the textarea's (input, keydown)
+    /// targets from the mount mutations.
+    fn activate_block(
+        dom: &mut VirtualDom,
+        block: ElementId,
+    ) -> (ElementId, ElementId) {
+        let mutations = click_for_mutations(dom, block);
+        let inputs = listeners(&mutations, "input");
+        let keys = listeners(&mutations, "keydown");
+        (inputs[0], keys[0])
     }
 
     /// Fires a wheel event with the given vertical pixel delta.
@@ -1406,8 +1687,12 @@ mod tests {
             unreachable!("the shell never listens for this event")
         }
 
-        fn convert_form_data(&self, _: &PlatformEventData) -> FormData {
-            unreachable!("the read-only shell mounts no inputs")
+        fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
+            event
+                .downcast::<SerializedFormData>()
+                .cloned()
+                .map(FormData::from)
+                .expect("the tests only fire serialized form events")
         }
 
         fn convert_image_data(&self, _: &PlatformEventData) -> ImageData {

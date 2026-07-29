@@ -111,36 +111,6 @@ impl From<VirtualizeError> for RenderError {
     }
 }
 
-// the hash covers the note's own text, not templates/template.typ: editing
-// the template leaves stale SVGs until restart. Phase 5 wires the phase-3
-// watcher to clear the cache when anything under templates/ changes
-// (adr/2026-07-svg-cache-per-path.md)
-#[derive(Debug, Default)]
-pub struct SvgCache {
-    entries: HashMap<PathBuf, (u64, String)>, // note path -> (text hash, svg)
-}
-
-impl SvgCache {
-    pub fn render(
-        &mut self,
-        root: &Path,
-        note: &Path,
-        text: &str,
-    ) -> Result<String, RenderError> {
-        let hash = hash_text(text);
-        match self.entries.get(note) {
-            Some((other_hash, svg)) if hash == *other_hash => {
-                Ok(svg.to_string())
-            }
-            _ => {
-                let svg = render_svg(root, note, text)?;
-                self.entries.insert(note.to_path_buf(), (hash, svg.clone()));
-                Ok(svg)
-            }
-        }
-    }
-}
-
 /// Per-block SVG fragments for the hybrid editor — the successor
 /// adr/2026-07-svg-cache-per-path.md predicted, decided in
 /// adr/2026-07-block-segmentation-parbreak-tiling.md. Keyed by note path +
@@ -166,7 +136,9 @@ impl FragmentCache {
         self.touched.insert(key);
         self.entries
             .entry(key)
-            .or_insert_with(|| render_svg(root, note, source).map_err(describe))
+            .or_insert_with(|| {
+                render_svg(root, note, source).map_err(describe)
+            })
             .clone()
     }
 
@@ -204,17 +176,11 @@ pub fn render_svg(
     }
 }
 
-/// Stable only within this process: `DefaultHasher` may change across Rust
-/// releases, so these hashes must never be persisted to `.index/`.
-fn hash_text(text: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
-}
-
 /// The path joins the hash because fragments compile under their note's
 /// path: two notes could hold byte-identical blocks whose relative
-/// resolution differs. Same process-only stability caveat as `hash_text`.
+/// resolution differs. Stable only within this process: `DefaultHasher` may
+/// change across Rust releases, so these hashes must never be persisted to
+/// `.index/`.
 fn hash_fragment(note: &Path, source: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     note.hash(&mut hasher);

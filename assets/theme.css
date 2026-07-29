@@ -165,6 +165,33 @@ body {
   height: auto;
 }
 
+/* -- the hybrid editor: the active block is raw source in the alert hue,
+      every other block cached SVG (wireframes 1b,
+      adr/2026-07-hybrid-active-block-textarea.md) --------------------------- */
+
+.block {
+  cursor: text;
+}
+
+.block-active {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0;
+  padding: 8px;
+  border: 1px solid var(--ember);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--ink-bright);
+  font: 14px ui-monospace, "DejaVu Sans Mono", monospace;
+  line-height: 1.5;
+  resize: none;
+}
+
+.block-active:focus {
+  outline: none;
+}
+
 /* empty is honest: one centred line, no ghost template */
 .empty-note {
   margin-top: 96px;
