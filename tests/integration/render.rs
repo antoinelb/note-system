@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use note_system::render::{RenderError, SvgCache, VaultWorld, render_svg};
+use note_system::render::{
+    FragmentCache, RenderError, SvgCache, VaultWorld, render_svg,
+};
 use typst::World;
 use typst::diag::FileError;
 use typst::syntax::package::PackageSpec;
@@ -215,6 +217,98 @@ fn a_failed_render_is_retried_not_cached() {
     // the same text must be retried once the vault is repaired
     restore_template(&vault);
     assert!(cache.render(vault.path(), &note, NOTE_A).is_ok());
+}
+
+// The fragment cache reuses the same trick, plus sweeps between generations.
+
+#[test]
+fn a_fragment_hit_serves_the_svg_without_recompiling() {
+    let vault = temp_vault();
+    let note = vault.path().join("permanent/a.typ");
+    let mut cache = FragmentCache::default();
+
+    let first = cache
+        .render(vault.path(), &note, NOTE_A)
+        .expect("the first render compiles");
+    assert!(first.starts_with("<svg"), "{}", &first[..first.len().min(80)]);
+    remove_template(&vault);
+    let second = cache
+        .render(vault.path(), &note, NOTE_A)
+        .expect("a hit must not recompile");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn a_fragment_error_is_cached_until_swept() {
+    let vault = temp_vault();
+    let note = vault.path().join("permanent/a.typ");
+    let mut cache = FragmentCache::default();
+
+    remove_template(&vault);
+    let error = cache
+        .render(vault.path(), &note, NOTE_A)
+        .expect_err("the template is gone");
+    assert!(error.contains("file not found"), "{error}");
+
+    // the error entry is served without recompiling: repairing the vault
+    // changes nothing while the entry keeps being rendered each generation
+    restore_template(&vault);
+    assert!(cache.render(vault.path(), &note, NOTE_A).is_err());
+    cache.sweep();
+    assert!(cache.render(vault.path(), &note, NOTE_A).is_err());
+
+    // two sweeps with no render between evict it, and the repaired vault
+    // finally recompiles
+    cache.sweep();
+    cache.sweep();
+    assert!(cache.render(vault.path(), &note, NOTE_A).is_ok());
+}
+
+#[test]
+fn sweep_drops_what_the_last_generation_never_rendered() {
+    let vault = temp_vault();
+    let note = vault.path().join("permanent/a.typ");
+    let mut cache = FragmentCache::default();
+
+    cache
+        .render(vault.path(), &note, NOTE_A)
+        .expect("A compiles");
+    cache.sweep();
+    cache
+        .render(vault.path(), &note, NOTE_B)
+        .expect("B compiles");
+    cache.sweep();
+    remove_template(&vault);
+
+    // B survived its generation's sweep; A was evicted by B's sweep
+    assert!(cache.render(vault.path(), &note, NOTE_B).is_ok());
+    assert!(cache.render(vault.path(), &note, NOTE_A).is_err());
+}
+
+#[test]
+fn fragments_are_keyed_by_note_path_as_well_as_source() {
+    let vault = temp_vault();
+    let a = vault.path().join("permanent/a.typ");
+    let b = vault.path().join("permanent/b.typ");
+    let mut cache = FragmentCache::default();
+
+    cache.render(vault.path(), &a, NOTE_A).expect("a compiles");
+    remove_template(&vault);
+
+    // same source under another path is a distinct fragment, not a hit
+    assert!(cache.render(vault.path(), &a, NOTE_A).is_ok());
+    assert!(cache.render(vault.path(), &b, NOTE_A).is_err());
+}
+
+#[test]
+fn a_fragment_outside_the_vault_reports_the_path_error() {
+    let vault = temp_vault();
+    let mut cache = FragmentCache::default();
+
+    let error = cache
+        .render(vault.path(), Path::new("/etc/passwd"), NOTE_A)
+        .expect_err("a note outside the vault cannot virtualize");
+    assert!(!error.is_empty());
 }
 
 const NOTE_A: &str = "#import \"/templates/template.typ\": *\n= A\n";

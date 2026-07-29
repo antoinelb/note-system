@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -141,6 +141,50 @@ impl SvgCache {
     }
 }
 
+/// Per-block SVG fragments for the hybrid editor — the successor
+/// adr/2026-07-svg-cache-per-path.md predicted, decided in
+/// adr/2026-07-block-segmentation-parbreak-tiling.md. Keyed by note path +
+/// fragment source, so an unchanged block never recompiles; errors are
+/// cached too, because a failing block would otherwise recompile on every
+/// re-render. `sweep`, called at every resegmentation, drops what the
+/// current generation never rendered, which bounds the map at the open
+/// note's block count.
+#[derive(Debug, Default)]
+pub struct FragmentCache {
+    entries: HashMap<u64, Result<String, String>>,
+    touched: HashSet<u64>,
+}
+
+impl FragmentCache {
+    pub fn render(
+        &mut self,
+        root: &Path,
+        note: &Path,
+        source: &str,
+    ) -> Result<String, String> {
+        let key = hash_fragment(note, source);
+        self.touched.insert(key);
+        self.entries
+            .entry(key)
+            .or_insert_with(|| render_svg(root, note, source).map_err(describe))
+            .clone()
+    }
+
+    pub fn sweep(&mut self) {
+        self.entries.retain(|key, _| self.touched.contains(key));
+        self.touched.clear();
+    }
+}
+
+/// One line per diagnostic: the fragment's error shows inline in its block
+/// slot, where a `Debug` dump of the enum would be noise.
+fn describe(error: RenderError) -> String {
+    match error {
+        RenderError::Path(error) => format!("{error:?}"),
+        RenderError::Compile(messages) => messages.join("\n"),
+    }
+}
+
 pub fn render_svg(
     root: &Path,
     note: &Path,
@@ -165,6 +209,16 @@ pub fn render_svg(
 fn hash_text(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The path joins the hash because fragments compile under their note's
+/// path: two notes could hold byte-identical blocks whose relative
+/// resolution differs. Same process-only stability caveat as `hash_text`.
+fn hash_fragment(note: &Path, source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    note.hash(&mut hasher);
+    source.hash(&mut hasher);
     hasher.finish()
 }
 
