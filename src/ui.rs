@@ -264,7 +264,7 @@ fn Shell(
                             "‹"
                         }
                         button {
-                            class: "cal-today type-label",
+                            class: "cal-today",
                             onclick: move |_| {
                                 select.call((NoteType::Daily, time::day_id(today)))
                             },

@@ -230,6 +230,13 @@ body {
   cursor: pointer;
 }
 
+/* the type-label look at the grid's date size */
+.cal-today {
+  font: 600 16px Lato, sans-serif;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
 .cal-arrow:hover,
 .cal-today:hover {
   color: var(--ink-bright);
