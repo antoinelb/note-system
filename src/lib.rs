@@ -3,6 +3,7 @@
 pub mod domain;
 pub mod editor;
 pub mod index;
+pub mod logs;
 pub mod parse;
 pub mod render;
 pub mod template;

@@ -216,6 +216,68 @@ impl Index {
         )
     }
 
+    /// Every time note the rail can show, as `(id, type)`, ordered by id
+    /// for determinism (the rail re-sorts by scale hierarchy anyway).
+    /// Typeless or id-less time notes are open-loops debt, not rail rows
+    /// (adr/2026-07-rail-continuous-newest-first.md).
+    pub fn time_notes(&self) -> Result<Vec<(String, NoteType)>, IndexError> {
+        query_rows(
+            &self.connection,
+            concat!(
+                "SELECT id, type FROM notes ",
+                "WHERE category = 'time' ",
+                "AND id IS NOT NULL AND type IS NOT NULL ",
+                "ORDER BY id"
+            ),
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    NoteType::from_name(&row.get::<_, String>(1)?),
+                ))
+            },
+        )
+    }
+
+    /// The capture and generated notes created on `date` (ISO `YYYY-MM-DD`,
+    /// the column's stored form) — the "captured today" block under a day
+    /// note. Returns the file stem as the display label. The category is
+    /// derived from the stored path's leading directory rather than read
+    /// back from the column: the WHERE clause already guarantees the
+    /// column's value, so re-reading it would only add an untestable
+    /// decode branch.
+    pub fn captured_on(
+        &self,
+        date: &str,
+    ) -> Result<Vec<(String, NoteCategory)>, IndexError> {
+        let paths = query_paths(
+            &self.connection,
+            concat!(
+                "SELECT path FROM notes ",
+                "WHERE category IN ('capture', 'generated') ",
+                "AND created = ?1 ",
+                "ORDER BY path"
+            ),
+            [date],
+        )?;
+        Ok(paths
+            .iter()
+            .map(|path| {
+                let category = if path.starts_with("generated") {
+                    NoteCategory::Generated
+                } else {
+                    NoteCategory::Capture
+                };
+                let stem = path
+                    .file_stem()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into_owned();
+                (stem, category)
+            })
+            .collect())
+    }
+
     pub fn dangling_links(&self) -> Result<Vec<DanglingLink>, IndexError> {
         query_rows(
             &self.connection,
@@ -587,6 +649,93 @@ mod tests {
                 .is_empty()
         );
         assert!(!index.dangling_links().expect("query").is_empty());
+    }
+
+    #[test]
+    fn time_notes_lists_ids_and_types_for_complete_time_notes_only() {
+        let (dir, mut index) = temp_index();
+        let notes = scan_vault(&fixture_vault()).expect("scan fixture");
+        index.rebuild(&notes).expect("rebuild");
+        // debt rows stay invisible: a typeless and an id-less time note
+        let raw = Connection::open(dir.path().join("index.sqlite"))
+            .expect("raw open");
+        raw.execute_batch(concat!(
+            "INSERT INTO notes (path, category, id) ",
+            "VALUES ('time/stray.typ', 'time', 'stray');",
+            "INSERT INTO notes (path, category, type) ",
+            "VALUES ('time/anonymous.typ', 'time', 'daily');",
+        ))
+        .expect("plant debt rows");
+
+        assert_eq!(
+            index.time_notes().expect("query"),
+            vec![
+                ("2026-07-21".to_string(), NoteType::Daily),
+                ("2026-07-22".to_string(), NoteType::Daily),
+                ("2026-07-23".to_string(), NoteType::Daily),
+                ("2026-summer".to_string(), NoteType::Seasonal),
+                ("2026-w30".to_string(), NoteType::Weekly),
+            ]
+        );
+    }
+
+    #[test]
+    fn time_notes_reports_rows_that_will_not_decode() {
+        // one blob per column read, so each `?` in the closure fires
+        for plant in [
+            "INSERT INTO notes (path, category, id, type)
+             VALUES ('time/blob-id.typ', 'time', x'00', 'daily');",
+            "INSERT INTO notes (path, category, id, type)
+             VALUES ('time/blob-type.typ', 'time', 'ok', x'00');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(index.time_notes(), Err(IndexError::Sqlite(_))));
+        }
+    }
+
+    #[test]
+    fn captured_on_gathers_captures_and_generated_by_creation_date() {
+        let (dir, mut index) = temp_index();
+        let notes = scan_vault(&fixture_vault()).expect("scan fixture");
+        index.rebuild(&notes).expect("rebuild");
+        // a permanent note created the same day must stay out
+        let raw = Connection::open(dir.path().join("index.sqlite"))
+            .expect("raw open");
+        raw.execute_batch(concat!(
+            "INSERT INTO notes (path, category, created) ",
+            "VALUES ('permanent/same-day.typ', 'permanent', '2026-07-23');",
+        ))
+        .expect("plant the same-day permanent note");
+
+        assert_eq!(
+            index.captured_on("2026-07-23").expect("query"),
+            vec![
+                ("capture-idea-canvas".to_string(), NoteCategory::Capture),
+                ("digest-smart-notes".to_string(), NoteCategory::Generated),
+            ]
+        );
+        assert_eq!(index.captured_on("1999-01-01").expect("query"), vec![]);
+    }
+
+    #[test]
+    fn captured_on_reports_rows_that_will_not_decode() {
+        // only the path can arrive undecodable: a blob category would never
+        // match the WHERE clause's text comparison in the first place
+        let (dir, index) = temp_index();
+        let raw = Connection::open(dir.path().join("index.sqlite"))
+            .expect("raw open");
+        raw.execute_batch(
+            "INSERT INTO notes (path, category, created)
+             VALUES (x'00', 'capture', '2026-07-23');",
+        )
+        .expect("plant the blob row");
+        assert!(matches!(
+            index.captured_on("2026-07-23"),
+            Err(IndexError::Sqlite(_))
+        ));
     }
 
     #[test]

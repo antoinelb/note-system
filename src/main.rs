@@ -1,4 +1,4 @@
-use note_system::{ui, vault};
+use note_system::{time, ui, vault};
 
 fn main() {
     dioxus::LaunchBuilder::new()
@@ -9,5 +9,8 @@ fn main() {
         .with_context(ui::Closer(std::sync::Arc::new(|| {
             dioxus::desktop::window().close()
         })))
+        // the app's single clock read
+        // (adr/2026-07-today-injected-root-context.md)
+        .with_context(ui::Today(time::today()))
         .launch(ui::App)
 }

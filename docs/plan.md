@@ -79,7 +79,8 @@ Both screens carry the open-loops ember in the top line; clicking it opens a fla
 - **Hybrid block editing from v0**: the block containing the cursor shows raw typst source; all other blocks show rendered output. Per-block (not per-line) because typst constructs span lines and only compile as complete expressions.
 - Rendering: embed the typst compiler (Rust crate) — compile note → SVG, cache per note, invalidate on edit. Fast enough at this scale.
 - **Vim later, but architected for now**: keep a clean separation between the text buffer/edit-command layer and the widget layer, so a modal keymap can be inserted without rewriting the editor. No mature code-editor widget exists for Dioxus; the editor is built on primitives and is the highest-effort component of the project.
-- Fallback if hybrid editing stalls: split view (source | rendered) is an acceptable temporary mode.
+- Fallback if hybrid editing stalls: the logs centre pane as a single pane toggling source ⇄ rendered.
+  The phase-5 split view was never the fallback — it died with the phase-7 logs screen, whose centre pane ships **read-only** until the hybrid editor (or its toggle fallback) lands (`adr/2026-07-logs-centre-read-only.md`); writing happens outside the app in that window.
 
 ## Canvas (the table)
 

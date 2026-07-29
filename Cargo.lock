@@ -3504,7 +3504,6 @@ dependencies = [
  "notify-debouncer-full",
  "rusqlite",
  "tempfile",
- "tokio",
  "typst",
  "typst-kit",
  "typst-layout",

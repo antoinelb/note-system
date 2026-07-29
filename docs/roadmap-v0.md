@@ -5,7 +5,7 @@ The plan carries the *what* and *why*; this file carries the *order* and the *st
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr/2026-07-two-screens-table-and-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
-**Next step → Phase 7, first unchecked box.**
+**Next step → Phase 8, first unchecked box.**
 
 ## How we work
 
@@ -126,15 +126,16 @@ Goal: day, week and season on one screen — the first screen from the design, a
 
 Spec: `design/wireframes-v0.md` § The logs screen (wireframe states `6c`–`6e`). Three panes, no tabs, in the phase-6 language.
 
-- [ ] Left: the time rail — one list where indentation carries the scale (season ⊃ week ⊃ day); no boxes, no fills, the selected day is simply bold bright ink.
-- [ ] Centre: the selected note rendered, with its clickable scale chain above it (phase-5 date math).
-  - [ ] The **"captured today"** block under the day note: that day's captures and generated notes as plain mono lines ("capture-articles-zettel · still open") — the day gathers what happened in it.
-- [ ] Right: the jump panel — a month grid where bright ink = a note exists and faint = empty, the week-number gutter is clickable as a scale, and a season row sits below. No chips, no ‹ › buttons: months page by scrolling.
-  - [ ] Index query: time notes within a date range (`notes_by_type` exists; it needs a date bound). The same bound serves the "captured today" block.
-- [ ] Selecting in the rail or calendar swaps the centre pane. A selected empty day is **outlined, not filled** (selection ≠ existence) and shows one centred line offering the template — only `enter` writes the file, navigating never does.
-- [ ] Delete the phase-4 scaffolding list **and the phase-5 split-view widget**; the buffer moves into the centre pane.
-- [ ] Decide whether the rail scrolls continuously or pages by month (design leaves it open). **→ ADR**
-- [ ] Tests: range query, rail ordering across scales, "note exists" marking, "captured today" contents, empty-day creation offered but not taken.
+- [x] Left: the time rail — one list where indentation carries the scale (season ⊃ week ⊃ day); no boxes, no fills, the selected day is simply bold bright ink.
+  - [x] A week belongs to the season of its Monday; weekly/seasonal `created` = the period's first day (`adr/2026-07-time-note-period-conventions.md`).
+- [x] Centre: the selected note rendered, with its clickable scale chain above it (phase-5 date math).
+  - [x] The **"captured today"** block under the day note: that day's captures and generated notes as plain mono lines ("capture-articles-zettel · capture" — "still open" waits on phase 10's summarized-detection) — the day gathers what happened in it.
+- [x] Right: the jump panel — a month grid where bright ink = a note exists and faint = empty, the week-number gutter is clickable as a scale, and a season row sits below. No chips, no ‹ › buttons: months page by scrolling.
+  - [x] Index query: the predicted date-range bound dissolved with the continuous rail — `time_notes` (everything) plus `captured_on` (a `created =` equality) cover both needs (`adr/2026-07-rail-continuous-newest-first.md`).
+- [x] Selecting in the rail or calendar swaps the centre pane. A selected empty day is **outlined, not filled** (selection ≠ existence) and shows one centred line offering the template — only `enter` writes the file, navigating never does.
+- [x] Delete the phase-4 scaffolding list **and the phase-5 split-view widget**; the centre pane ships **read-only** — the buffer waits for phase 8, and Ctrl+Q closes without a flush (`adr/2026-07-logs-centre-read-only.md`, `adr/2026-07-permanent-notes-wait-for-table.md`).
+- [x] Decide whether the rail scrolls continuously or pages by month (design leaves it open). **→ ADR** (`adr/2026-07-rail-continuous-newest-first.md` — continuous, newest first; "today" reaches the UI through root context, `adr/2026-07-today-injected-root-context.md`)
+- [x] Tests: time queries, rail ordering across scales, "note exists" marking, "captured today" contents, empty-day creation offered but not taken.
 
 Exit: you navigate a month of logs without touching the filesystem, and the app has no list left in it.
 

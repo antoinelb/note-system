@@ -1,61 +1,40 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dioxus::prelude::*;
+use jiff::civil::Date;
 
 use crate::domain::{NoteCategory, NoteType};
-use crate::editor::{Buffer, apply_edit};
 use crate::index::{Index, IndexError};
+use crate::logs::{self, Selection};
 use crate::render::SvgCache;
-
-#[cfg(not(test))]
-const QUIET: Duration = Duration::from_millis(500);
-#[cfg(test)]
-const QUIET: Duration = Duration::from_millis(1);
-
-const PERMANENT_TYPES: [&str; 8] = [
-    "person",
-    "organisation",
-    "source",
-    "concept",
-    "claim",
-    "idea",
-    "personal",
-    "project",
-];
+use crate::time;
 
 #[derive(Clone, Debug)]
 pub struct VaultRoot(pub Option<PathBuf>);
 
 /// How Ctrl+Q reaches the windowing system: `main` injects the real
 /// window-close call, the headless tests inject a recorder — the same
-/// root-context channel as `VaultRoot`
-/// (adr/2026-07-ctrl-q-flushes-then-closes.md).
+/// root-context channel as `VaultRoot`. With the centre pane read-only
+/// there is nothing to flush first (adr/2026-07-logs-centre-read-only.md).
 #[derive(Clone)]
 pub struct Closer(pub Arc<dyn Fn() + Send + Sync>);
 
-/// The quit chord lands on the `.app` root, but the open buffer lives in
-/// `Shell` — so `Shell` registers its flush here for `App` to call before
-/// closing. A plain cell, not a signal: it is only ever read inside the
-/// event handler, so nothing needs to re-render when it is set.
-#[derive(Clone, Default)]
-struct QuitFlush(Rc<RefCell<Option<Callback<(), bool>>>>);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct NoteEntry {
-    path: PathBuf,
-    label: String,
-}
+/// Today's date, injected at the root by `main` — the app's single clock
+/// edge, replaced by a fixed date in the headless tests
+/// (adr/2026-07-today-injected-root-context.md).
+#[derive(Clone, Copy, Debug)]
+pub struct Today(pub Date);
 
 #[component]
 pub fn App() -> Element {
     let vault = use_context::<VaultRoot>();
+    let today = use_context::<Today>();
     let loaded = use_hook(|| load(vault.0));
     let mut light = use_signal(|| false);
-    let quit_flush = use_context_provider(QuitFlush::default);
     // absent in the headless tests, where there is no window to close
     let closer = try_consume_context::<Closer>();
     rsx! {
@@ -66,10 +45,10 @@ pub fn App() -> Element {
             // the tree, not an absence to interpret
             // (adr/2026-07-theme-attribute-on-app-root.md)
             "data-theme": if light() { "light" } else { "dark" },
-            // focusable so the theme keystroke lands here; keydowns from the
-            // editor bubble up, so the chord also works while writing
+            // focusable so the chords land somewhere on the vault-error
+            // screen; with a vault, focus sits on the logs pane below and
+            // the chords arrive here by bubbling
             tabindex: "0",
-            autofocus: true,
             onkeydown: move |event| {
                 if event.modifiers().ctrl()
                     && event.key() == Key::Character("t".to_string())
@@ -77,22 +56,15 @@ pub fn App() -> Element {
                     light.set(!light());
                 } else if event.modifiers().ctrl()
                     && event.key() == Key::Character("q".to_string())
+                    && let Some(closer) = &closer
                 {
-                    // flush before close, so a quit inside the autosave's
-                    // quiet window cannot drop the last keystrokes; a save
-                    // that fails cancels the quit and surfaces its error
-                    // (adr/2026-07-ctrl-q-flushes-then-closes.md)
-                    let flush = *quit_flush.0.borrow();
-                    let saved = flush.is_none_or(|flush| flush.call(()));
-                    if saved && let Some(closer) = &closer {
-                        (closer.0)();
-                    }
+                    (closer.0)();
                 }
             },
             {
                 match loaded {
-                    Ok((root, entries, loops)) => {
-                        rsx! { Shell { root, entries, loops } }
+                    Ok((root, notes, loops)) => {
+                        rsx! { Shell { root, notes, loops, today: today.0 } }
                     }
                     Err(msg) => rsx! { div { class: "vault-error", "{msg}" } },
                 }
@@ -101,205 +73,232 @@ pub fn App() -> Element {
     }
 }
 
+/// The logs screen (design § The logs screen): time rail, rendered centre
+/// pane with its scale chain and "captured today" block, month-grid jump
+/// panel. Everything it decides comes from `logs`; the component is wiring.
 #[component]
-fn Shell(root: PathBuf, entries: Vec<NoteEntry>, loops: usize) -> Element {
-    let mut entries = use_signal(|| entries);
-    let mut loops = use_signal(|| loops);
+fn Shell(
+    root: PathBuf,
+    notes: Vec<(String, NoteType)>,
+    loops: usize,
+    today: Date,
+) -> Element {
+    let mut notes = use_signal(|| notes);
+    let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
+    let mut month = use_signal(|| today.first_of_month());
+    let mut notice = use_signal(|| None::<String>);
+    // the SVG cache is a memo store, not UI state: nothing should re-render
+    // when it fills, so a plain hook value rather than a signal
+    let cache = use_hook(|| Rc::new(RefCell::new(SvgCache::default())));
 
-    let mut cache = use_signal(SvgCache::default);
-    let mut view = use_signal(|| None::<Result<String, String>>);
-    let mut buffer = use_signal(|| None::<Buffer>);
+    let select = use_callback(move |target: Selection| {
+        let anchor = logs::selection_date(&target.0, &target.1);
+        // every selectable id comes from our own formatters, so the today
+        // fallback guards the type system, not a reachable path
+        month.set(anchor.unwrap_or(today).first_of_month());
+        selected.set(target);
+        notice.set(None);
+    });
 
-    let mut new_type = use_signal(|| "concept".to_string());
-    let mut new_title = use_signal(String::new);
+    let (scale, id) = selected();
+    let note_list = notes();
+    let exists = note_list.iter().any(|(existing, _)| existing == &id);
+    let rows = logs::rail_rows(&note_list, Some(&(scale.clone(), id.clone())));
+    let crumbs = logs::breadcrumbs(&scale, &id);
+    let rendered =
+        exists.then(|| render_note(&root, &id, &mut cache.borrow_mut()));
+    let captured = (exists && scale == NoteType::Daily)
+        .then(|| captured_lines(&root, &id));
+    let day_ids: HashSet<&str> =
+        note_list.iter().map(|(note, _)| note.as_str()).collect();
+    let weeks = logs::month_grid(month());
+    let seasons = logs::season_row(month());
 
-    // the Ctrl+Q flush: reports whether the open note reached disk, so a
-    // failed save can hold the app open instead of losing the buffer
-    let quit_flush = use_callback({
+    let create_missing = {
         let root = root.clone();
-        move |()| {
-            let flushed = buffer.with(|open| {
-                let note = open.as_ref()?;
-                Some(cache.with_mut(|cache| flush(&root, note, cache)))
-            });
-            match flushed {
-                None => true, // nothing open, nothing to lose
-                Some(result) => {
-                    let saved = result.is_ok();
-                    view.set(Some(result));
-                    saved
-                }
+        move |event: KeyboardEvent| {
+            // only enter writes the file — navigating never does
+            if event.key() != Key::Enter {
+                return;
+            }
+            let (scale, id) = selected();
+            if notes.read().iter().any(|(existing, _)| existing == &id) {
+                return;
+            }
+            let created = logs::selection_date(&scale, &id).unwrap_or(today);
+            match crate::template::create(
+                &root,
+                &NoteCategory::Time,
+                &scale,
+                &id,
+                &created.to_string(),
+                "",
+            ) {
+                Ok(_) => notes.with_mut(|list| list.push((id, scale))),
+                Err(err) => notice.set(Some(format!("create: {err:?}"))),
             }
         }
-    });
-    let register = use_context::<QuitFlush>();
-    // once is enough: the Callback's identity is stable across re-renders,
-    // only its captured closure is refreshed
-    use_hook(move || register.0.borrow_mut().replace(quit_flush));
+    };
 
-    let _autosave = use_resource({
-        let root = root.clone();
-        move || {
-            // reading the buffer here is what subscribes this resource to every
-            // edit
-            let _ = buffer.read();
-            let root = root.clone();
-            async move {
-                tokio::time::sleep(QUIET).await;
-                let flushed = buffer.with(|open| {
-                    let note = open.as_ref()?;
-                    Some(cache.with_mut(|cache| flush(&root, note, cache)))
-                });
-                if let Some(flushed) = flushed {
-                    view.set(Some(flushed));
-                }
-            }
-        }
-    });
     rsx! {
-               Chrome { screen: Screen::Logs, loops: loops() }
-               ul { class: "note-list",
-                   for entry in entries() {
-                       li {
-                           class: "note-entry",
-                           onclick: {
-                               let root = root.clone();
-                               let path = entry.path.clone();
-                       move |_| open_note(&root,root.join(&path),cache,view,buffer)                    },
-                           "{entry.label}"
-                       }
-                   }
-               }
-           div {
-       class: "create-note",
-           select {
-           class: "create-type type-label",
-           onchange: move |event| new_type.set(event.value()),
-           for name in PERMANENT_TYPES {
-           option { value: "{name}", selected: name == new_type(), "{name}"}
-       }
-       }
-    input {
-           class: "create-title",
-           placeholder: "New note title",
-           value: "{new_title}",
-           oninput: move |event| new_title.set(event.value()),
-       }
-       button {
-           class: "create-button",
-           onclick: {
-               let root = root.clone();
-               move |_| {
-                   let note_type = NoteType::from_name(&new_type());
-                   match crate::template::create(
-                       &root,
-                       &NoteCategory::Permanent,
-                       &note_type,
-                       &new_title(),
-                       &today(),
-                       "",
-                   ) {
-                       Ok(path) => {
-                           entries.with_mut(|list| list.push(entry_for(path.clone())));
-                           new_title.set(String::new());
-                           open_note(&root, path, cache, view, buffer);
-                       }
-                       Err(err) => {
-                           view.set(Some(Err(format!("create: {err:?}"))));
-                       }
-                   }
-               }
-           },
-           "Create"
-       }
-       button {
-           class: "today-button",
-           onclick: {
-               let root = root.clone();
-               move |_| match daily_note(&root, &today()) {
-                   Ok((path, created)) => {
-                       if created {
-                           entries.with_mut(|list| {
-                               list.push(entry_for(path.clone()))
-                           });
-                       }
-                       open_note(&root, path, cache, view, buffer);
-                   }
-                   Err(err) => {
-                       view.set(Some(Err(format!("today: {err:?}"))));
-                   }
-               }
-           },
-           "Today"
-       }
-       button {
-           class: "delete-button",
-           onclick: {
-               let root = root.clone();
-               move |_| {
-                   let Some(file) = buffer.with(|open| {
-                       open.as_ref().map(|note| note.file().to_path_buf())
-                   }) else {
-                       return; // nothing open, nothing to delete
-                   };
-                   match delete_note(&root, &file) {
-                       Ok(count) => {
-                           // entry paths may be vault-relative or absolute;
-                           // join is a no-op on absolutes, so the comparison
-                           // handles both
-                           entries.with_mut(|list| {
-                               list.retain(|entry| {
-                                   root.join(&entry.path) != file
-                               })
-                           });
-                           // clearing the buffer also parks the pending
-                           // autosave: it re-reads the buffer at flush time,
-                           // so nothing resurrects the deleted file
-                           buffer.set(None);
-                           view.set(None);
-                           loops.set(count);
-                       }
-                       Err(msg) => view.set(Some(Err(msg))),
-                   }
-               }
-           },
-           "Delete"
-       }
-       }
-               div { class: "editor",
-                   {
-                       let open = buffer.read();
-                       match open.as_ref() {
-                           Some(note) => rsx! {
-                               textarea {
-                                   key: "{note.file().display()}",
-                                   class: "source",
-                                   initial_value: "{note.text()}",
-                                   oninput: move |event| {
-                                       buffer.with_mut(|current| {
-                                           apply_edit(current, event.value())
-                                       });
-                                   },
-                               }
-                           },
-                           None => rsx! {},
-                       }
-                   }
-                   div { class: "rendered",
-                       {
-                           match view() {
-                               Some(Ok(svg)) => rsx! { div { dangerous_inner_html: "{svg}" } },
-                               Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
-                               None => rsx! { p { "Select a note" } },
-                           }
-                       }
-                   }
-               }
-           }
+        Chrome { screen: Screen::Logs, loops }
+        div {
+            class: "logs",
+            // the enter-to-create keystroke lands here and the theme/quit
+            // chords bubble on up to the .app root
+            tabindex: "0",
+            autofocus: true,
+            onkeydown: create_missing,
+            nav { class: "rail",
+                for row in rows {
+                    div {
+                        key: "{row.id}",
+                        class: "rail-row rail-{row.scale.as_name()}",
+                        class: if row.id == id { "selected" },
+                        class: if !row.exists { "missing" },
+                        onclick: {
+                            let target = (row.scale.clone(), row.id.clone());
+                            move |_| select.call(target.clone())
+                        },
+                        span { class: "rail-id", "{row.id}" }
+                        if !logs::rail_tag(&row.scale).is_empty() {
+                            span { class: "rail-tag", "{logs::rail_tag(&row.scale)}" }
+                        }
+                    }
+                }
+            }
+            section { class: "centre",
+                div { class: "crumbs",
+                    for crumb in crumbs {
+                        {
+                            match crumb.target {
+                                Some(target) => rsx! {
+                                    span {
+                                        class: "crumb crumb-link",
+                                        onclick: move |_| select.call(target.clone()),
+                                        "{crumb.label}"
+                                    }
+                                },
+                                None => rsx! {
+                                    span { class: "crumb", "{crumb.label}" }
+                                },
+                            }
+                        }
+                    }
+                }
+                {
+                    match notice() {
+                        Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
+                        None => rsx! {},
+                    }
+                }
+                {
+                    match &rendered {
+                        Some(Ok(svg)) => rsx! {
+                            div { class: "note", dangerous_inner_html: "{svg}" }
+                        },
+                        Some(Err(msg)) => rsx! {
+                            p { class: "render-error", "{msg}" }
+                        },
+                        // empty is honest: no ghost template, one line
+                        None => rsx! {
+                            p { class: "empty-note",
+                                "no note for {logs::selection_label(&scale, &id)} — press "
+                                kbd { "enter" }
+                                " to start one from the template"
+                            }
+                        },
+                    }
+                }
+                {
+                    match captured {
+                        Some(Ok(lines)) if !lines.is_empty() => rsx! {
+                            div { class: "captured",
+                                div { class: "captured-head type-label", "captured today" }
+                                for line in lines {
+                                    div { class: "captured-line", "{line}" }
+                                }
+                            }
+                        },
+                        Some(Err(msg)) => rsx! {
+                            p { class: "render-error", "{msg}" }
+                        },
+                        _ => rsx! {},
+                    }
+                }
+            }
+            aside {
+                class: "jump",
+                // months page by scrolling — no ‹ › buttons (design § logs)
+                onwheel: move |event| {
+                    let delta = event.delta().strip_units().y;
+                    if delta != 0.0 {
+                        month.set(logs::page_month(month(), delta > 0.0));
+                    }
+                },
+                div { class: "cal-head type-label", "{logs::month_label(month())}" }
+                div { class: "cal-grid",
+                    span { class: "cal-gutter" }
+                    for letter in ["m", "t", "w", "t", "f", "s", "s"] {
+                        span { class: "cal-weekday", "{letter}" }
+                    }
+                    for week in weeks {
+                        span {
+                            class: "cal-gutter cal-week",
+                            class: if week.week_id == id { "selected" },
+                            onclick: {
+                                let target = week.week_id.clone();
+                                move |_| select.call((NoteType::Weekly, target.clone()))
+                            },
+                            "{week.label}"
+                        }
+                        for cell in week.days {
+                            {
+                                match cell {
+                                    Some(day) => {
+                                        let cell_id = time::day_id(day);
+                                        let has_note = day_ids.contains(cell_id.as_str());
+                                        rsx! {
+                                            span {
+                                                class: "cal-day",
+                                                class: if has_note { "has-note" },
+                                                // selection ≠ existence: a
+                                                // selected empty day outlines
+                                                class: if cell_id == id { "selected" },
+                                                onclick: move |_| {
+                                                    select.call((
+                                                        NoteType::Daily,
+                                                        cell_id.clone(),
+                                                    ))
+                                                },
+                                                "{day.day()}"
+                                            }
+                                        }
+                                    }
+                                    None => rsx! { span { class: "cal-day blank" } },
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "cal-seasons",
+                    for (label, target) in seasons {
+                        span {
+                            class: "cal-season",
+                            class: if target.1 == time::season_id(today) { "lit" },
+                            class: if target.1 == id { "selected" },
+                            onclick: move |_| select.call(target.clone()),
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// v0 has one screen — the proto-logs list — so the table icon stays dim
-/// until v1 mounts it; neither icon navigates before the phase-7 logs screen.
+/// The table mounts in v1; until then its icon stays dim and neither icon
+/// navigates — the logs are the only screen.
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Table,
@@ -339,19 +338,23 @@ fn Chrome(screen: Screen, loops: usize) -> Element {
     }
 }
 
-fn load(
-    root: Option<PathBuf>,
-) -> Result<(PathBuf, Vec<NoteEntry>, usize), String> {
+/// What the shell mounts with: the vault root, the rail's time notes and
+/// the ember count.
+type Loaded = (PathBuf, Vec<(String, NoteType)>, usize);
+
+fn load(root: Option<PathBuf>) -> Result<Loaded, String> {
     match root {
         Some(root) => match load_notes(&root) {
-            Ok((entries, loops)) => Ok((root, entries, loops)),
+            Ok((notes, loops)) => Ok((root, notes, loops)),
             Err(err) => Err(format!("the index could not be built: {err:?}")),
         },
         None => Err("no vault: define NOTE_VAULT or HOME".to_string()),
     }
 }
 
-fn load_notes(root: &Path) -> Result<(Vec<NoteEntry>, usize), IndexError> {
+fn load_notes(
+    root: &Path,
+) -> Result<(Vec<(String, NoteType)>, usize), IndexError> {
     let notes = crate::index::scan_vault(root)?;
     let index_path = root.join(".index");
     std::fs::create_dir_all(&index_path)?;
@@ -360,135 +363,53 @@ fn load_notes(root: &Path) -> Result<(Vec<NoteEntry>, usize), IndexError> {
     survey(&index)
 }
 
-fn survey(index: &Index) -> Result<(Vec<NoteEntry>, usize), IndexError> {
-    Ok((list_entries(index)?, loop_count(index)?))
+/// What the shell needs from a built index: the rail's time notes and the
+/// ember's count. Separate from `load_notes` so its error arms stay
+/// reachable — after a successful rebuild they only fire on a sabotaged
+/// database.
+fn survey(
+    index: &Index,
+) -> Result<(Vec<(String, NoteType)>, usize), IndexError> {
+    Ok((index.time_notes()?, loop_count(index)?))
 }
 
 /// The v0 open-loops count: typeless notes + dangling links
 /// (adr/2026-07-debt-counter-then-list.md). Unsummarized captures join in
-/// phase 10, which also moves the count onto the watcher; until then delete
-/// is the one in-session action that can change it.
+/// phase 10, which also moves the count onto the watcher.
 fn loop_count(index: &Index) -> Result<usize, IndexError> {
     Ok(index.typeless_notes()?.len() + index.dangling_links()?.len())
 }
 
-fn list_entries(index: &Index) -> Result<Vec<NoteEntry>, IndexError> {
-    let mut entries = Vec::new();
-    for category in [
-        NoteCategory::Permanent,
-        NoteCategory::Time,
-        NoteCategory::Capture,
-        NoteCategory::Generated,
-    ] {
-        for path in index.notes_by_category(&category)? {
-            entries.push(entry_for(path));
-        }
-    }
-    Ok(entries)
-}
-
-fn render_buffer(
+/// The centre pane's note: a time note's id is its stem, so the path needs
+/// no index round-trip. Read from disk, compiled through the cache.
+fn render_note(
     root: &Path,
-    buffer: &Buffer,
+    id: &str,
     cache: &mut SvgCache,
 ) -> Result<String, String> {
+    let file = root
+        .join(NoteCategory::Time.as_dir())
+        .join(format!("{id}.typ"));
+    let text = std::fs::read_to_string(&file)
+        .map_err(|err| format!("{}: {err}", file.display()))?;
     cache
-        .render(root, buffer.file(), buffer.text())
+        .render(root, &file, &text)
         .map_err(|err| format!("{err:?}"))
 }
 
-fn flush(
-    root: &Path,
-    note: &Buffer,
-    cache: &mut SvgCache,
-) -> Result<String, String> {
-    note.save()
-        .map_err(|err| format!("{}: {err}", note.file().display()))?;
-    render_buffer(root, note, cache)
-}
-
-fn open_note(
-    root: &Path,
-    file: PathBuf,
-    mut cache: Signal<SvgCache>,
-    mut view: Signal<Option<Result<String, String>>>,
-    mut buffer: Signal<Option<Buffer>>,
-) {
-    match Buffer::open(file.clone()) {
-        Ok(note) => {
-            let rendered =
-                cache.with_mut(|cache| render_buffer(root, &note, cache));
-            view.set(Some(rendered));
-            buffer.set(Some(note));
-        }
-        Err(err) => {
-            buffer.set(None);
-            view.set(Some(Err(format!("{}: {err}", file.display()))));
-        }
-    }
-}
-
-/// Today's daily note: created from the template when missing, reused when
-/// present — `AlreadyExists` carries the existing path, so "already there"
-/// is an answer here, not an error. The bool reports whether a file was
-/// written, so the caller knows to add a list entry.
-fn daily_note(
-    root: &Path,
-    date: &str,
-) -> Result<(PathBuf, bool), crate::template::TemplateError> {
-    // the id IS the date: kebab_id leaves "2026-07-27" unchanged
-    match crate::template::create(
-        root,
-        &NoteCategory::Time,
-        &NoteType::Daily,
-        date,
-        date,
-        "",
-    ) {
-        Ok(path) => Ok((path, true)),
-        Err(crate::template::TemplateError::AlreadyExists(path)) => {
-            Ok((path, false))
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Deletes the note on disk, then forgets it in the index kept under the
-/// vault, so the running session matches what the next launch's rebuild
-/// would compute. Dangling links the deletion causes are the index's job
-/// to surface, not this function's — it only reports the refreshed loop
-/// count, since a delete is what can change it.
-fn delete_note(root: &Path, file: &Path) -> Result<usize, String> {
-    std::fs::remove_file(file)
-        .map_err(|err| format!("{}: {err}", file.display()))?;
-    // the index stores vault-relative paths; for a file outside the vault
-    // the full path simply matches no row, and remove_note is a no-op
-    let relative = file.strip_prefix(root).unwrap_or(file);
-    let mut index = Index::open(&root.join(".index/index.db"))
-        .map_err(|err| format!("{}: {err:?}", file.display()))?;
-    index
-        .remove_note(relative)
-        .and_then(|()| loop_count(&index))
-        .map_err(|err| format!("{}: {err:?}", file.display()))
-}
-
-/// The path may be vault-relative (from the index) or absolute (from a
-/// create) — the click handler's `root.join` is a no-op for absolute paths.
-fn entry_for(path: PathBuf) -> NoteEntry {
-    NoteEntry {
-        label: path
-            .file_stem()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned(),
-        path,
-    }
-}
-
-/// The one clock read in the app: creation dates enter at this edge, so
-/// everything below it stays deterministic (`created` is always a parameter).
-fn today() -> String {
-    jiff::Zoned::now().date().to_string()
+/// The "captured today" block: the capture and generated notes the index
+/// dates to `day`. Opened per read, the same pattern as any other
+/// per-event index use — the day gathers what happened in it.
+fn captured_lines(root: &Path, day: &str) -> Result<Vec<String>, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("captured today: {err:?}"))?;
+    let captured = index
+        .captured_on(day)
+        .map_err(|err| format!("captured today: {err:?}"))?;
+    Ok(captured
+        .iter()
+        .map(|(stem, category)| logs::captured_line(stem, category))
+        .collect())
 }
 
 #[cfg(test)]
@@ -508,11 +429,35 @@ mod tests {
     /// rsx icons don't — so this is the "a note is rendered" marker.
     const RENDERED_NOTE: &str = r#"xmlns="http://www.w3.org/2000/svg""#;
 
+    /// The tests' clock: a Thursday inside the fixture week, so the initial
+    /// selection is `time/2026-07-23.typ` and the grid opens on july 2026.
+    const TODAY: &str = "2026-07-23";
+
+    /// Initial click-listener layout, established empirically (see the
+    /// mounted-app doc): registration runs jump-panel first — the three
+    /// seasons, then each grid row as gutter + day cells — then the two
+    /// crumb jumps, then the five rail rows top to bottom.
+    const SEASON_AUTUMN: usize = 2;
+    const GUTTER_W31: usize = 33;
+    const CRUMB_WEEK: usize = 39;
+    const RAIL_SUMMER: usize = 41;
+    const RAIL_W30: usize = 42;
+    const RAIL_DAY_23: usize = 43;
+    const RAIL_DAY_22: usize = 44;
+    const RAIL_DAY_21: usize = 45;
+    /// July 2026 leads with two blanks, so a date's cell index is offset by
+    /// one gutter per started week row.
+    const fn day_cell(day: usize) -> usize {
+        3 + (day + 1) / 7 + day
+    }
+    /// Which keydown listener is the logs pane's (the other is the root).
+    const LOGS_KEYS: usize = 1;
+
     // -- the App component, driven headlessly through a VirtualDom ----------
 
     #[test]
     fn without_a_vault_the_app_shows_the_vault_error() {
-        let (dom, clicks) = rendered_app(None);
+        let (dom, clicks, _, _) = rendered_app(None);
         let html = dioxus_ssr::render(&dom);
         assert!(clicks.is_empty(), "{html}");
         assert!(html.contains("vault-error"), "{html}");
@@ -522,7 +467,7 @@ mod tests {
     #[test]
     fn an_unbuildable_index_shows_the_vault_error() {
         let dir = tempfile::tempdir().expect("a temp dir is available");
-        let (dom, _) = rendered_app(Some(dir.path().join("missing")));
+        let (dom, _, _, _) = rendered_app(Some(dir.path().join("missing")));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("vault-error"), "{html}");
         assert!(html.contains("the index could not be built"), "{html}");
@@ -576,12 +521,12 @@ mod tests {
         assert!(html.contains(r#"data-theme="dark""#), "{html}");
     }
 
-    // -- the quit chord: flush, then close -----------------------------------
+    // -- the quit chord: close, nothing to flush -----------------------------
 
     #[test]
     fn ctrl_q_asks_the_window_to_close() {
         let vault = temp_vault();
-        let (mut dom, _, keydown, closed) =
+        let (mut dom, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
         press(
             &mut dom,
@@ -590,68 +535,11 @@ mod tests {
             Modifiers::CONTROL,
         );
         assert!(closed.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn ctrl_q_flushes_unsaved_edits_before_closing() {
-        let vault = temp_vault();
-        let (mut dom, clicks, keydown, closed) =
-            quit_app(Some(vault.path().to_path_buf()));
-        let inputs = open_note(&mut dom, clicks[0]);
-        edit_without_settling(&mut dom, inputs[0], &note("renamed"));
-
-        press(
-            &mut dom,
-            keydown,
-            Key::Character("q".into()),
-            Modifiers::CONTROL,
-        );
-
-        assert!(closed.load(Ordering::SeqCst));
-        assert_eq!(
-            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
-                .expect("the note is readable"),
-            note("renamed"),
-            "the quit flush reached disk without waiting out the debounce"
-        );
-    }
-
-    #[test]
-    fn ctrl_q_with_a_note_that_cannot_save_stays_open_with_the_error() {
-        let vault = temp_vault();
-        let (mut dom, clicks, keydown, closed) =
-            quit_app(Some(vault.path().to_path_buf()));
-        let inputs = open_note(&mut dom, clicks[0]);
-
-        let note_path = vault.path().join("permanent/alpha.typ");
-        let mut permissions = std::fs::metadata(&note_path)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&note_path, permissions)
-            .expect("the note is made read-only");
-        edit_without_settling(&mut dom, inputs[0], &note("renamed"));
-
-        press(
-            &mut dom,
-            keydown,
-            Key::Character("q".into()),
-            Modifiers::CONTROL,
-        );
-
-        assert!(
-            !closed.load(Ordering::SeqCst),
-            "an unsavable note holds the app open"
-        );
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("alpha.typ"), "{html}");
     }
 
     #[test]
     fn ctrl_q_on_the_vault_error_screen_closes_immediately() {
-        // no Shell mounts, so no flush is ever registered
-        let (mut dom, _, keydown, closed) = quit_app(None);
+        let (mut dom, keydown, closed) = quit_app(None);
         press(
             &mut dom,
             keydown,
@@ -698,7 +586,7 @@ mod tests {
     #[test]
     fn the_ember_is_absent_when_no_loops_are_open() {
         let vault = temp_vault();
-        let (dom, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("ember"), "absence, not a zero: {html}");
     }
@@ -711,471 +599,323 @@ mod tests {
             format!("{}#l(\"ghost\")\n", note("linky")),
         )
         .expect("the dangling note is written");
-        let (dom, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"<span class="ember">1</span>"#), "{html}");
     }
 
-    #[test]
-    fn deleting_the_last_loop_extinguishes_the_ember() {
-        let vault = temp_vault();
-        std::fs::write(
-            vault.path().join("permanent/linky.typ"),
-            format!("{}#l(\"ghost\")\n", note("linky")),
-        )
-        .expect("the dangling note is written");
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"<span class="ember">1</span>"#), "{html}");
-
-        // permanent notes list alphabetically — alpha, linky, omega — and
-        // the delete button is the last click listener
-        click(&mut dom, clicks[1]);
-        click(&mut dom, clicks[6]);
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(!vault.path().join("permanent/linky.typ").exists());
-        assert!(!html.contains("ember"), "the reward is absence: {html}");
-    }
+    // -- the rail: every time note, newest first, nothing else ---------------
 
     #[test]
-    fn the_note_list_has_one_click_listener_per_note_in_index_order() {
+    fn the_rail_lists_time_notes_newest_first_and_nothing_else() {
         let vault = temp_vault();
-        let (dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+        let (dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
 
+        let order = [
+            "2026-summer",
+            "2026-w30",
+            "2026-07-23",
+            "2026-07-22",
+            "2026-07-21",
+        ];
+        let positions: Vec<usize> = order
+            .iter()
+            .map(|id| html.find(id).expect("every time note is listed"))
+            .collect();
+        assert!(positions.is_sorted(), "newest first: {html}");
+        // the wider scales carry their kind tag, days carry none
+        assert!(html.contains(">season</span>"), "{html}");
+        assert!(html.contains(">week</span>"), "{html}");
+        // no list left in the app: the permanent note appears nowhere
+        assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            6,
-            "three notes, then the create, today and delete buttons: {html}"
+            46,
+            "5 rail + 2 crumbs + 5 gutters + 31 days + 3 seasons: {html}"
         );
-        let alpha = html.find("alpha").expect("alpha is listed");
-        let omega = html.find("omega").expect("omega is listed");
-        let broken = html.find("broken").expect("broken is listed");
-        assert!(alpha < omega && omega < broken, "{html}");
+    }
 
-        // the create bar is mounted after the list
-        assert!(html.contains("New note title"), "{html}");
+    // -- the centre pane: today at launch, chain, captured today -------------
 
-        // nothing is rendered before a click
-        assert!(!html.contains(RENDERED_NOTE), "{html}");
-        assert!(html.contains("Select a note"), "{html}");
+    #[test]
+    fn today_opens_selected_and_rendered_with_its_chain() {
+        let vault = temp_vault();
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+
+        assert!(html.contains(RENDERED_NOTE), "today renders: {html}");
+        for crumb in [">2026-07-23<", ">daily<", ">w30<", ">summer 2026<"] {
+            assert!(html.contains(crumb), "missing {crumb}: {html}");
+        }
+        assert!(html.contains("captured today"), "{html}");
+        assert!(html.contains("capture-idea · capture"), "{html}");
+        assert!(html.contains("digest · generated"), "{html}");
     }
 
     #[test]
-    fn clicking_a_note_shows_its_rendered_svg() {
+    fn other_days_carry_no_captured_block() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        click(&mut dom, clicks[0]);
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_22]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(RENDERED_NOTE), "{html}");
+        assert!(!html.contains("captured today"), "{html}");
+        assert!(html.contains(">2026-07-22<"), "the chain follows: {html}");
     }
 
     #[test]
-    fn clicking_a_broken_note_shows_the_render_error() {
+    fn a_note_that_cannot_compile_shows_the_render_error() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        click(&mut dom, clicks[2]);
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
         assert!(!html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
-    fn clicking_a_vanished_note_shows_the_render_error() {
+    fn a_vanished_note_shows_the_read_error() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_file(vault.path().join("time/2026-07-22.typ"))
             .expect("the note exists before the click");
-        click(&mut dom, clicks[0]);
+        click(&mut dom, clicks[RAIL_DAY_22]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("alpha.typ"), "{html}");
+        assert!(html.contains("2026-07-22.typ"), "{html}");
     }
 
-    // -- the editor: buffer in, debounced save and recompile out ------------
+    #[test]
+    fn an_unreadable_index_shows_the_captured_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_dir_all(vault.path().join(".index"))
+            .expect("the index directory exists");
+        // re-selecting today re-runs the captured query against the void
+        click(&mut dom, clicks[RAIL_DAY_23]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(RENDERED_NOTE), "the note itself is fine");
+        assert!(html.contains("captured today:"), "{html}");
+    }
+
+    // -- selection ≠ existence: the empty state and enter --------------------
 
     #[test]
-    fn typing_saves_the_note_and_recompiles_it() {
+    fn selecting_an_empty_day_offers_the_template_without_writing() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        let inputs = open_note(&mut dom, clicks[0]);
-        assert_eq!(inputs.len(), 1, "the editor mounts exactly one textarea");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[day_cell(24)]);
+        let html = dioxus_ssr::render(&dom);
 
-        type_into(&mut dom, inputs[0], &note("renamed"));
+        assert!(html.contains("no note for july 24"), "{html}");
+        assert!(html.contains("<kbd>enter</kbd>"), "{html}");
+        assert!(
+            !vault.path().join("time/2026-07-24.typ").exists(),
+            "navigating never writes"
+        );
+        // the rail splices the missing day in, dim, in its slot
+        assert!(html.contains("missing"), "{html}");
+        let spliced = html.find("2026-07-24").expect("the day is spliced in");
+        let neighbour = html.find("2026-07-23").expect("the day before");
+        assert!(spliced < neighbour, "newest first keeps the slot: {html}");
+    }
+
+    #[test]
+    fn enter_creates_the_missing_day_and_renders_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[day_cell(24)]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
 
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(RENDERED_NOTE), "{html}");
-        assert!(!html.contains("render-error"), "{html}");
-        assert_eq!(
-            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
-                .expect("the note is readable"),
-            note("renamed"),
-            "the debounced autosave reached disk"
-        );
+        assert!(!html.contains("missing"), "the rail row is real now");
+        let written =
+            std::fs::read_to_string(vault.path().join("time/2026-07-24.typ"))
+                .expect("enter wrote the note");
+        assert!(written.contains("2026-07-24"), "{written}");
+        assert!(!written.contains("{{"), "placeholders filled: {written}");
     }
 
     #[test]
-    fn typing_something_that_will_not_compile_still_saves_it() {
+    fn enter_on_an_existing_note_writes_nothing() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        let inputs = open_note(&mut dom, clicks[0]);
-
-        type_into(&mut dom, inputs[0], "#let x = (\n");
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
-        assert!(!html.contains(RENDERED_NOTE), "{html}");
-        // no hard blocks: a note that cannot compile is still the user's file
-        assert_eq!(
-            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
-                .expect("the note is readable"),
-            "#let x = (\n"
-        );
-    }
-
-    #[test]
-    fn a_note_that_cannot_be_written_reports_the_failed_save() {
-        let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        let inputs = open_note(&mut dom, clicks[0]);
-
-        let note_path = vault.path().join("permanent/alpha.typ");
-        let mut permissions = std::fs::metadata(&note_path)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&note_path, permissions)
-            .expect("the note is made read-only");
-
-        type_into(&mut dom, inputs[0], &note("renamed"));
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("alpha.typ"), "{html}");
-    }
-
-    #[test]
-    fn the_autosave_writes_nothing_while_no_note_is_open() {
-        let vault = temp_vault();
+        let file = vault.path().join("time/2026-07-23.typ");
         let before =
-            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
-                .expect("the note is readable");
-        let (mut dom, _) = rendered_app(Some(vault.path().to_path_buf()));
-
-        block_on(settle(&mut dom));
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("Select a note"), "{html}");
+            std::fs::read_to_string(&file).expect("the note is readable");
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
         assert_eq!(
-            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
-                .expect("the note is readable"),
+            std::fs::read_to_string(&file).expect("still readable"),
             before
         );
     }
 
-    // -- the create bar: type + title in, a filled note out ------------------
-
     #[test]
-    fn creating_a_note_fills_the_template_and_opens_it() {
+    fn other_keys_on_the_logs_pane_create_nothing() {
         let vault = temp_vault();
-        let (mut dom, clicks, inputs, _) =
-            mounted_app(Some(vault.path().to_path_buf()));
-        assert_eq!(inputs.len(), 1, "the create bar mounts one title input");
-
-        type_into(&mut dom, inputs[0], "Deep Modules");
-        click(&mut dom, clicks[3]);
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(
-            html.contains(RENDERED_NOTE),
-            "the new note opens rendered: {html}"
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[day_cell(24)]);
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("x".into()),
+            Modifiers::empty(),
         );
-        assert!(
-            html.contains("deep-modules"),
-            "the new note is listed: {html}"
-        );
-        let written = std::fs::read_to_string(
-            vault.path().join("permanent/deep-modules.typ"),
-        )
-        .expect("the created note reached disk");
-        assert!(written.contains("= Deep Modules"), "{written}");
-        assert!(written.contains(&today()), "{written}");
-        assert!(
-            !written.contains("{{"),
-            "every placeholder is filled: {written}"
-        );
+        assert!(!vault.path().join("time/2026-07-24.typ").exists());
     }
 
     #[test]
-    fn a_duplicate_title_is_an_error_not_a_second_file() {
+    fn a_missing_template_reports_the_create_error_and_navigating_clears_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, inputs, _) =
-            mounted_app(Some(vault.path().to_path_buf()));
-
-        type_into(&mut dom, inputs[0], "Twice");
-        click(&mut dom, clicks[3]);
-        type_into(&mut dom, inputs[0], "Twice");
-        click(&mut dom, clicks[3]);
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("AlreadyExists"), "{html}");
-    }
-
-    #[test]
-    fn a_type_without_a_template_reports_the_create_error() {
-        let vault = temp_vault();
-        let (mut dom, clicks, inputs, changes) =
-            mounted_app(Some(vault.path().to_path_buf()));
-        assert_eq!(changes.len(), 1, "the create bar mounts one type select");
-
-        change_type(&mut dom, changes[0], "idea");
-        type_into(&mut dom, inputs[0], "An Idea");
-        click(&mut dom, clicks[3]);
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_file(vault.path().join("templates/daily.typ"))
+            .expect("remove the template");
+        click(&mut dom, clicks[day_cell(24)]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
 
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
         assert!(html.contains("UnknownTemplate"), "{html}");
-        assert!(!vault.path().join("permanent/an-idea.typ").exists());
-    }
+        assert!(!vault.path().join("time/2026-07-24.typ").exists());
 
-    // -- the today action: create or open today's daily note -----------------
-
-    #[test]
-    fn daily_note_creates_once_then_reuses_without_touching_the_file() {
-        let vault = temp_vault();
-        let (path, created) =
-            daily_note(vault.path(), "2026-07-27").expect("first call");
-        assert!(created);
-        assert_eq!(path, vault.path().join("time/2026-07-27.typ"));
-
-        std::fs::write(&path, "= edited by hand\n").expect("edit the note");
-        let (again, created) =
-            daily_note(vault.path(), "2026-07-27").expect("second call");
-        assert!(!created, "already there is an answer, not a write");
-        assert_eq!(again, path);
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read the note"),
-            "= edited by hand\n"
-        );
-    }
-
-    #[test]
-    fn daily_note_passes_other_errors_through() {
-        let vault = temp_vault();
-        std::fs::remove_file(vault.path().join("templates/daily.typ"))
-            .expect("remove the template");
-        let result = daily_note(vault.path(), "2026-07-27");
-        assert!(matches!(
-            result,
-            Err(crate::template::TemplateError::UnknownTemplate(name))
-                if name == "daily"
-        ));
-    }
-
-    #[test]
-    fn clicking_today_creates_and_opens_the_daily_note() {
-        let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-
-        click(&mut dom, clicks[4]);
-
+        click(&mut dom, clicks[RAIL_DAY_23]);
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(RENDERED_NOTE), "today opens rendered: {html}");
-        assert!(html.contains(&today()), "today is listed: {html}");
-        let written = std::fs::read_to_string(
-            vault.path().join(format!("time/{}.typ", today())),
-        )
-        .expect("today's note reached disk");
-        assert!(
-            !written.contains("{{"),
-            "every placeholder filled: {written}"
-        );
+        assert!(!html.contains("UnknownTemplate"), "navigation clears it");
     }
 
     #[test]
-    fn clicking_today_twice_opens_the_existing_note_once_listed() {
+    fn missing_weeks_and_seasons_create_from_their_period_start() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
 
-        click(&mut dom, clicks[4]);
-        click(&mut dom, clicks[4]);
-
+        click(&mut dom, clicks[GUTTER_W31]);
         let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no note for w31"), "{html}");
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
+        let written =
+            std::fs::read_to_string(vault.path().join("time/2026-w31.typ"))
+                .expect("enter wrote the weekly note");
+        assert!(written.contains("2026-07-27"), "the Monday: {written}");
+
+        click(&mut dom, clicks[SEASON_AUTUMN]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no note for autumn 2026"), "{html}");
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
+        let written =
+            std::fs::read_to_string(vault.path().join("time/2026-autumn.typ"))
+                .expect("enter wrote the seasonal note");
+        assert!(written.contains("2026-09-01"), "the first day: {written}");
+    }
+
+    // -- the scale chain jumps -----------------------------------------------
+
+    #[test]
+    fn a_breadcrumb_click_swaps_the_centre_to_the_wider_scale() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CRUMB_WEEK]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">weekly<"), "{html}");
         assert!(html.contains(RENDERED_NOTE), "{html}");
-        assert!(!html.contains("render-error"), "{html}");
-        // the date also sits in the textarea source, so count list entries
-        assert_eq!(
-            html.matches(&format!(">{}</li>", today())).count(),
-            1,
-            "one list entry, not one per click: {html}"
-        );
     }
 
+    // -- the jump panel: existence marking, paging, month sync ---------------
+
     #[test]
-    fn a_missing_daily_template_reports_the_today_error() {
+    fn the_grid_marks_existing_days_and_the_selected_pill() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        std::fs::remove_file(vault.path().join("templates/daily.typ"))
-            .expect("remove the template");
-
-        click(&mut dom, clicks[4]);
-
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("UnknownTemplate"), "{html}");
-        assert!(!vault.path().join(format!("time/{}.typ", today())).exists());
+        assert_eq!(
+            html.matches("has-note").count(),
+            3,
+            "the three july days: {html}"
+        );
+        assert!(html.contains("cal-day has-note selected"), "{html}");
+        assert!(html.contains("july 2026"), "{html}");
     }
 
-    // -- delete: file and index rows gone, debt surfaces elsewhere -----------
+    #[test]
+    fn a_selected_empty_day_outlines_without_a_note_marker() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[day_cell(24)]);
+        let html = dioxus_ssr::render(&dom);
+        // the double space is the unfired has-note conditional class slot
+        assert!(html.contains(r#"class="cal-day  selected""#), "{html}");
+    }
 
     #[test]
-    fn delete_note_removes_the_file_and_its_index_rows() {
+    fn the_wheel_pages_months_and_ignores_a_zero_delta() {
         let vault = temp_vault();
-        load_notes(vault.path()).expect("build the index");
-        let file = vault.path().join("permanent/alpha.typ");
+        let (mut dom, _, _, wheels) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let wheel = wheels[0];
 
-        delete_note(vault.path(), &file).expect("delete");
+        scroll(&mut dom, wheel, -120.0);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("june 2026"), "up pages back: {html}");
+        assert!(!html.contains("has-note"), "june holds no notes: {html}");
 
-        assert!(!file.exists());
-        let index = Index::open(&vault.path().join(".index/index.db"))
-            .expect("reopen the index");
+        scroll(&mut dom, wheel, 120.0);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("july 2026"), "down pages forward: {html}");
+
+        scroll(&mut dom, wheel, 0.0);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("july 2026"), "zero pages nowhere: {html}");
+    }
+
+    #[test]
+    fn selecting_across_scales_moves_the_grid_month() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_SUMMER]);
+        let html = dioxus_ssr::render(&dom);
         assert!(
-            !index
-                .notes_by_category(&NoteCategory::Permanent)
-                .expect("query")
-                .contains(&PathBuf::from("permanent/alpha.typ")),
-            "the running index matches what a rebuild would compute"
+            html.contains("may 2026"),
+            "the season starts in may: {html}"
         );
+        assert!(html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
-    fn delete_note_reports_a_file_that_is_not_there() {
+    fn the_current_season_is_lit_in_the_season_row() {
         let vault = temp_vault();
-        let file = vault.path().join("permanent/ghost.typ");
-        let result = delete_note(vault.path(), &file);
-        assert!(matches!(result, Err(msg) if msg.contains("ghost.typ")));
-    }
-
-    #[test]
-    fn delete_note_reports_an_unopenable_index() {
-        // no load_notes: the .index directory was never created
-        let vault = temp_vault();
-        let file = vault.path().join("permanent/alpha.typ");
-        let result = delete_note(vault.path(), &file);
-        assert!(matches!(result, Err(msg) if msg.contains("alpha.typ")));
-        assert!(!file.exists(), "the file half still happened");
-    }
-
-    #[test]
-    fn delete_note_reports_an_index_it_cannot_write() {
-        let vault = temp_vault();
-        load_notes(vault.path()).expect("build the index");
-        let db = vault.path().join(".index/index.db");
-        let mut permissions = std::fs::metadata(&db)
-            .expect("stat the database")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&db, permissions)
-            .expect("make the database read-only");
-
-        let file = vault.path().join("permanent/alpha.typ");
-        let result = delete_note(vault.path(), &file);
-        assert!(matches!(result, Err(msg) if msg.contains("alpha.typ")));
-    }
-
-    #[test]
-    fn delete_note_outside_the_vault_touches_no_index_row() {
-        // the strip_prefix fallback: a full path matches no relative row
-        let vault = temp_vault();
-        load_notes(vault.path()).expect("build the index");
-        let outside = tempfile::tempdir().expect("a sibling temp dir");
-        let file = outside.path().join("stray.typ");
-        std::fs::write(&file, "= stray\n").expect("write the stray file");
-
-        delete_note(vault.path(), &file).expect("delete");
-
-        assert!(!file.exists());
-        let index = Index::open(&vault.path().join(".index/index.db"))
-            .expect("reopen the index");
-        assert_eq!(
-            index
-                .notes_by_category(&NoteCategory::Permanent)
-                .expect("query")
-                .len(),
-            2,
-            "no vault row was harmed"
-        );
-    }
-
-    #[test]
-    fn deleting_the_open_note_removes_it_everywhere() {
-        let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        click(&mut dom, clicks[0]);
-
-        click(&mut dom, clicks[5]);
-
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
-        assert!(!vault.path().join("permanent/alpha.typ").exists());
-        assert!(!html.contains("alpha"), "gone from the list too: {html}");
-        assert!(html.contains("Select a note"), "the pane is empty: {html}");
-        assert!(!html.contains("textarea"), "{html}");
+        assert!(html.contains("cal-season lit"), "{html}");
+        assert_eq!(html.matches("cal-season lit").count(), 1, "{html}");
     }
 
     #[test]
-    fn delete_with_nothing_open_does_nothing() {
+    fn clicking_a_rail_week_selects_it() {
         let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-
-        click(&mut dom, clicks[5]);
-
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_W30]);
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("alpha"), "{html}");
-        assert!(html.contains("Select a note"), "{html}");
-        assert!(vault.path().join("permanent/alpha.typ").exists());
+        assert!(html.contains(">weekly<"), "{html}");
+        assert!(html.contains("cal-week selected"), "{html}");
     }
 
-    #[test]
-    fn a_delete_that_fails_reports_the_error() {
-        let vault = temp_vault();
-        let (mut dom, clicks) = rendered_app(Some(vault.path().to_path_buf()));
-        click(&mut dom, clicks[0]);
-        std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
-            .expect("pull the file out from under the app");
-
-        click(&mut dom, clicks[5]);
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("alpha.typ"), "{html}");
-    }
-
-    // -- load_notes: the happy path and every error edge --------------------
-
-    #[test]
-    fn load_notes_lists_categories_in_fixed_order_then_paths() {
-        let vault = temp_vault();
-        let (entries, loops) =
-            load_notes(vault.path()).expect("the temp vault indexes");
-        let paths: Vec<&Path> =
-            entries.iter().map(|entry| entry.path.as_path()).collect();
-        assert_eq!(
-            paths,
-            [
-                Path::new("permanent/alpha.typ"),
-                Path::new("permanent/omega.typ"),
-                Path::new("capture/broken.typ"),
-            ]
-        );
-        let labels: Vec<&str> =
-            entries.iter().map(|entry| entry.label.as_str()).collect();
-        assert_eq!(labels, ["alpha", "omega", "broken"]);
-        // broken.typ is a capture: a capture without a type is phase-10
-        // "unsummarized" debt, not a typeless note, so nothing is open here
-        assert_eq!(loops, 0);
-    }
+    // -- load_notes: the error edges behind the vault-error screen -----------
 
     #[test]
     fn a_missing_vault_fails_at_the_scan() {
@@ -1218,28 +958,6 @@ mod tests {
     }
 
     #[test]
-    fn a_sabotaged_index_fails_at_the_listing() {
-        let vault = temp_vault();
-        let notes = crate::index::scan_vault(vault.path())
-            .expect("the temp vault scans");
-        let index_dir = vault.path().join(".index");
-        std::fs::create_dir_all(&index_dir)
-            .expect("the index directory is created");
-        let mut index = Index::open(&index_dir.join("index.db"))
-            .expect("the database opens");
-        index.rebuild(&notes).expect("the rebuild succeeds");
-
-        let saboteur = rusqlite::Connection::open(index_dir.join("index.db"))
-            .expect("a second connection opens");
-        saboteur
-            .execute_batch("DROP TABLE notes")
-            .expect("the sabotage succeeds");
-
-        let error = list_entries(&index).unwrap_err();
-        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
-    }
-
-    #[test]
     fn a_sabotaged_notes_table_fails_the_survey_and_the_count() {
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE notes");
@@ -1251,7 +969,7 @@ mod tests {
 
     #[test]
     fn a_sabotaged_links_table_fails_the_survey_count() {
-        // the listing half survives on the notes table; the count is what
+        // the time-note half survives on the notes table; the count is what
         // reaches the links table and fails
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE links");
@@ -1259,117 +977,26 @@ mod tests {
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
+    #[test]
+    fn a_sabotaged_notes_table_shows_the_captured_error_after_open() {
+        // Index::open succeeds (the version stamp survives), the captured
+        // query is what fails — the second error edge of captured_lines
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE notes")
+            .expect("the sabotage succeeds");
+        click(&mut dom, clicks[RAIL_DAY_23]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(RENDERED_NOTE), "the note itself is fine");
+        assert!(html.contains("captured today:"), "{html}");
+    }
+
     // -- harness -------------------------------------------------------------
-
-    /// Builds the App headlessly with the vault injected as root context —
-    /// the same channel `main` uses — and returns the click targets found in
-    /// the initial mutations, in document order.
-    fn rendered_app(root: Option<PathBuf>) -> (VirtualDom, Vec<ElementId>) {
-        let (dom, clicks, _, _) = mounted_app(root);
-        (dom, clicks)
-    }
-
-    /// Like `rendered_app`, but also returns the create bar's `input` (title)
-    /// and `change` (type select) listeners from the initial mutations.
-    fn mounted_app(
-        root: Option<PathBuf>,
-    ) -> (VirtualDom, Vec<ElementId>, Vec<ElementId>, Vec<ElementId>) {
-        set_event_converter(Box::new(TestEvents));
-        let mut dom = VirtualDom::new(App);
-        dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        let mutations = dom.rebuild_to_vec();
-        let clicks = listeners(&mutations, "click");
-        let inputs = listeners(&mutations, "input");
-        let changes = listeners(&mutations, "change");
-        (dom, clicks, inputs, changes)
-    }
-
-    /// Like `rendered_app`, but with a recording `Closer` injected — the
-    /// harness for the quit chord — returning the app-root keydown target
-    /// and the flag the closer sets.
-    fn quit_app(
-        root: Option<PathBuf>,
-    ) -> (
-        VirtualDom,
-        Vec<ElementId>,
-        ElementId,
-        Arc<std::sync::atomic::AtomicBool>,
-    ) {
-        set_event_converter(Box::new(TestEvents));
-        let mut dom = VirtualDom::new(App);
-        dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let recorder = closed.clone();
-        dom.insert_any_root_context(Box::new(Closer(Arc::new(move || {
-            recorder.store(true, Ordering::SeqCst);
-        }))));
-        let mutations = dom.rebuild_to_vec();
-        let clicks = listeners(&mutations, "click");
-        let keydown = listeners(&mutations, "keydown")[0];
-        (dom, clicks, keydown, closed)
-    }
-
-    /// Fires an input event without driving the debounced autosave, leaving
-    /// the buffer dirty on purpose — how the quit tests create unsaved
-    /// edits.
-    fn edit_without_settling(
-        dom: &mut VirtualDom,
-        target: ElementId,
-        text: &str,
-    ) {
-        with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedFormData::new(text.to_string(), Vec::new()),
-            )));
-            dom.runtime().handle_event(
-                "input",
-                Event::new(data, true),
-                target,
-            );
-            dom.process_events();
-        });
-    }
-
-    /// Mounts the App without a vault — the theme wrapper encloses the error
-    /// screen too, so this is the cheapest mount — and returns the keydown
-    /// target on the `.app` root.
-    fn theme_app() -> (VirtualDom, ElementId) {
-        set_event_converter(Box::new(TestEvents));
-        let mut dom = VirtualDom::new(App);
-        dom.insert_any_root_context(Box::new(VaultRoot(None)));
-        let mutations = dom.rebuild_to_vec();
-        let keydown = listeners(&mutations, "keydown")[0];
-        (dom, keydown)
-    }
-
-    /// Fires a keydown on the app root. The physical code is irrelevant to
-    /// the theme chord, which reads only the key and its modifiers.
-    fn press(
-        dom: &mut VirtualDom,
-        target: ElementId,
-        key: Key,
-        modifiers: Modifiers,
-    ) {
-        with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedKeyboardData::new(
-                    key,
-                    Code::KeyT,
-                    Location::Standard,
-                    false,
-                    modifiers,
-                    false,
-                ),
-            )));
-            dom.runtime().handle_event(
-                "keydown",
-                Event::new(data, true),
-                target,
-            );
-            dom.process_events();
-            dom.render_immediate_to_vec();
-        });
-    }
 
     /// An index built over the vault, then vandalised through a second
     /// connection — how the survey's error paths are reached.
@@ -1390,6 +1017,113 @@ mod tests {
         index
     }
 
+    /// Builds the App headlessly with the vault and a fixed clock injected
+    /// as root context — the same channels `main` uses — and returns the
+    /// click, keydown and wheel targets from the initial mutations. All
+    /// three must come from the one rebuild: a second `rebuild_to_vec`
+    /// would reassign every ElementId.
+    fn rendered_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, Vec<ElementId>, Vec<ElementId>) {
+        let (dom, mutations) = mounted_app(root, None);
+        let clicks = listeners(&mutations, "click");
+        let keys = listeners(&mutations, "keydown");
+        let wheels = listeners(&mutations, "wheel");
+        (dom, clicks, keys, wheels)
+    }
+
+    /// Like `rendered_app`, but with a recording `Closer` injected — the
+    /// harness for the quit chord — returning the app-root keydown target
+    /// and the flag the closer sets.
+    fn quit_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, ElementId, Arc<std::sync::atomic::AtomicBool>) {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let recorder = closed.clone();
+        let closer = Closer(Arc::new(move || {
+            recorder.store(true, Ordering::SeqCst);
+        }));
+        let (dom, mutations) = mounted_app(root, Some(closer));
+        let keydown = listeners(&mutations, "keydown")[0];
+        (dom, keydown, closed)
+    }
+
+    /// Mounts the App without a vault — the theme wrapper encloses the error
+    /// screen too, so this is the cheapest mount — and returns the keydown
+    /// target on the `.app` root.
+    fn theme_app() -> (VirtualDom, ElementId) {
+        let (dom, mutations) = mounted_app(None, None);
+        let keydown = listeners(&mutations, "keydown")[0];
+        (dom, keydown)
+    }
+
+    fn mounted_app(
+        root: Option<PathBuf>,
+        closer: Option<Closer>,
+    ) -> (VirtualDom, Mutations) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        if let Some(closer) = closer {
+            dom.insert_any_root_context(Box::new(closer));
+        }
+        let mutations = dom.rebuild_to_vec();
+        (dom, mutations)
+    }
+
+    /// Fires a keydown. The physical code is irrelevant to every handler,
+    /// which read only the key and its modifiers.
+    fn press(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        key: Key,
+        modifiers: Modifiers,
+    ) {
+        let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+            SerializedKeyboardData::new(
+                key,
+                Code::KeyT,
+                Location::Standard,
+                false,
+                modifiers,
+                false,
+            ),
+        )));
+        dom.runtime()
+            .handle_event("keydown", Event::new(data, true), target);
+        dom.process_events();
+        dom.render_immediate_to_vec();
+    }
+
+    fn click(dom: &mut VirtualDom, target: ElementId) {
+        let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+            SerializedMouseData::default(),
+        )));
+        dom.runtime()
+            .handle_event("click", Event::new(data, true), target);
+        dom.process_events();
+        dom.render_immediate_to_vec();
+    }
+
+    /// Fires a wheel event with the given vertical pixel delta.
+    fn scroll(dom: &mut VirtualDom, target: ElementId, delta_y: f64) {
+        let data: Rc<dyn Any> =
+            Rc::new(PlatformEventData::new(Box::new(SerializedWheelData {
+                mouse: SerializedPointInteraction::default(),
+                delta_mode: 0, // pixels
+                delta_x: 0.0,
+                delta_y,
+                delta_z: 0.0,
+            })));
+        dom.runtime()
+            .handle_event("wheel", Event::new(data, true), target);
+        dom.process_events();
+        dom.render_immediate_to_vec();
+    }
+
     fn listeners(mutations: &Mutations, wanted: &str) -> Vec<ElementId> {
         mutations
             .edits
@@ -1403,101 +1137,10 @@ mod tests {
             .collect()
     }
 
-    fn click(dom: &mut VirtualDom, target: ElementId) {
-        open_note(dom, target);
-    }
-
-    /// Clicks a note and returns the `input` listener the editor mounts for
-    /// it, which is the handle the typing tests need.
-    fn open_note(dom: &mut VirtualDom, target: ElementId) -> Vec<ElementId> {
-        with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedMouseData::default(),
-            )));
-            dom.runtime().handle_event(
-                "click",
-                Event::new(data, true),
-                target,
-            );
-            dom.process_events();
-            listeners(&dom.render_immediate_to_vec(), "input")
-        })
-    }
-
-    /// Types `text` into the editor and lets the debounced autosave finish,
-    /// so assertions see the settled state rather than a half-run timer.
-    fn type_into(dom: &mut VirtualDom, target: ElementId, text: &str) {
-        block_on(async {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedFormData::new(text.to_string(), Vec::new()),
-            )));
-            dom.runtime().handle_event(
-                "input",
-                Event::new(data, true),
-                target,
-            );
-            settle(dom).await;
-        });
-    }
-
-    /// Fires a `change` event on the type select — the picker's only channel.
-    fn change_type(dom: &mut VirtualDom, target: ElementId, value: &str) {
-        with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedFormData::new(value.to_string(), Vec::new()),
-            )));
-            dom.runtime().handle_event(
-                "change",
-                Event::new(data, true),
-                target,
-            );
-            dom.process_events();
-            dom.render_immediate_to_vec();
-        });
-    }
-
-    /// Drives the resource through its restart, its `QUIET` sleep and the
-    /// write that follows. Bounded: four short waits, never a spin.
-    async fn settle(dom: &mut VirtualDom) {
-        for _ in 0..8 {
-            let waited =
-                tokio::time::timeout(QUIET * 50, dom.wait_for_work()).await;
-            dom.render_immediate_to_vec();
-            if waited.is_err() {
-                break;
-            }
-        }
-    }
-
-    thread_local! {
-        /// One runtime per test thread, never dropped mid-test: the autosave
-        /// resource sleeps on a tokio timer, and a timer whose runtime has
-        /// gone away panics with "context ... is being shutdown".
-        /// `QUIET` is 1 ms under `cfg(test)`, so nothing here waits
-        /// perceptibly.
-        static REACTOR: tokio::runtime::Runtime =
-            tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .expect("a current-thread runtime builds");
-    }
-
-    /// Runs `work` with the thread's reactor in scope, for calls that poll
-    /// dom tasks without awaiting anything themselves.
-    fn with_reactor<T>(work: impl FnOnce() -> T) -> T {
-        REACTOR.with(|reactor| {
-            let _guard = reactor.enter();
-            work()
-        })
-    }
-
-    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-        REACTOR.with(|reactor| reactor.block_on(future))
-    }
-
-    /// A vault with two valid permanent notes and one capture note whose
-    /// body cannot compile — enough to exercise list order, SVG rendering
-    /// and the render-error path.
+    /// A vault living in the fixture week: three daily notes (one that
+    /// cannot compile), the week, the season, one permanent note that must
+    /// never surface, and a capture + generated pair created on `TODAY`
+    /// for the "captured today" block.
     fn temp_vault() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("a temp dir is available");
         let root = dir.path();
@@ -1512,31 +1155,37 @@ mod tests {
                 )
                 .to_string(),
             ),
-            (
-                "templates/concept.typ",
-                concat!(
-                    "#import \"/templates/template.typ\": *\n",
-                    "#show: note\n",
-                    "#meta(id: \"{{id}}\", type: \"concept\", ",
-                    "created: \"{{created}}\")\n",
-                    "\n= {{title}}\n",
-                )
-                .to_string(),
-            ),
-            (
-                "templates/daily.typ",
-                concat!(
-                    "#import \"/templates/template.typ\": *\n",
-                    "#show: note\n",
-                    "#meta(id: \"{{id}}\", type: \"daily\", ",
-                    "created: \"{{created}}\")\n",
-                    "\n= {{id}}\n",
-                )
-                .to_string(),
-            ),
+            ("templates/daily.typ", time_template("daily")),
+            ("templates/weekly.typ", time_template("weekly")),
+            ("templates/seasonal.typ", time_template("seasonal")),
             ("permanent/alpha.typ", note("alpha")),
-            ("permanent/omega.typ", note("omega")),
-            ("capture/broken.typ", "#let x = (\n".to_string()),
+            (
+                "time/2026-07-21.typ",
+                format!("{}#let x = (\n", time_note("2026-07-21", "daily")),
+            ),
+            ("time/2026-07-22.typ", time_note("2026-07-22", "daily")),
+            ("time/2026-07-23.typ", time_note("2026-07-23", "daily")),
+            ("time/2026-w30.typ", time_note("2026-w30", "weekly")),
+            ("time/2026-summer.typ", time_note("2026-summer", "seasonal")),
+            (
+                "capture/capture-idea.typ",
+                format!(
+                    "#import \"/templates/template.typ\": *\n\
+                     #show: note\n\
+                     #meta(id: \"capture-idea\", created: \"{TODAY}\")\n\
+                     \n= capture-idea\n"
+                ),
+            ),
+            (
+                "generated/digest.typ",
+                format!(
+                    "#import \"/templates/template.typ\": *\n\
+                     #show: note\n\
+                     #meta(id: \"digest\", type: \"generated\", \
+                     created: \"{TODAY}\")\n\
+                     \n= digest\n"
+                ),
+            ),
         ] {
             let path = root.join(path);
             std::fs::create_dir_all(
@@ -1545,10 +1194,27 @@ mod tests {
             .expect("the category directory is created");
             std::fs::write(path, text).expect("the note is written");
         }
-        // template::create writes into root/time without creating it
-        std::fs::create_dir(root.join("time"))
-            .expect("the time directory is created");
         dir
+    }
+
+    fn time_template(type_name: &str) -> String {
+        format!(
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"{{{{id}}}}\", type: \"{type_name}\", \
+             created: \"{{{{created}}}}\")\n\
+             \n= {{{{id}}}}\n"
+        )
+    }
+
+    fn time_note(id: &str, type_name: &str) -> String {
+        format!(
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"{id}\", type: \"{type_name}\", \
+             created: \"2026-07-01\")\n\
+             \n= {id}\n"
+        )
     }
 
     fn note(id: &str) -> String {
@@ -1560,9 +1226,9 @@ mod tests {
         )
     }
 
-    /// Only mouse, form and keyboard events are real: the shell listens for
-    /// clicks on the note list, input on the editor and keydown on the app
-    /// root, so every other conversion is unreachable in these tests.
+    /// Only mouse, keyboard and wheel events are real: the shell listens for
+    /// clicks everywhere, keydowns on the two roots and wheel on the jump
+    /// panel, so every other conversion is unreachable in these tests.
     struct TestEvents;
 
     impl HtmlEventConverter for TestEvents {
@@ -1572,51 +1238,6 @@ mod tests {
                 .cloned()
                 .map(MouseData::from)
                 .expect("the tests only fire serialized mouse events")
-        }
-
-        fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
-            event
-                .downcast::<SerializedFormData>()
-                .cloned()
-                .map(FormData::from)
-                .expect("the tests only fire serialized form events")
-        }
-
-        fn convert_animation_data(
-            &self,
-            _: &PlatformEventData,
-        ) -> AnimationData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_cancel_data(&self, _: &PlatformEventData) -> CancelData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_clipboard_data(
-            &self,
-            _: &PlatformEventData,
-        ) -> ClipboardData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_composition_data(
-            &self,
-            _: &PlatformEventData,
-        ) -> CompositionData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_drag_data(&self, _: &PlatformEventData) -> DragData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_focus_data(&self, _: &PlatformEventData) -> FocusData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_image_data(&self, _: &PlatformEventData) -> ImageData {
-            unreachable!("the shell only listens for clicks")
         }
 
         fn convert_keyboard_data(
@@ -1630,54 +1251,99 @@ mod tests {
                 .expect("the tests only fire serialized keyboard events")
         }
 
+        fn convert_wheel_data(&self, event: &PlatformEventData) -> WheelData {
+            event
+                .downcast::<SerializedWheelData>()
+                .cloned()
+                .map(WheelData::from)
+                .expect("the tests only fire serialized wheel events")
+        }
+
+        fn convert_animation_data(
+            &self,
+            _: &PlatformEventData,
+        ) -> AnimationData {
+            unreachable!("the shell never listens for this event")
+        }
+
+        fn convert_cancel_data(&self, _: &PlatformEventData) -> CancelData {
+            unreachable!("the shell never listens for this event")
+        }
+
+        fn convert_clipboard_data(
+            &self,
+            _: &PlatformEventData,
+        ) -> ClipboardData {
+            unreachable!("the shell never listens for this event")
+        }
+
+        fn convert_composition_data(
+            &self,
+            _: &PlatformEventData,
+        ) -> CompositionData {
+            unreachable!("the shell never listens for this event")
+        }
+
+        fn convert_drag_data(&self, _: &PlatformEventData) -> DragData {
+            unreachable!("the shell never listens for this event")
+        }
+
+        fn convert_focus_data(&self, _: &PlatformEventData) -> FocusData {
+            unreachable!("the shell never listens for this event")
+        }
+
+        fn convert_form_data(&self, _: &PlatformEventData) -> FormData {
+            unreachable!("the read-only shell mounts no inputs")
+        }
+
+        fn convert_image_data(&self, _: &PlatformEventData) -> ImageData {
+            unreachable!("the shell never listens for this event")
+        }
+
         fn convert_media_data(&self, _: &PlatformEventData) -> MediaData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_mounted_data(&self, _: &PlatformEventData) -> MountedData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_pointer_data(&self, _: &PlatformEventData) -> PointerData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_resize_data(&self, _: &PlatformEventData) -> ResizeData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_scroll_data(&self, _: &PlatformEventData) -> ScrollData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_selection_data(
             &self,
             _: &PlatformEventData,
         ) -> SelectionData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_toggle_data(&self, _: &PlatformEventData) -> ToggleData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_touch_data(&self, _: &PlatformEventData) -> TouchData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_transition_data(
             &self,
             _: &PlatformEventData,
         ) -> TransitionData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
 
         fn convert_visible_data(&self, _: &PlatformEventData) -> VisibleData {
-            unreachable!("the shell only listens for clicks")
-        }
-
-        fn convert_wheel_data(&self, _: &PlatformEventData) -> WheelData {
-            unreachable!("the shell only listens for clicks")
+            unreachable!("the shell never listens for this event")
         }
     }
 }

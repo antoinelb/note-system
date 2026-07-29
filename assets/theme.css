@@ -38,7 +38,9 @@ body {
 
 .app {
   box-sizing: border-box;
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
   background: var(--bg);
   color: var(--ink);
   font-family: Lato, sans-serif;
@@ -71,63 +73,218 @@ body {
   color: var(--ember);
 }
 
-/* -- phase-4/5 scaffolding: just enough palette to prove the theme; the
-      list and the split view are deleted with the phase-7 logs screen ------ */
+/* -- the logs screen: rail · centre · jump (design § The logs screen);
+      mockup widths 210/330 and indents 10/20 normalized to multiples
+      of 4 ------------------------------------------------------------------ */
 
-.note-list {
-  list-style: none;
-  margin: 0;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--hairline);
+.logs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 
-.note-entry {
-  padding: 4px 0;
+/* focusable only so the enter keystroke has somewhere to land */
+.logs:focus {
+  outline: none;
+}
+
+.rail {
+  width: 208px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--hairline);
+  padding: 16px 0;
+}
+
+.rail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 16px;
   font: 16px Lato, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
   cursor: pointer;
 }
 
-.create-note {
-  display: flex;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--hairline);
+/* indentation alone carries the scale: season ⊃ week ⊃ day */
+.rail-weekly {
+  padding-left: 28px;
 }
 
-.create-type,
-.create-title,
-.create-button,
-.today-button,
-.delete-button {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--ink);
+.rail-daily {
+  padding-left: 40px;
+}
+
+/* no boxes, no fills: the selected entry is simply bold bright ink */
+.rail-row.selected {
+  color: var(--ink-bright);
+  font-weight: 700;
+}
+
+.rail-row.missing {
+  font-style: italic;
+  color: var(--ink-faint);
+}
+
+.rail-tag {
+  font-size: 12px;
+  color: var(--ink-faintest);
+}
+
+.centre {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+.crumbs {
   font: 16px Lato, sans-serif;
-  padding: 4px 8px;
+  color: var(--ink-muted);
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 16px;
 }
 
-.create-title::placeholder {
+.crumbs > *:not(:last-child)::after {
+  content: " · ";
+  color: var(--ink-faint);
+}
+
+.crumb-link {
+  cursor: pointer;
+}
+
+.crumb-link:hover {
+  color: var(--ink-bright);
+}
+
+.note svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* empty is honest: one centred line, no ghost template */
+.empty-note {
+  margin-top: 96px;
+  text-align: center;
+  font: 18px Lato, sans-serif;
   color: var(--ink-muted);
 }
 
-.editor {
-  display: flex;
-  gap: 16px;
-  padding: 16px;
-}
-
-.source {
-  flex: 1;
-  min-height: 320px;
-  background: none;
+.empty-note kbd {
+  font: 14px Lato, sans-serif;
   border: 1px solid var(--border);
-  color: var(--ink);
-  font: 18px Parisienne, cursive;
-  padding: 8px;
+  border-radius: 4px;
+  padding: 0 4px;
 }
 
-.rendered {
-  flex: 1;
+/* the day gathers what happened in it */
+.captured {
+  margin-top: 24px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 12px;
+}
+
+.captured-head {
+  color: var(--ink-faint);
+  padding-bottom: 8px;
+}
+
+.captured-line {
+  font: 16px Lato, sans-serif;
+  color: var(--ink-muted);
+  padding: 2px 0;
+}
+
+.jump {
+  width: 328px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--hairline);
+  padding: 16px 20px;
+}
+
+.cal-head {
+  color: var(--ink-muted);
+  padding-bottom: 12px;
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: 28px repeat(7, 1fr);
+  gap: 4px;
+  font: 16px Lato, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-weekday {
+  text-align: center;
+  color: var(--ink-faintest);
+}
+
+/* the week-number gutter is a clickable scale too */
+.cal-gutter {
+  color: var(--ink-faintest);
+}
+
+.cal-week {
+  cursor: pointer;
+}
+
+.cal-week.selected {
+  color: var(--ink-bright);
+  font-weight: 700;
+}
+
+/* bright ink = a note exists, faint ink = empty */
+.cal-day {
+  text-align: center;
+  padding: 2px 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+.cal-day.blank {
+  cursor: default;
+}
+
+.cal-day.has-note {
+  color: var(--ink-bright);
+}
+
+/* selection ≠ existence: a selected empty day outlines, never fills */
+.cal-day.selected {
+  border-color: var(--ink-muted);
+}
+
+/* the selected existing day is the filled pill, inverted */
+.cal-day.has-note.selected {
+  background: var(--ink-bright);
+  color: var(--bg);
+}
+
+.cal-seasons {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  font: 16px Lato, sans-serif;
+  color: var(--ink-faintest);
+}
+
+.cal-season {
+  cursor: pointer;
+}
+
+.cal-season.lit {
+  color: var(--ink-bright);
+}
+
+.cal-season.selected {
+  font-weight: 700;
 }
 
 /* the one warm hue doubles as the alert hue */
