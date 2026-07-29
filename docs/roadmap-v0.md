@@ -5,7 +5,7 @@ The plan carries the *what* and *why*; this file carries the *order* and the *st
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr/2026-07-two-screens-table-and-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
-**Next step → Phase 8, first unchecked box.**
+**Next step → Phase 9, first unchecked box.**
 
 ## How we work
 
@@ -143,10 +143,10 @@ Exit: you navigate a month of logs without touching the filesystem, and the app 
 
 Goal: the block under the cursor shows source; every other block shows rendered output.
 
-- [ ] Block segmentation from the `typst-syntax` tree (top-level markup nodes, never line-based).
-- [ ] Map cursor position → active block; render inactive blocks as cached SVG fragments.
-- [ ] Recompute block boundaries when the cursor leaves a block or on idle.
-- [ ] Tests: segmentation on multi-line constructs, cursor→block mapping at boundaries.
+- [x] Block segmentation from the `typst-syntax` tree (top-level markup nodes, never line-based). **→ ADR** (`adr/2026-07-block-segmentation-parbreak-tiling.md` — Parbreak-separated runs tiling the note; fragments compile under a synthesized preamble without `#meta`)
+- [x] Map cursor position → active block; render inactive blocks as cached SVG fragments. **→ ADR** (`adr/2026-07-hybrid-active-block-textarea.md` — a textarea on the active block only, `Buffer::replace_range` instead of a buffer-owned cursor; click + boundary arrows via an injected `selectionStart` probe; supersedes the edit-op sketch in `adr/2026-07-buffer-is-path-plus-string.md` and ends `adr/2026-07-logs-centre-read-only.md`; autosave and Ctrl+Q flush-then-close reinstated)
+- [x] Recompute block boundaries when the cursor leaves a block or on idle. (The "cursor leaves" half: every deactivation — Escape, clicking another block, a boundary slide — resegments. Idle resegmentation while a block stays active was deliberately dropped: remounting the textarea under a mid-sentence caret is the caret-jump risk, and the autosave saves without touching boundaries.)
+- [x] Tests: segmentation on multi-line constructs, cursor→block mapping at boundaries.
 
 Exit: hybrid editing feels better than plain source for daily writing.
 Pre-declared fallback (`plan.md` § Known risks): if this stalls, the logs centre pane ships as a **single pane toggling source ⇄ rendered** and this phase moves after v1.
