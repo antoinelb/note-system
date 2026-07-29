@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -17,20 +18,28 @@ impl Buffer {
     pub fn text(&self) -> &str {
         &self.text
     }
-    pub fn set_text(&mut self, text: String) {
-        self.text = text;
+    /// The hybrid editor's one edit operation: the widget hands back a whole
+    /// block's new text, the buffer splices it into the note
+    /// (adr/2026-07-hybrid-active-block-textarea.md). A reversed span or one
+    /// off a char boundary is a stale caller — `String::replace_range` would
+    /// panic there, so the edit is refused instead, and the refusal is
+    /// returned rather than swallowed so the widget can surface it.
+    #[must_use]
+    pub fn replace_range(
+        &mut self,
+        span: Range<usize>,
+        replacement: &str,
+    ) -> bool {
+        let valid = span.start <= span.end
+            && self.text.is_char_boundary(span.start)
+            && self.text.is_char_boundary(span.end);
+        if valid {
+            self.text.replace_range(span, replacement);
+        }
+        valid
     }
     pub fn save(&self) -> Result<(), std::io::Error> {
         std::fs::write(&self.file, &self.text)
-    }
-}
-
-/// Applies an edit to whatever note is open. An edit with nothing open is
-/// dropped: the editor widget only exists while a buffer does, so this makes
-/// the unrepresentable case explicit instead of unwrapping it.
-pub fn apply_edit(open: &mut Option<Buffer>, text: String) {
-    if let Some(note) = open {
-        note.set_text(text);
     }
 }
 
@@ -70,46 +79,53 @@ mod tests {
     }
 
     #[test]
-    fn set_text_replaces_the_whole_text_and_save_round_trips_it() {
+    fn replace_range_splices_and_save_round_trips_it() {
         let dir = tempfile::tempdir().expect("a temp dir is available");
         let file = dir.path().join("note.typ");
-        std::fs::write(&file, "before\n").expect("the note is written");
+        std::fs::write(&file, "one two three\n").expect("the note is written");
 
         let mut buffer = Buffer::open(file.clone()).expect("the note opens");
-        buffer.set_text("after\n".to_string());
-        assert_eq!(buffer.text(), "after\n");
+        assert!(buffer.replace_range(4..7, "deux"));
+        assert_eq!(buffer.text(), "one deux three\n");
 
         // nothing reaches disk until save is called
         assert_eq!(
             std::fs::read_to_string(&file).expect("the note is readable"),
-            "before\n"
+            "one two three\n"
         );
 
         buffer.save().expect("the note saves");
         let reopened = Buffer::open(file).expect("the note reopens");
-        assert_eq!(reopened.text(), "after\n");
+        assert_eq!(reopened.text(), "one deux three\n");
     }
 
     #[test]
-    fn an_edit_reaches_the_open_note() {
+    fn replace_range_covers_the_edges() {
         let dir = tempfile::tempdir().expect("a temp dir is available");
         let file = dir.path().join("note.typ");
-        std::fs::write(&file, "before\n").expect("the note is written");
+        std::fs::write(&file, "abc").expect("the note is written");
 
-        let mut open = Some(Buffer::open(file).expect("the note opens"));
-        apply_edit(&mut open, "after\n".to_string());
-        assert_eq!(
-            open.as_ref().map(Buffer::text),
-            Some("after\n"),
-            "the edit did not reach the buffer"
-        );
+        let mut buffer = Buffer::open(file).expect("the note opens");
+        assert!(buffer.replace_range(0..1, "A"));
+        assert!(buffer.replace_range(2..3, "C"));
+        assert_eq!(buffer.text(), "AbC");
+        assert!(buffer.replace_range(0..3, ""), "the whole text can go");
+        assert_eq!(buffer.text(), "");
     }
 
     #[test]
-    fn an_edit_with_no_note_open_is_dropped() {
-        let mut open = None;
-        apply_edit(&mut open, "nowhere to go".to_string());
-        assert!(open.is_none(), "an orphaned edit invented a buffer");
+    fn stale_spans_are_refused_and_the_text_survives() {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let file = dir.path().join("note.typ");
+        std::fs::write(&file, "été\n").expect("the note is written");
+
+        let mut buffer = Buffer::open(file).expect("the note opens");
+        assert!(!buffer.replace_range(0..9, "x"), "past the end");
+        let reversed = Range { start: 3, end: 2 };
+        assert!(!buffer.replace_range(reversed, "x"), "reversed");
+        assert!(!buffer.replace_range(1..4, "x"), "mid-char start");
+        assert!(!buffer.replace_range(0..4, "x"), "mid-char end");
+        assert_eq!(buffer.text(), "été\n", "a refused edit changes nothing");
     }
 
     #[test]
