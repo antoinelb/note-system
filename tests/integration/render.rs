@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use note_system::render::{FragmentCache, RenderError, VaultWorld, render_svg};
+use note_system::render::{
+    FragmentCache, RenderError, VaultWorld, render_svg,
+};
 use typst::World;
 use typst::diag::FileError;
 use typst::syntax::package::PackageSpec;

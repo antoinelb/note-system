@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 use jiff::civil::Date;
@@ -15,15 +16,30 @@ use crate::logs::{self, Selection};
 use crate::render::FragmentCache;
 use crate::time;
 
+/// One idle timer drives the save (adr/2026-07-debounced-autosave.md);
+/// shortened under `cfg(test)` so the settled state is a few polls away.
+#[cfg(not(test))]
+const QUIET: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const QUIET: Duration = Duration::from_millis(1);
+
 #[derive(Clone, Debug)]
 pub struct VaultRoot(pub Option<PathBuf>);
 
 /// How Ctrl+Q reaches the windowing system: `main` injects the real
 /// window-close call, the headless tests inject a recorder — the same
-/// root-context channel as `VaultRoot`. With the centre pane read-only
-/// there is nothing to flush first (adr/2026-07-logs-centre-read-only.md).
+/// root-context channel as `VaultRoot`.
 #[derive(Clone)]
 pub struct Closer(pub Arc<dyn Fn() + Send + Sync>);
+
+/// The quit chord lands on the `.app` root, but the open buffer lives in
+/// `Shell` — so `Shell` registers its flush here for `App` to call before
+/// closing (adr/2026-07-ctrl-q-flushes-then-closes.md, reinstated by
+/// adr/2026-07-hybrid-active-block-textarea.md). A plain cell, not a
+/// signal: it is only ever read inside the event handler, so nothing needs
+/// to re-render when it is set.
+#[derive(Clone, Default)]
+struct QuitFlush(Rc<RefCell<Option<Callback<(), bool>>>>);
 
 /// Today's date, injected at the root by `main` — the app's single clock
 /// edge, replaced by a fixed date in the headless tests
@@ -37,6 +53,7 @@ pub fn App() -> Element {
     let today = use_context::<Today>();
     let loaded = use_hook(|| load(vault.0));
     let mut light = use_signal(|| false);
+    let quit_flush = use_context_provider(QuitFlush::default);
     // absent in the headless tests, where there is no window to close
     let closer = try_consume_context::<Closer>();
     rsx! {
@@ -58,9 +75,16 @@ pub fn App() -> Element {
                     light.set(!light());
                 } else if event.modifiers().ctrl()
                     && event.key() == Key::Character("q".to_string())
-                    && let Some(closer) = &closer
                 {
-                    (closer.0)();
+                    // flush before close, so a quit inside the autosave's
+                    // quiet window cannot drop the last keystrokes; a save
+                    // that fails cancels the quit and surfaces its error
+                    // (adr/2026-07-ctrl-q-flushes-then-closes.md)
+                    let flush = *quit_flush.0.borrow();
+                    let saved = flush.is_none_or(|flush| flush.call(()));
+                    if saved && let Some(closer) = &closer {
+                        (closer.0)();
+                    }
                 }
             },
             {
@@ -98,7 +122,34 @@ fn Shell(
     let mut month = use_signal(|| today.first_of_month());
     // the fragment cache is a memo store, not UI state: nothing should
     // re-render when it fills, so a plain hook value rather than a signal
-    let fragments = use_hook(|| Rc::new(RefCell::new(FragmentCache::default())));
+    let fragments =
+        use_hook(|| Rc::new(RefCell::new(FragmentCache::default())));
+
+    // the Ctrl+Q flush: reports whether the open note reached disk, so a
+    // failed save can hold the app open instead of losing the buffer
+    let quit_flush = use_callback(move |()| editor.write().flush());
+    let register = use_context::<QuitFlush>();
+    // once is enough: the Callback's identity is stable across re-renders,
+    // only its captured closure is refreshed
+    use_hook(move || register.0.borrow_mut().replace(quit_flush));
+
+    // one idle timer drives the save (adr/2026-07-debounced-autosave.md);
+    // block boundaries still recompute only at the deactivation points
+    let _autosave = use_resource(move || {
+        // reading the editor is what subscribes this resource to every edit
+        let _ = editor.read();
+        async move {
+            tokio::time::sleep(QUIET).await;
+            let error = editor.peek().save();
+            // only a value-gated write may touch the subscribed signal: an
+            // unguarded one would restart this resource forever
+            if let Some(error) = error
+                && editor.peek().notice() != Some(error.as_str())
+            {
+                editor.write().set_notice(error);
+            }
+        }
+    });
 
     let select = use_callback({
         let root = root.clone();
@@ -123,7 +174,8 @@ fn Shell(
     let exists = note_list.iter().any(|(existing, _)| existing == &id);
     let rows = logs::rail_rows(&note_list, Some(&(scale.clone(), id.clone())));
     let crumbs = logs::breadcrumbs(&scale, &id);
-    let panes = block_panes(&editor.read(), &root, &mut fragments.borrow_mut());
+    let panes =
+        block_panes(&editor.read(), &root, &mut fragments.borrow_mut());
     let notice = editor.read().notice().map(str::to_string);
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
@@ -164,9 +216,8 @@ fn Shell(
                         "",
                     ) {
                         Ok(_) => {
-                            editor.set(Editor::open(time_note_path(
-                                &root, &id,
-                            )));
+                            editor
+                                .set(Editor::open(time_note_path(&root, &id)));
                             fragments.borrow_mut().sweep();
                             notes.with_mut(|list| list.push((id, scale)));
                         }
@@ -529,8 +580,14 @@ fn time_note_path(root: &Path, id: &str) -> PathBuf {
 /// every other as its cached fragment, tagged with its start byte so a
 /// click activates by coordinate rather than by shiftable index.
 enum Pane {
-    Source { start: usize, text: String },
-    Fragment { start: usize, rendered: Result<String, String> },
+    Source {
+        start: usize,
+        text: String,
+    },
+    Fragment {
+        start: usize,
+        rendered: Result<String, String>,
+    },
 }
 
 fn block_panes(
@@ -705,7 +762,7 @@ mod tests {
     #[test]
     fn ctrl_q_asks_the_window_to_close() {
         let vault = temp_vault();
-        let (mut dom, keydown, closed) =
+        let (mut dom, _, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
         press(
             &mut dom,
@@ -718,7 +775,7 @@ mod tests {
 
     #[test]
     fn ctrl_q_on_the_vault_error_screen_closes_immediately() {
-        let (mut dom, keydown, closed) = quit_app(None);
+        let (mut dom, _, keydown, closed) = quit_app(None);
         press(
             &mut dom,
             keydown,
@@ -726,6 +783,105 @@ mod tests {
             Modifiers::CONTROL,
         );
         assert!(closed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ctrl_q_flushes_the_unsaved_buffer_then_closes() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        // typed but inside the quiet window: only the flush can save it
+        type_into(&mut dom, input, "= presque perdu\n");
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+
+        assert!(closed.load(Ordering::SeqCst));
+        let saved = std::fs::read_to_string(
+            vault.path().join("time/2026-07-23.typ"),
+        )
+        .expect("the note is readable");
+        assert!(saved.contains("presque perdu"), "{saved}");
+    }
+
+    #[test]
+    fn a_failed_flush_cancels_the_quit_and_shows_the_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        type_into(&mut dom, input, "= pas encore sauvé\n");
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "the app never closes over an unsaved buffer"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("2026-07-23.typ"), "{html}");
+    }
+
+    // -- the debounced autosave ----------------------------------------------
+
+    #[test]
+    fn typing_then_idling_saves_without_leaving_the_block() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        type_and_settle(&mut dom, input, "= autosauvé\n");
+
+        let saved = std::fs::read_to_string(
+            vault.path().join("time/2026-07-23.typ"),
+        )
+        .expect("the note is readable");
+        assert!(saved.contains("autosauvé"), "{saved}");
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("block-active"),
+            "the block stays active — saving is not deactivation: {html}"
+        );
+    }
+
+    #[test]
+    fn a_failing_autosave_surfaces_its_error_once() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+
+        // the settle loop spans several autosave restarts, so the
+        // value-gated write is exercised on both of its sides here
+        type_and_settle(&mut dom, input, "= en panne\n");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("2026-07-23.typ"), "{html}");
     }
 
     #[test]
@@ -1100,8 +1256,7 @@ mod tests {
         type_into(&mut dom, input, "= renamed\n");
 
         // the still-rendered preamble block is the first click target again
-        let mutations =
-            click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
         assert_eq!(
             listeners(&mutations, "input").len(),
             1,
@@ -1109,10 +1264,9 @@ mod tests {
         );
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "the preamble source: {html}");
-        let saved = std::fs::read_to_string(
-            vault.path().join("time/2026-07-23.typ"),
-        )
-        .expect("the note is readable");
+        let saved =
+            std::fs::read_to_string(vault.path().join("time/2026-07-23.typ"))
+                .expect("the note is readable");
         assert!(saved.contains("= renamed"), "the move flushed: {saved}");
     }
 
@@ -1397,19 +1551,25 @@ mod tests {
     }
 
     /// Like `rendered_app`, but with a recording `Closer` injected — the
-    /// harness for the quit chord — returning the app-root keydown target
-    /// and the flag the closer sets.
+    /// harness for the quit chord — returning the click targets, the
+    /// app-root keydown target and the flag the closer sets.
     fn quit_app(
         root: Option<PathBuf>,
-    ) -> (VirtualDom, ElementId, Arc<std::sync::atomic::AtomicBool>) {
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        ElementId,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let recorder = closed.clone();
         let closer = Closer(Arc::new(move || {
             recorder.store(true, Ordering::SeqCst);
         }));
         let (dom, mutations) = mounted_app(root, Some(closer));
+        let clicks = listeners(&mutations, "click");
         let keydown = listeners(&mutations, "keydown")[0];
-        (dom, keydown, closed)
+        (dom, clicks, keydown, closed)
     }
 
     /// Mounts the App without a vault — the theme wrapper encloses the error
@@ -1446,20 +1606,62 @@ mod tests {
         key: Key,
         modifiers: Modifiers,
     ) {
-        let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-            SerializedKeyboardData::new(
-                key,
-                Code::KeyT,
-                Location::Standard,
-                false,
-                modifiers,
-                false,
-            ),
-        )));
-        dom.runtime()
-            .handle_event("keydown", Event::new(data, true), target);
-        dom.process_events();
-        dom.render_immediate_to_vec();
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedKeyboardData::new(
+                    key,
+                    Code::KeyT,
+                    Location::Standard,
+                    false,
+                    modifiers,
+                    false,
+                ),
+            )));
+            dom.runtime()
+                .handle_event("keydown", Event::new(data, true), target);
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// Drives the autosave through its restart, its `QUIET` sleep and the
+    /// write that follows. Bounded: eight short waits, never a spin.
+    async fn settle(dom: &mut VirtualDom) {
+        for _ in 0..8 {
+            let waited =
+                tokio::time::timeout(QUIET * 50, dom.wait_for_work()).await;
+            dom.render_immediate_to_vec();
+            if waited.is_err() {
+                break;
+            }
+        }
+    }
+
+    thread_local! {
+        /// One runtime per test thread, never dropped mid-test: the autosave
+        /// resource sleeps on a tokio timer, and a timer whose runtime has
+        /// gone away panics with "context ... is being shutdown".
+        /// `QUIET` is 1 ms under `cfg(test)`, so nothing here waits
+        /// perceptibly.
+        static REACTOR: tokio::runtime::Runtime =
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("a current-thread runtime builds");
+    }
+
+    /// Runs `work` with the thread's reactor in scope, for calls that poll
+    /// dom tasks (the autosave's sleep) without awaiting anything
+    /// themselves.
+    fn with_reactor<T>(work: impl FnOnce() -> T) -> T {
+        REACTOR.with(|reactor| {
+            let _guard = reactor.enter();
+            work()
+        })
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        REACTOR.with(|reactor| reactor.block_on(future))
     }
 
     fn click(dom: &mut VirtualDom, target: ElementId) {
@@ -1469,26 +1671,47 @@ mod tests {
     /// Like `click`, but hands back the mutations it caused — how the
     /// listeners a click mounts (the active textarea's input and keydown)
     /// are harvested, since they are never in the initial table.
-    fn click_for_mutations(dom: &mut VirtualDom, target: ElementId) -> Mutations {
-        let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-            SerializedMouseData::default(),
-        )));
-        dom.runtime()
-            .handle_event("click", Event::new(data, true), target);
-        dom.process_events();
-        dom.render_immediate_to_vec()
+    fn click_for_mutations(
+        dom: &mut VirtualDom,
+        target: ElementId,
+    ) -> Mutations {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedMouseData::default(),
+            )));
+            dom.runtime()
+                .handle_event("click", Event::new(data, true), target);
+            dom.process_events();
+            dom.render_immediate_to_vec()
+        })
     }
 
     /// Fires an input event carrying the textarea's whole new value — the
-    /// shape the oninput handler reads through `event.value()`.
+    /// shape the oninput handler reads through `event.value()` — without
+    /// driving the debounced autosave, leaving the buffer dirty on purpose.
     fn type_into(dom: &mut VirtualDom, target: ElementId, text: &str) {
-        let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-            SerializedFormData::new(text.to_string(), Vec::new()),
-        )));
-        dom.runtime()
-            .handle_event("input", Event::new(data, true), target);
-        dom.process_events();
-        dom.render_immediate_to_vec();
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedFormData::new(text.to_string(), Vec::new()),
+            )));
+            dom.runtime()
+                .handle_event("input", Event::new(data, true), target);
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// Types and lets the debounced autosave finish, so assertions see the
+    /// settled state rather than a half-run timer.
+    fn type_and_settle(dom: &mut VirtualDom, target: ElementId, text: &str) {
+        block_on(async {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedFormData::new(text.to_string(), Vec::new()),
+            )));
+            dom.runtime()
+                .handle_event("input", Event::new(data, true), target);
+            settle(dom).await;
+        });
     }
 
     /// Activates a block and returns the textarea's (input, keydown)
@@ -1505,18 +1728,21 @@ mod tests {
 
     /// Fires a wheel event with the given vertical pixel delta.
     fn scroll(dom: &mut VirtualDom, target: ElementId, delta_y: f64) {
-        let data: Rc<dyn Any> =
-            Rc::new(PlatformEventData::new(Box::new(SerializedWheelData {
-                mouse: SerializedPointInteraction::default(),
-                delta_mode: 0, // pixels
-                delta_x: 0.0,
-                delta_y,
-                delta_z: 0.0,
-            })));
-        dom.runtime()
-            .handle_event("wheel", Event::new(data, true), target);
-        dom.process_events();
-        dom.render_immediate_to_vec();
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(
+                Box::new(SerializedWheelData {
+                    mouse: SerializedPointInteraction::default(),
+                    delta_mode: 0, // pixels
+                    delta_x: 0.0,
+                    delta_y,
+                    delta_z: 0.0,
+                }),
+            ));
+            dom.runtime()
+                .handle_event("wheel", Event::new(data, true), target);
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
     }
 
     fn listeners(mutations: &Mutations, wanted: &str) -> Vec<ElementId> {

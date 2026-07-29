@@ -99,17 +99,39 @@ impl Editor {
     /// Escape or clicking away: save, resegment, back to fully rendered. A
     /// failed save is the notice — the text survives in the buffer.
     pub fn deactivate(&mut self) {
-        self.notice = self.buffer.as_ref().and_then(|note| {
-            note.save()
-                .err()
-                .map(|err| format!("{}: {err}", note.file().display()))
-        });
+        self.flush();
         self.blocks = self
             .buffer
             .as_ref()
             .map(|note| blocks::segment(note.text()))
             .unwrap_or_default();
         self.active = None;
+    }
+
+    /// Ctrl+Q and deactivation: save and surface the outcome. Returns
+    /// whether the note reached disk, so a failed flush can cancel a quit
+    /// instead of losing the buffer
+    /// (adr/2026-07-ctrl-q-flushes-then-closes.md).
+    pub fn flush(&mut self) -> bool {
+        if self.buffer.is_none() {
+            // nothing open, nothing to lose — and any pending notice (a
+            // create error) is not this flush's to clear
+            return true;
+        }
+        self.notice = self.save();
+        self.notice.is_none()
+    }
+
+    /// The autosave tick: saves the open note without touching editor
+    /// state. The caller decides how to surface a failure — the autosave
+    /// resource must not write the signal it subscribes to unguarded, or it
+    /// would restart itself forever.
+    pub fn save(&self) -> Option<String> {
+        self.buffer.as_ref().and_then(|note| {
+            note.save()
+                .err()
+                .map(|err| format!("{}: {err}", note.file().display()))
+        })
     }
 }
 
@@ -385,6 +407,52 @@ mod tests {
         assert_eq!(editor.active(), None, "nothing to activate");
         editor.deactivate();
         assert_eq!(editor.notice(), None, "nothing to save");
+    }
+
+    #[test]
+    fn flush_reports_the_save_and_owns_only_save_notices() {
+        // nothing open: trivially flushed, and a create error survives
+        let mut editor = Editor::closed();
+        editor.set_notice("create: boom".to_string());
+        assert!(editor.flush(), "nothing open, nothing to lose");
+        assert_eq!(editor.notice(), Some("create: boom"));
+
+        // open and writable: flushed, and a stale notice is cleared
+        let (dir, mut editor) = open_note(NOTE);
+        editor.set_notice("stale".to_string());
+        assert!(editor.flush());
+        assert_eq!(editor.notice(), None);
+
+        // open and read-only: the failure cancels and is the notice
+        let file = dir.path().join("note.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+        assert!(!editor.flush(), "a failed save must cancel a quit");
+        let notice = editor.notice().expect("the failure is visible");
+        assert!(notice.contains("note.typ"), "{notice}");
+    }
+
+    #[test]
+    fn save_reports_without_touching_the_editor() {
+        assert_eq!(Editor::closed().save(), None, "nothing open");
+
+        let (dir, editor) = open_note(NOTE);
+        assert_eq!(editor.save(), None, "a writable note saves");
+
+        let file = dir.path().join("note.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+        let error = editor.save().expect("the failure is returned");
+        assert!(error.contains("note.typ"), "{error}");
+        assert_eq!(editor.notice(), None, "save never writes the notice");
     }
 
     #[test]
