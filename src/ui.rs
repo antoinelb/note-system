@@ -114,28 +114,43 @@ fn Shell(
     let weeks = logs::month_grid(month());
     let seasons = logs::season_row(month());
 
-    let create_missing = {
+    let keyboard = {
         let root = root.clone();
         move |event: KeyboardEvent| {
-            // only enter writes the file — navigating never does
-            if event.key() != Key::Enter {
-                return;
-            }
-            let (scale, id) = selected();
-            if notes.read().iter().any(|(existing, _)| existing == &id) {
-                return;
-            }
-            let created = logs::selection_date(&scale, &id).unwrap_or(today);
-            match crate::template::create(
-                &root,
-                &NoteCategory::Time,
-                &scale,
-                &id,
-                &created.to_string(),
-                "",
-            ) {
-                Ok(_) => notes.with_mut(|list| list.push((id, scale))),
-                Err(err) => notice.set(Some(format!("create: {err:?}"))),
+            match event.key() {
+                // months page by keystroke as well as by scrolling; arrows
+                // move the grid only, never the selection
+                // (adr/2026-07-month-paging-arrow-keys.md)
+                Key::ArrowLeft => {
+                    month.set(logs::page_month(month(), false));
+                }
+                Key::ArrowRight => {
+                    month.set(logs::page_month(month(), true));
+                }
+                // only enter writes the file — navigating never does
+                Key::Enter => {
+                    let (scale, id) = selected();
+                    if notes.read().iter().any(|(existing, _)| existing == &id)
+                    {
+                        return;
+                    }
+                    let created =
+                        logs::selection_date(&scale, &id).unwrap_or(today);
+                    match crate::template::create(
+                        &root,
+                        &NoteCategory::Time,
+                        &scale,
+                        &id,
+                        &created.to_string(),
+                        "",
+                    ) {
+                        Ok(_) => notes.with_mut(|list| list.push((id, scale))),
+                        Err(err) => {
+                            notice.set(Some(format!("create: {err:?}")))
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     };
@@ -148,7 +163,7 @@ fn Shell(
             // chords bubble on up to the .app root
             tabindex: "0",
             autofocus: true,
-            onkeydown: create_missing,
+            onkeydown: keyboard,
             nav { class: "rail",
                 for row in rows {
                     div {
@@ -236,7 +251,34 @@ fn Shell(
                         month.set(logs::page_month(month(), delta > 0.0));
                     }
                 },
-                div { class: "cal-head type-label", "{logs::month_label(month())}" }
+                div { class: "cal-head",
+                    span { class: "cal-month type-label", "{logs::month_label(month())}" }
+                    // ‹ today › — the mockup's header controls
+                    // (adr/2026-07-month-paging-arrow-keys.md)
+                    span { class: "cal-nav",
+                        button {
+                            class: "cal-arrow",
+                            onclick: move |_| {
+                                month.set(logs::page_month(month(), false))
+                            },
+                            "‹"
+                        }
+                        button {
+                            class: "cal-today type-label",
+                            onclick: move |_| {
+                                select.call((NoteType::Daily, time::day_id(today)))
+                            },
+                            "today"
+                        }
+                        button {
+                            class: "cal-arrow",
+                            onclick: move |_| {
+                                month.set(logs::page_month(month(), true))
+                            },
+                            "›"
+                        }
+                    }
+                }
                 div { class: "cal-grid",
                     span { class: "cal-gutter" }
                     for letter in ["m", "t", "w", "t", "f", "s", "s"] {
@@ -434,21 +476,25 @@ mod tests {
     const TODAY: &str = "2026-07-23";
 
     /// Initial click-listener layout, established empirically (see the
-    /// mounted-app doc): registration runs jump-panel first — the three
-    /// seasons, then each grid row as gutter + day cells — then the two
-    /// crumb jumps, then the five rail rows top to bottom.
-    const SEASON_AUTUMN: usize = 2;
-    const GUTTER_W31: usize = 33;
-    const CRUMB_WEEK: usize = 39;
-    const RAIL_SUMMER: usize = 41;
-    const RAIL_W30: usize = 42;
-    const RAIL_DAY_23: usize = 43;
-    const RAIL_DAY_22: usize = 44;
-    const RAIL_DAY_21: usize = 45;
+    /// mounted-app doc): registration runs jump-panel first — the header's
+    /// ‹ today › buttons, the three seasons, then each grid row as gutter +
+    /// day cells — then the two crumb jumps, then the five rail rows top to
+    /// bottom.
+    const CAL_BACK: usize = 0;
+    const CAL_TODAY: usize = 1;
+    const CAL_FORWARD: usize = 2;
+    const SEASON_AUTUMN: usize = 5;
+    const GUTTER_W31: usize = 36;
+    const CRUMB_WEEK: usize = 42;
+    const RAIL_SUMMER: usize = 44;
+    const RAIL_W30: usize = 45;
+    const RAIL_DAY_23: usize = 46;
+    const RAIL_DAY_22: usize = 47;
+    const RAIL_DAY_21: usize = 48;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
     /// one gutter per started week row.
     const fn day_cell(day: usize) -> usize {
-        3 + (day + 1) / 7 + day
+        6 + (day + 1) / 7 + day
     }
     /// Which keydown listener is the logs pane's (the other is the root).
     const LOGS_KEYS: usize = 1;
@@ -632,8 +678,8 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            46,
-            "5 rail + 2 crumbs + 5 gutters + 31 days + 3 seasons: {html}"
+            49,
+            "3 header + 3 seasons + 5 gutters + 31 days + 2 crumbs + 5 rail: {html}"
         );
     }
 
@@ -913,6 +959,74 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(">weekly<"), "{html}");
         assert!(html.contains("cal-week selected"), "{html}");
+    }
+
+    // -- the header controls: ‹ today › and their keyboard twins -------------
+
+    #[test]
+    fn the_header_chevrons_page_the_month_both_ways() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CAL_BACK]);
+        click(&mut dom, clicks[CAL_BACK]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("may 2026"), "‹ pages back: {html}");
+        click(&mut dom, clicks[CAL_FORWARD]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("june 2026"), "› pages forward: {html}");
+        // paging moves the grid only; the selection stays on today
+        assert!(html.contains(">2026-07-23<"), "{html}");
+    }
+
+    #[test]
+    fn the_today_button_returns_to_today_without_writing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // wander: select the empty day, then page the grid away
+        click(&mut dom, clicks[day_cell(24)]);
+        click(&mut dom, clicks[CAL_BACK]);
+        click(&mut dom, clicks[CAL_TODAY]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">2026-07-23<"), "today is selected: {html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+        assert!(html.contains("july 2026"), "the month snaps back: {html}");
+        assert!(
+            !vault.path().join("time/2026-07-24.typ").exists(),
+            "navigating never writes"
+        );
+    }
+
+    #[test]
+    fn arrow_keys_page_the_month_like_the_chevrons() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::ArrowLeft,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("june 2026"), "left pages back: {html}");
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::ArrowRight,
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::ArrowRight,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("august 2026"), "right pages forward: {html}");
+        // the grid moved, the selection did not
+        assert!(html.contains(">2026-07-23<"), "{html}");
     }
 
     // -- load_notes: the error edges behind the vault-error screen -----------

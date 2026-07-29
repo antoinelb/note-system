@@ -207,8 +207,32 @@ body {
 }
 
 .cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   color: var(--ink-muted);
   padding-bottom: 12px;
+}
+
+.cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cal-arrow,
+.cal-today {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.cal-arrow:hover,
+.cal-today:hover {
+  color: var(--ink-bright);
 }
 
 .cal-grid {
