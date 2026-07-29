@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +33,18 @@ pub struct VaultRoot(pub Option<PathBuf>);
 /// root-context channel as `VaultRoot`.
 #[derive(Clone)]
 pub struct Closer(pub Arc<dyn Fn() + Send + Sync>);
+
+/// How a boundary arrow reads the active textarea's caret: `main` injects a
+/// JS `selectionStart` probe (UTF-16 code units; None when nothing
+/// applies), the headless tests inject scripted fakes — the `Closer`
+/// pattern (adr/2026-07-hybrid-active-block-textarea.md).
+#[derive(Clone)]
+pub struct CaretProbe(
+    #[allow(clippy::type_complexity)]
+    pub  Arc<
+        dyn Fn() -> Pin<Box<dyn Future<Output = Option<usize>>>> + Send + Sync,
+    >,
+);
 
 /// The quit chord lands on the `.app` root, but the open buffer lives in
 /// `Shell` — so `Shell` registers its flush here for `App` to call before
@@ -124,6 +138,9 @@ fn Shell(
     // re-render when it fills, so a plain hook value rather than a signal
     let fragments =
         use_hook(|| Rc::new(RefCell::new(FragmentCache::default())));
+    // absent in headless tests that don't inject a fake: arrows then stay
+    // ordinary caret movement
+    let probe = try_consume_context::<CaretProbe>();
 
     // the Ctrl+Q flush: reports whether the open note reached disk, so a
     // failed save can hold the app open instead of losing the buffer
@@ -305,15 +322,38 @@ fn Shell(
                                                         },
                                                         onkeydown: {
                                                             let fragments = fragments.clone();
+                                                            let probe = probe.clone();
                                                             move |event: KeyboardEvent| {
-                                                                if event.key() == Key::Escape {
+                                                                let key = event.key();
+                                                                if key == Key::Escape {
                                                                     editor.write().deactivate();
                                                                     fragments.borrow_mut().sweep();
+                                                                } else if key == Key::ArrowUp
+                                                                    || key == Key::ArrowDown
+                                                                {
+                                                                    // a vertical arrow may leave the block:
+                                                                    // ask the webview where the caret is —
+                                                                    // the browser default on the edge lines
+                                                                    // is a no-op, so the async probe races
+                                                                    // nothing. It must still not page the
+                                                                    // month grid below.
+                                                                    event.stop_propagation();
+                                                                    if let Some(probe) = &probe {
+                                                                        let probe = probe.clone();
+                                                                        let fragments = fragments.clone();
+                                                                        let up = key == Key::ArrowUp;
+                                                                        spawn(async move {
+                                                                            if let Some(units) = (probe.0)().await {
+                                                                                editor.write().slide(units, up);
+                                                                                fragments.borrow_mut().sweep();
+                                                                            }
+                                                                        });
+                                                                    }
                                                                 } else if !event.modifiers().ctrl() {
-                                                                    // keystrokes belong to the caret: keep
-                                                                    // arrows off the month paging and enter
-                                                                    // off the create handler below; the ctrl
-                                                                    // chords still bubble to the app root
+                                                                    // the rest belongs to the caret: keep
+                                                                    // enter off the create handler below;
+                                                                    // the ctrl chords still bubble to the
+                                                                    // app root
                                                                     event.stop_propagation();
                                                                 }
                                                             }
@@ -801,10 +841,9 @@ mod tests {
         );
 
         assert!(closed.load(Ordering::SeqCst));
-        let saved = std::fs::read_to_string(
-            vault.path().join("time/2026-07-23.typ"),
-        )
-        .expect("the note is readable");
+        let saved =
+            std::fs::read_to_string(vault.path().join("time/2026-07-23.typ"))
+                .expect("the note is readable");
         assert!(saved.contains("presque perdu"), "{saved}");
     }
 
@@ -849,10 +888,9 @@ mod tests {
         let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
         type_and_settle(&mut dom, input, "= autosauvé\n");
 
-        let saved = std::fs::read_to_string(
-            vault.path().join("time/2026-07-23.typ"),
-        )
-        .expect("the note is readable");
+        let saved =
+            std::fs::read_to_string(vault.path().join("time/2026-07-23.typ"))
+                .expect("the note is readable");
         assert!(saved.contains("autosauvé"), "{saved}");
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -1228,10 +1266,13 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
 
-        // arrows move the caret, not the month grid below
+        // arrows move the caret, not the month grid below; without an
+        // injected probe the vertical ones slide nowhere either
         press(&mut dom, keys, Key::ArrowLeft, Modifiers::empty());
+        press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("july 2026"), "no paging: {html}");
+        assert!(html.contains("= 2026-07-23"), "no slide: {html}");
         // enter in the source must not reach the create handler either
         press(&mut dom, keys, Key::Enter, Modifiers::empty());
         assert!(html.contains("block-active"), "still editing: {html}");
@@ -1268,6 +1309,42 @@ mod tests {
             std::fs::read_to_string(vault.path().join("time/2026-07-23.typ"))
                 .expect("the note is readable");
         assert!(saved.contains("= renamed"), "the move flushed: {saved}");
+    }
+
+    #[test]
+    fn boundary_arrows_slide_the_source_between_blocks() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret) =
+            probe_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        // caret on the heading's first line: up slides into the preamble
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "the preamble source: {html}");
+        assert!(!html.contains("= 2026-07-23"), "one active block: {html}");
+    }
+
+    #[test]
+    fn a_mid_block_caret_or_an_empty_probe_slides_nowhere() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret) =
+            probe_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_PREAMBLE]);
+
+        // the probe answered nothing (no textarea focused)
+        press(&mut dom, keys, Key::ArrowDown, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "still the preamble: {html}");
+
+        // a caret with newlines on both sides is ordinary movement
+        *caret.lock().expect("the probe cell never poisons") =
+            Some("#import \"/templates/template.typ\": *\n#s".len());
+        press(&mut dom, keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "still the preamble: {html}");
     }
 
     // -- the scale chain jumps -----------------------------------------------
@@ -1585,6 +1662,14 @@ mod tests {
         root: Option<PathBuf>,
         closer: Option<Closer>,
     ) -> (VirtualDom, Mutations) {
+        mounted_app_with_probe(root, closer, None)
+    }
+
+    fn mounted_app_with_probe(
+        root: Option<PathBuf>,
+        closer: Option<Closer>,
+        probe: Option<CaretProbe>,
+    ) -> (VirtualDom, Mutations) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
@@ -1594,8 +1679,31 @@ mod tests {
         if let Some(closer) = closer {
             dom.insert_any_root_context(Box::new(closer));
         }
+        if let Some(probe) = probe {
+            dom.insert_any_root_context(Box::new(probe));
+        }
         let mutations = dom.rebuild_to_vec();
         (dom, mutations)
+    }
+
+    /// Like `rendered_app`, but with a scripted caret probe injected: each
+    /// arrow press reads whatever the returned cell holds at that moment.
+    fn probe_app(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        Arc<std::sync::Mutex<Option<usize>>>,
+    ) {
+        let caret = Arc::new(std::sync::Mutex::new(None::<usize>));
+        let feed = caret.clone();
+        let probe = CaretProbe(Arc::new(move || {
+            let units = *feed.lock().expect("the probe cell never poisons");
+            Box::pin(async move { units })
+        }));
+        let (dom, mutations) = mounted_app_with_probe(root, None, Some(probe));
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, caret)
     }
 
     /// Fires a keydown. The physical code is irrelevant to every handler,
@@ -1617,8 +1725,11 @@ mod tests {
                     false,
                 ),
             )));
-            dom.runtime()
-                .handle_event("keydown", Event::new(data, true), target);
+            dom.runtime().handle_event(
+                "keydown",
+                Event::new(data, true),
+                target,
+            );
             dom.process_events();
             dom.render_immediate_to_vec();
         });
@@ -1679,8 +1790,11 @@ mod tests {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedMouseData::default(),
             )));
-            dom.runtime()
-                .handle_event("click", Event::new(data, true), target);
+            dom.runtime().handle_event(
+                "click",
+                Event::new(data, true),
+                target,
+            );
             dom.process_events();
             dom.render_immediate_to_vec()
         })
@@ -1694,8 +1808,11 @@ mod tests {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedFormData::new(text.to_string(), Vec::new()),
             )));
-            dom.runtime()
-                .handle_event("input", Event::new(data, true), target);
+            dom.runtime().handle_event(
+                "input",
+                Event::new(data, true),
+                target,
+            );
             dom.process_events();
             dom.render_immediate_to_vec();
         });
@@ -1708,8 +1825,11 @@ mod tests {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedFormData::new(text.to_string(), Vec::new()),
             )));
-            dom.runtime()
-                .handle_event("input", Event::new(data, true), target);
+            dom.runtime().handle_event(
+                "input",
+                Event::new(data, true),
+                target,
+            );
             settle(dom).await;
         });
     }
@@ -1729,17 +1849,20 @@ mod tests {
     /// Fires a wheel event with the given vertical pixel delta.
     fn scroll(dom: &mut VirtualDom, target: ElementId, delta_y: f64) {
         with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(
-                Box::new(SerializedWheelData {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedWheelData {
                     mouse: SerializedPointInteraction::default(),
                     delta_mode: 0, // pixels
                     delta_x: 0.0,
                     delta_y,
                     delta_z: 0.0,
-                }),
-            ));
-            dom.runtime()
-                .handle_event("wheel", Event::new(data, true), target);
+                },
+            )));
+            dom.runtime().handle_event(
+                "wheel",
+                Event::new(data, true),
+                target,
+            );
             dom.process_events();
             dom.render_immediate_to_vec();
         });

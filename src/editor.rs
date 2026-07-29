@@ -96,6 +96,32 @@ impl Editor {
             .then(|| blocks::block_at(&self.blocks, start));
     }
 
+    /// A boundary arrow: `units` is the active textarea's `selectionStart`
+    /// in UTF-16 code units. When the caret sits on the block's edge line,
+    /// slide to the neighbouring block through the same flush-and-resegment
+    /// path as a click; anywhere else — or at the note's ends — the arrow
+    /// was ordinary caret movement and nothing happens.
+    pub fn slide(&mut self, units: usize, up: bool) {
+        let Some(index) = self.active else { return };
+        let slice = self
+            .blocks
+            .get(index)
+            .zip(self.note())
+            .and_then(|(block, (_, text))| text.get(block.range.clone()))
+            .unwrap_or("");
+        let caret = blocks::byte_offset_of_utf16(slice, units);
+        let target = match blocks::boundary_slide(slice, caret, up) {
+            Some(blocks::Slide::Prev) if index > 0 => {
+                self.blocks[index - 1].range.start
+            }
+            Some(blocks::Slide::Next) if index + 1 < self.blocks.len() => {
+                self.blocks[index + 1].range.start
+            }
+            _ => return,
+        };
+        self.activate(target);
+    }
+
     /// Escape or clicking away: save, resegment, back to fully rendered. A
     /// failed save is the notice — the text survives in the buffer.
     pub fn deactivate(&mut self) {
@@ -407,6 +433,53 @@ mod tests {
         assert_eq!(editor.active(), None, "nothing to activate");
         editor.deactivate();
         assert_eq!(editor.notice(), None, "nothing to save");
+    }
+
+    #[test]
+    fn boundary_arrows_slide_to_the_neighbouring_block() {
+        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+
+        editor.slide(0, true);
+        assert_eq!(editor.active(), Some(0), "up from the first line");
+
+        editor.activate(editor.blocks()[1].range.start);
+        let end = editor.blocks()[1].range.len();
+        editor.slide(end, false);
+        assert_eq!(editor.active(), Some(2), "down from the last line");
+    }
+
+    #[test]
+    fn arrows_inside_a_block_or_at_the_notes_ends_slide_nowhere() {
+        let (_dir, mut editor) = open_note(NOTE);
+
+        // mid-block: "= title\n\n" has a newline on both sides of caret 8
+        editor.activate(editor.blocks()[1].range.start);
+        editor.slide(8, true);
+        assert_eq!(editor.active(), Some(1), "a newline precedes");
+        editor.slide(8, false);
+        assert_eq!(editor.active(), Some(1), "a newline follows");
+
+        // the note's ends clamp
+        editor.activate(0);
+        editor.slide(0, true);
+        assert_eq!(editor.active(), Some(0), "no block above the first");
+        let last = editor.blocks().len() - 1;
+        editor.activate(editor.blocks()[last].range.start);
+        editor.slide(editor.blocks()[last].range.len(), false);
+        assert_eq!(editor.active(), Some(last), "no block below the last");
+    }
+
+    #[test]
+    fn a_slide_with_nothing_active_is_a_no_op() {
+        let mut editor = Editor::closed();
+        editor.slide(0, true);
+        assert_eq!(editor.active(), None);
+
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.slide(0, true);
+        assert_eq!(editor.active(), None, "rendered view: arrows are inert");
     }
 
     #[test]
