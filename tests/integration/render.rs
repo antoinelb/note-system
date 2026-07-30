@@ -86,7 +86,10 @@ fn a_package_root_is_refused_without_touching_the_filesystem() {
 #[test]
 fn a_note_outside_the_vault_is_refused_at_construction() {
     let outside = Path::new("/etc/passwd");
-    assert!(VaultWorld::new(&vault(), outside, String::new(), RenderTheme::Paper).is_err());
+    assert!(
+        VaultWorld::new(&vault(), outside, String::new(), RenderTheme::Paper)
+            .is_err()
+    );
 }
 
 #[test]
@@ -128,8 +131,8 @@ fn a_valid_note_renders_to_svg_markup() {
     let text =
         std::fs::read_to_string(&note).expect("the fixture note is readable");
 
-    let svg =
-        render_svg(&vault(), &note, &text, RenderTheme::Paper).expect("the fixture note renders");
+    let svg = render_svg(&vault(), &note, &text, RenderTheme::Paper)
+        .expect("the fixture note renders");
     assert!(svg.starts_with("<svg"), "{}", &svg[..svg.len().min(80)]);
     assert!(svg.ends_with("</svg>"), "{}", &svg[svg.len() - 80..]);
 }
@@ -138,10 +141,11 @@ fn a_valid_note_renders_to_svg_markup() {
 fn a_note_that_does_not_compile_reports_its_diagnostics() {
     // an unclosed delimiter: guaranteed to fail parsing, not just evaluation
     let note = vault().join("permanent/casse.typ");
-    let messages = match render_svg(&vault(), &note, "#let x = (", RenderTheme::Paper) {
-        Err(RenderError::Compile(messages)) => messages,
-        other => panic!("expected compile diagnostics, got {other:?}"),
-    };
+    let messages =
+        match render_svg(&vault(), &note, "#let x = (", RenderTheme::Paper) {
+            Err(RenderError::Compile(messages)) => messages,
+            other => panic!("expected compile diagnostics, got {other:?}"),
+        };
     assert!(!messages.is_empty());
     assert!(!messages[0].is_empty(), "a diagnostic carries its message");
 }
@@ -149,7 +153,8 @@ fn a_note_that_does_not_compile_reports_its_diagnostics() {
 #[test]
 fn a_note_outside_the_vault_is_a_path_error_not_a_compile_error() {
     let error =
-        render_svg(&vault(), Path::new("/etc/passwd"), "", RenderTheme::Paper).unwrap_err();
+        render_svg(&vault(), Path::new("/etc/passwd"), "", RenderTheme::Paper)
+            .unwrap_err();
     assert!(matches!(error, RenderError::Path(_)), "{error:?}");
 }
 
@@ -216,15 +221,27 @@ fn a_fragment_error_is_cached_until_swept() {
     // the error entry is served without recompiling: repairing the vault
     // changes nothing while the entry keeps being rendered each generation
     restore_template(&vault);
-    assert!(cache.render(vault.path(), &note, NOTE_A, RenderTheme::Paper).is_err());
+    assert!(
+        cache
+            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .is_err()
+    );
     cache.sweep();
-    assert!(cache.render(vault.path(), &note, NOTE_A, RenderTheme::Paper).is_err());
+    assert!(
+        cache
+            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .is_err()
+    );
 
     // two sweeps with no render between evict it, and the repaired vault
     // finally recompiles
     cache.sweep();
     cache.sweep();
-    assert!(cache.render(vault.path(), &note, NOTE_A, RenderTheme::Paper).is_ok());
+    assert!(
+        cache
+            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -244,8 +261,16 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
     remove_template(&vault);
 
     // B survived its generation's sweep; A was evicted by B's sweep
-    assert!(cache.render(vault.path(), &note, NOTE_B, RenderTheme::Paper).is_ok());
-    assert!(cache.render(vault.path(), &note, NOTE_A, RenderTheme::Paper).is_err());
+    assert!(
+        cache
+            .render(vault.path(), &note, NOTE_B, RenderTheme::Paper)
+            .is_ok()
+    );
+    assert!(
+        cache
+            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .is_err()
+    );
 }
 
 #[test]
@@ -255,12 +280,22 @@ fn fragments_are_keyed_by_note_path_as_well_as_source() {
     let b = vault.path().join("permanent/b.typ");
     let mut cache = FragmentCache::default();
 
-    cache.render(vault.path(), &a, NOTE_A, RenderTheme::Paper).expect("a compiles");
+    cache
+        .render(vault.path(), &a, NOTE_A, RenderTheme::Paper)
+        .expect("a compiles");
     remove_template(&vault);
 
     // same source under another path is a distinct fragment, not a hit
-    assert!(cache.render(vault.path(), &a, NOTE_A, RenderTheme::Paper).is_ok());
-    assert!(cache.render(vault.path(), &b, NOTE_A, RenderTheme::Paper).is_err());
+    assert!(
+        cache
+            .render(vault.path(), &a, NOTE_A, RenderTheme::Paper)
+            .is_ok()
+    );
+    assert!(
+        cache
+            .render(vault.path(), &b, NOTE_A, RenderTheme::Paper)
+            .is_err()
+    );
 }
 
 #[test]
@@ -293,7 +328,12 @@ fn a_fragment_outside_the_vault_reports_the_path_error() {
     let mut cache = FragmentCache::default();
 
     let error = cache
-        .render(vault.path(), Path::new("/etc/passwd"), NOTE_A, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            Path::new("/etc/passwd"),
+            NOTE_A,
+            RenderTheme::Paper,
+        )
         .expect_err("a note outside the vault cannot virtualize");
     assert!(!error.is_empty());
 }

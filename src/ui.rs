@@ -200,12 +200,8 @@ fn Shell(
     } else {
         RenderTheme::Dark
     };
-    let panes = block_panes(
-        &editor.read(),
-        &root,
-        theme,
-        &mut fragments.borrow_mut(),
-    );
+    let panes =
+        block_panes(&editor.read(), &root, theme, &mut fragments.borrow_mut());
     let notice = editor.read().notice().map(str::to_string);
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
@@ -328,7 +324,13 @@ fn Shell(
                                                         class: "block-active",
                                                         rows: "{rows}",
                                                         spellcheck: "false",
-                                                        autofocus: true,
+                                                        // autofocus only applies at document load in
+                                                        // the webview: a swapped-in textarea asks for
+                                                        // its own focus, and a refusal has no one to
+                                                        // tell — the caret simply stays where it was
+                                                        onmounted: move |event| async move {
+                                                            let _ = event.set_focus(true).await;
+                                                        },
                                                         initial_value: "{text}",
                                                         oninput: move |event| {
                                                             editor.write().edit(&event.value());
@@ -661,7 +663,7 @@ fn block_panes(
                     Pane::Source {
                         start,
                         text: text
-                            .get(block.range.clone())
+                            .get(block.content())
                             .unwrap_or("")
                             .to_string(),
                     }
@@ -1218,7 +1220,10 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        click(&mut dom, clicks[BLOCK_HEADING]);
+        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_HEADING]);
+        // the renderer announces the mount and the textarea asks for focus;
+        // the fake backing refuses, which is all the handler has to absorb
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
         let html = dioxus_ssr::render(&dom);
 
         assert!(html.contains("block-active"), "{html}");
@@ -1985,9 +1990,34 @@ mod tests {
         )
     }
 
-    /// Only mouse, keyboard and wheel events are real: the shell listens for
-    /// clicks everywhere, keydowns on the two roots and wheel on the jump
-    /// panel, so every other conversion is unreachable in these tests.
+    /// What the textarea's onmounted receives in the headless tests: every
+    /// backing method keeps its NotSupported default, which is exactly what
+    /// the focus request has to shrug off.
+    struct FakeMount;
+
+    impl RenderedElementBacking for FakeMount {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Fires the mounted event the renderer would deliver for the freshly
+    /// swapped-in textarea.
+    fn mount(dom: &mut VirtualDom, target: ElementId) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> =
+                Rc::new(PlatformEventData::new(Box::new(FakeMount)));
+            dom.runtime()
+                .handle_event("mounted", Event::new(data, true), target);
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// Only mouse, keyboard, wheel, form and mounted events are real: the
+    /// shell listens for clicks everywhere, keydowns on the two roots and
+    /// the textarea, wheel on the jump panel, input and mounted on the
+    /// textarea — every other conversion is unreachable in these tests.
     struct TestEvents;
 
     impl HtmlEventConverter for TestEvents {
@@ -2067,8 +2097,14 @@ mod tests {
             unreachable!("the shell never listens for this event")
         }
 
-        fn convert_mounted_data(&self, _: &PlatformEventData) -> MountedData {
-            unreachable!("the shell never listens for this event")
+        fn convert_mounted_data(
+            &self,
+            event: &PlatformEventData,
+        ) -> MountedData {
+            event
+                .downcast::<FakeMount>()
+                .map(|_| MountedData::from(FakeMount))
+                .expect("the tests only fire fake mount events")
         }
 
         fn convert_pointer_data(&self, _: &PlatformEventData) -> PointerData {

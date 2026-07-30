@@ -18,18 +18,25 @@ fences) never contain a top-level `Parbreak`.
   block, separators trail the block they follow, leading blank lines belong
   to block 0, and an empty or blank-only note is one block. Tiling makes
   split/merge ordinary resegmentation: typing a blank line splits a block,
-  deleting one merges it, no dedicated operations.
+  no dedicated operations.
+- **The widget sees content, not separators**: each block records where its
+  trailing separator (parbreak, trailing spacing) begins, and the textarea
+  shows and edits only the content before it — no phantom blank lines at
+  the end of the source. The separator is not the widget's to touch, so
+  merging works by emptying a block's content: the bare separator left
+  behind is absorbed at the next resegmentation.
 - The preamble needs no special casing: import/show/meta form block 0 by the
   split rule alone and render as the design's meta line. A block containing
   a top-level `ModuleImport` is marked **standalone** and compiles as-is.
 - **Fragments**: every other block compiles as
-  `#import "/templates/template.typ": *` + `#show: note` + a `#set page`
-  vertical-margin override + the block's source, under the real note's path
-  (`VaultWorld` already takes in-memory text). The synthesized preamble
-  deliberately omits `#meta` — the template's `meta()` emits the visible
-  meta line where called, and only block 0 should show it. The margin
-  override sits after the show rule so it wins over the template's
-  `margin: 1.5cm`, keeping stacked fragments from doubling page margins.
+  `#import "/templates/template.typ": *` + `#show: note` + the block's
+  source, under the real note's path (`VaultWorld` already takes in-memory
+  text). The synthesized preamble deliberately omits `#meta` — the
+  template's `meta()` emits the visible meta line where called, and only
+  block 0 should show it. Fragment-friendly page margins are the template's
+  own business: its in-app palette columns carry tight vertical margins
+  (`adr/2026-07-note-rendering-theme-input.md`), so stacked fragments —
+  block 0 included — keep a uniform rhythm.
 - **Cache**: `FragmentCache`, keyed by a hash of (note path, fragment
   source), caching errors as well as SVGs, bounded by mark-and-sweep on
   every resegmentation. This grows out of and replaces `SvgCache` — the

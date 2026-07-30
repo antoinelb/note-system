@@ -9,9 +9,23 @@ use typst_syntax::SyntaxKind;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub range: Range<usize>,
+    /// Where the trailing separator (parbreak, trailing spacing) begins.
+    /// The widget shows and edits only `content()`; the separator stays in
+    /// the buffer, invisible, so the textarea carries no phantom blank
+    /// lines — and emptying a block's content leaves a bare separator that
+    /// merges away at the next resegmentation.
+    pub content_end: usize,
     /// The block carries its own template import (the note's preamble), so a
     /// fragment compile must not prepend another one.
     pub standalone: bool,
+}
+
+impl Block {
+    /// The slice the widget shows and edits: the source without its
+    /// trailing separator.
+    pub fn content(&self) -> Range<usize> {
+        self.range.start..self.content_end
+    }
 }
 
 /// Splits `text` into blocks at top-level `Parbreak` nodes. Total: an empty
@@ -22,6 +36,7 @@ pub fn segment(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut start = 0;
     let mut offset = 0;
+    let mut content_end = 0;
     let mut standalone = false;
     let mut seen_content = false;
     let mut split_pending = false;
@@ -34,19 +49,28 @@ pub fn segment(text: &str) -> Vec<Block> {
             if split_pending {
                 blocks.push(Block {
                     range: start..offset,
+                    content_end,
                     standalone,
                 });
                 start = offset;
+                content_end = offset;
                 standalone = false;
                 split_pending = false;
             }
             seen_content = true;
             standalone |= child.kind() == SyntaxKind::ModuleImport;
+            // spacing never ends the content: a trailing newline stays in
+            // the separator, spacing between siblings is swallowed when the
+            // next real child advances past it
+            if child.kind() != SyntaxKind::Space {
+                content_end = offset + child.len();
+            }
         }
         offset += child.len();
     }
     blocks.push(Block {
         range: start..text.len(),
+        content_end,
         standalone,
     });
     blocks
@@ -63,34 +87,34 @@ pub fn block_at(blocks: &[Block], offset: usize) -> usize {
     blocks.len().saturating_sub(1)
 }
 
-/// After the active block's text is replaced by `new_len` bytes, its end and
-/// every later block shift by the same delta. An out-of-range `active` is a
-/// stale caller and shifts nothing.
+/// After the active block's content is replaced by `new_len` bytes, its
+/// separator and every later block shift by the same delta. An out-of-range
+/// `active` is a stale caller and shifts nothing.
 pub fn resize(blocks: &mut [Block], active: usize, new_len: usize) {
     let Some(block) = blocks.get(active) else {
         return;
     };
-    let old_end = block.range.end;
+    let old_end = block.content_end;
     let new_end = block.range.start + new_len;
-    blocks[active].range.end = new_end;
+    blocks[active].content_end = new_end;
+    // every offset at or past the old content end shifts; subtracting the
+    // old end first cannot underflow
+    blocks[active].range.end = blocks[active].range.end - old_end + new_end;
     for later in &mut blocks[active + 1..] {
-        // later.start >= old_end, so subtracting first cannot underflow
         later.range.start = later.range.start - old_end + new_end;
         later.range.end = later.range.end - old_end + new_end;
+        later.content_end = later.content_end - old_end + new_end;
     }
 }
 
 /// What a fragment compiles to match the note's styling without repeating
 /// its meta line: the template import and show rule, never `#meta` (the
 /// template's `meta()` emits the visible meta line where called — only the
-/// note's own preamble block should show it), plus a vertical-margin
-/// override placed after the show rule so it wins over the template's page
-/// margin and stacked fragments keep single gaps.
-// ponytail: 1.5cm duplicates the template's horizontal margin; feed it from
-// the template if the template ever stops being ours
-const FRAGMENT_PREAMBLE: &str = "#import \"/templates/template.typ\": *\n\
-                                 #show: note\n\
-                                 #set page(margin: (x: 1.5cm, y: 4pt))\n";
+/// note's own preamble block should show it). Fragment-friendly margins are
+/// the template's own business: its in-app palette columns carry them
+/// (adr/2026-07-note-rendering-theme-input.md).
+const FRAGMENT_PREAMBLE: &str =
+    "#import \"/templates/template.typ\": *\n#show: note\n";
 
 /// The source a block's fragment compiles from: the slice as-is when the
 /// block is standalone, otherwise under the synthesized preamble. A stale
@@ -182,10 +206,18 @@ mod tests {
     }
 
     #[test]
-    fn separators_trail_the_block_they_follow() {
+    fn separators_trail_the_block_but_stay_out_of_its_content() {
         let blocks = segment(NOTE);
         assert!(NOTE[blocks[0].range.clone()].ends_with(")\n\n"));
         assert!(NOTE[blocks[1].range.clone()].ends_with("21\n\n"));
+        // the widget shows content only: no phantom blank lines at the end
+        assert!(NOTE[blocks[0].content()].ends_with(")"));
+        assert!(NOTE[blocks[1].content()].ends_with("21"));
+        assert_eq!(
+            &NOTE[blocks[2].content()],
+            "Read about the #l(\"zettelkasten\").",
+            "the note's final newline is separator too"
+        );
     }
 
     #[test]
@@ -257,17 +289,19 @@ mod tests {
     }
 
     #[test]
-    fn resize_shifts_the_active_end_and_every_later_block() {
+    fn resize_shifts_the_separator_and_every_later_block() {
         let mut blocks = segment(NOTE);
-        let grown = blocks[1].range.len() + 7;
+        let sep = blocks[1].range.len() - blocks[1].content().len();
+        let grown = blocks[1].content().len() + 7;
         let starts: Vec<usize> =
             blocks.iter().map(|b| b.range.start).collect();
         resize(&mut blocks, 1, grown);
-        assert_eq!(blocks[1].range.len(), grown);
+        assert_eq!(blocks[1].content().len(), grown);
+        assert_eq!(blocks[1].range.len(), grown + sep, "the separator rides");
         assert_eq!(blocks[2].range.start, starts[2] + 7);
         assert_eq!(blocks[0].range.start, starts[0], "earlier blocks hold");
 
-        let shrunk = blocks[1].range.len() - 10;
+        let shrunk = blocks[1].content().len() - 10;
         resize(&mut blocks, 1, shrunk);
         assert_eq!(blocks[2].range.start, starts[2] - 3);
         assert_tiles(&blocks, blocks[2].range.end);
@@ -278,8 +312,10 @@ mod tests {
         let mut blocks = segment(NOTE);
         let starts: Vec<usize> =
             blocks.iter().map(|b| b.range.start).collect();
+        let sep = blocks[2].range.len() - blocks[2].content().len();
         resize(&mut blocks, 2, 3);
-        assert_eq!(blocks[2].range.end, starts[2] + 3);
+        assert_eq!(blocks[2].content_end, starts[2] + 3);
+        assert_eq!(blocks[2].range.end, starts[2] + 3 + sep);
         assert_eq!(blocks[1].range.start, starts[1]);
     }
 
@@ -310,6 +346,7 @@ mod tests {
     fn a_stale_fragment_range_yields_the_preamble_alone() {
         let block = Block {
             range: 5..NOTE.len() + 9,
+            content_end: NOTE.len() + 9,
             standalone: false,
         };
         assert_eq!(fragment_source(NOTE, &block), FRAGMENT_PREAMBLE);

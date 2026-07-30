@@ -66,8 +66,9 @@ impl Editor {
         self.notice = Some(notice);
     }
 
-    /// One widget keystroke: the active block's whole new text, spliced into
-    /// the buffer, with every later block shifted by the delta. No reparse —
+    /// One widget keystroke: the active block's whole new content, spliced
+    /// into the buffer (the trailing separator is not the widget's to
+    /// touch), with every later block shifted by the delta. No reparse —
     /// block boundaries move only on activate/deactivate.
     pub fn edit(&mut self, value: &str) {
         let (Some(index), Some(note)) = (self.active, self.buffer.as_mut())
@@ -79,7 +80,7 @@ impl Editor {
             self.notice = Some(STALE_EDIT.to_string());
             return;
         };
-        if note.replace_range(block.range.clone(), value) {
+        if note.replace_range(block.content(), value) {
             blocks::resize(&mut self.blocks, index, value.len());
         } else {
             self.notice = Some(STALE_EDIT.to_string());
@@ -107,7 +108,7 @@ impl Editor {
             .blocks
             .get(index)
             .zip(self.note())
-            .and_then(|(block, (_, text))| text.get(block.range.clone()))
+            .and_then(|(block, (_, text))| text.get(block.content()))
             .unwrap_or("");
         let caret = blocks::byte_offset_of_utf16(slice, units);
         let target = match blocks::boundary_slide(slice, caret, up) {
@@ -419,11 +420,26 @@ mod tests {
         // a span the buffer refuses
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
-        editor.blocks[0].range.end = NOTE.len() + 40;
+        editor.blocks[0].content_end = NOTE.len() + 40;
         editor.edit("anything");
         assert_eq!(editor.notice(), Some(STALE_EDIT));
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, NOTE, "a refused edit changes nothing");
+    }
+
+    #[test]
+    fn emptying_a_blocks_content_merges_it_away() {
+        // the separator is not the widget's to touch, so joining paragraphs
+        // works by emptying one: the bare separator left behind is absorbed
+        // at the next resegmentation
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.edit("");
+        editor.deactivate();
+        assert_eq!(editor.blocks().len(), 2, "{:?}", editor.blocks());
+        let (_, text) = editor.note().expect("still open");
+        assert!(text.contains("prose"), "the neighbours survive: {text}");
+        assert!(!text.contains("title"), "the emptied block is gone: {text}");
     }
 
     #[test]
@@ -454,20 +470,21 @@ mod tests {
     fn arrows_inside_a_block_or_at_the_notes_ends_slide_nowhere() {
         let (_dir, mut editor) = open_note(NOTE);
 
-        // mid-block: "= title\n\n" has a newline on both sides of caret 8
-        editor.activate(editor.blocks()[1].range.start);
-        editor.slide(8, true);
-        assert_eq!(editor.active(), Some(1), "a newline precedes");
-        editor.slide(8, false);
-        assert_eq!(editor.active(), Some(1), "a newline follows");
+        // mid-block: a caret on the preamble's middle line has newlines on
+        // both sides, so either arrow is ordinary caret movement
+        editor.activate(0);
+        let mid = NOTE.find("#show").expect("the preamble has a show") + 2;
+        editor.slide(mid, true);
+        assert_eq!(editor.active(), Some(0), "a newline precedes");
+        editor.slide(mid, false);
+        assert_eq!(editor.active(), Some(0), "a newline follows");
 
         // the note's ends clamp
-        editor.activate(0);
         editor.slide(0, true);
         assert_eq!(editor.active(), Some(0), "no block above the first");
         let last = editor.blocks().len() - 1;
         editor.activate(editor.blocks()[last].range.start);
-        editor.slide(editor.blocks()[last].range.len(), false);
+        editor.slide(editor.blocks()[last].content().len(), false);
         assert_eq!(editor.active(), Some(last), "no block below the last");
     }
 

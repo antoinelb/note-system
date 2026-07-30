@@ -161,6 +161,9 @@ body {
 }
 
 .note svg {
+  /* block, not inline: an inline svg carries a baseline gap that would
+     open up between stacked fragments */
+  display: block;
   max-width: 100%;
   height: auto;
 }
@@ -182,8 +185,10 @@ body {
   border: none;
   background: transparent;
   color: var(--ink-bright);
-  /* the one warm element is the ember and the caret (plan.md § design) */
+  /* the one warm element is the ember and the caret (plan.md § design);
+     caret-shape upgrades it to a box once WebKitGTK ships support */
   caret-color: var(--ember);
+  caret-shape: block;
   font: 14px ui-monospace, "DejaVu Sans Mono", monospace;
   line-height: 1.5;
   resize: none;

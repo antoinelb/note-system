@@ -6,9 +6,13 @@
 // literals live here because templates cannot consume the app's CSS
 // variables (adr/2026-07-theme-attribute-on-app-root.md); the dark column
 // mirrors assets/theme.css.
+// The in-app columns keep tight vertical margins because the app renders
+// per-block fragments that stack — half the whole-page paragraph rhythm on
+// each side; paper keeps real page margins.
 #let palette = (
   paper: (
     page: white,
+    margin: 1.5cm,
     ink: rgb("#45415a"),
     muted: rgb("#8b87a0"),
     hairline: rgb("#d0cdda"),
@@ -16,6 +20,7 @@
   ),
   light: (
     page: none,
+    margin: (x: 1.5cm, y: 6pt),
     ink: rgb("#45415a"),
     muted: rgb("#8b87a0"),
     hairline: rgb("#d0cdda"),
@@ -23,6 +28,7 @@
   ),
   dark: (
     page: none,
+    margin: (x: 1.5cm, y: 6pt),
     ink: rgb("#c9c4dd"),
     muted: rgb("#6f6a8c"),
     hairline: rgb("#332c52"),
@@ -55,7 +61,12 @@
 #let l(id) = text(fill: palette.link, [#id])
 
 #let note(doc) = {
-  set page(width: 14cm, height: auto, margin: 1.5cm, fill: palette.page)
+  set page(
+    width: 14cm,
+    height: auto,
+    margin: palette.margin,
+    fill: palette.page,
+  )
   set text(font: "Parisienne", size: 11.25pt, fill: palette.ink)
   set par(leading: 0.75em)
   show heading.where(level: 1): set text(size: 19.5pt, weight: 600)
