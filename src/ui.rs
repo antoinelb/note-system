@@ -2007,8 +2007,11 @@ mod tests {
         with_reactor(|| {
             let data: Rc<dyn Any> =
                 Rc::new(PlatformEventData::new(Box::new(FakeMount)));
-            dom.runtime()
-                .handle_event("mounted", Event::new(data, true), target);
+            dom.runtime().handle_event(
+                "mounted",
+                Event::new(data, true),
+                target,
+            );
             dom.process_events();
             dom.render_immediate_to_vec();
         });

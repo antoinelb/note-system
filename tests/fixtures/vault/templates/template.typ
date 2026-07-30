@@ -1,5 +1,7 @@
-// Prose typography per design/wireframes-v0.md § Typography, at 1px = 0.75pt:
-// body 15px → 11.25pt, sheet title 26px → 19.5pt, meta line 9px → 6.75pt.
+// Prose typography from design/wireframes-v0.md § Typography at 1px =
+// 0.75pt, bumped one step for reading comfort in the hybrid editor
+// (adr/2026-07-reading-scale-bumped.md): body 18px → 13.5pt, title
+// 32px → 24pt, meta line 9px → 6.75pt.
 // The app compiles with a `theme` input and gets a transparent page and the
 // matching palette column; vanilla typst (make check-vault, exports) gets
 // the paper look (adr/2026-07-note-rendering-theme-input.md). Colour
@@ -67,8 +69,8 @@
     margin: palette.margin,
     fill: palette.page,
   )
-  set text(font: "Parisienne", size: 11.25pt, fill: palette.ink)
+  set text(font: "Parisienne", size: 13.5pt, fill: palette.ink)
   set par(leading: 0.75em)
-  show heading.where(level: 1): set text(size: 19.5pt, weight: 600)
+  show heading.where(level: 1): set text(size: 24pt, weight: 600)
   doc
 }

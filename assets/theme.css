@@ -189,7 +189,9 @@ body {
      caret-shape upgrades it to a box once WebKitGTK ships support */
   caret-color: var(--ember);
   caret-shape: block;
-  font: 14px ui-monospace, "DejaVu Sans Mono", monospace;
+  /* the source wears the prose face so entering a block is not a costume
+     change (adr/2026-07-reading-scale-bumped.md) */
+  font: 18px Parisienne, cursive;
   line-height: 1.5;
   resize: none;
 }
@@ -232,11 +234,13 @@ body {
 }
 
 .jump {
-  width: 328px;
+  /* a jump panel, not a screen: just wide enough for the month grid
+     (adr/2026-07-reading-scale-bumped.md) */
+  width: 248px;
   flex-shrink: 0;
   overflow-y: auto;
   border-left: 1px solid var(--hairline);
-  padding: 16px 20px;
+  padding: 16px;
 }
 
 .cal-head {
@@ -272,9 +276,9 @@ body {
 
 .cal-grid {
   display: grid;
-  grid-template-columns: 28px repeat(7, 1fr);
+  grid-template-columns: 24px repeat(7, 1fr);
   gap: 4px;
-  font: 16px Lato, sans-serif;
+  font: 14px Lato, sans-serif;
   font-variant-numeric: tabular-nums;
 }
 
