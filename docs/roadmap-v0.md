@@ -152,6 +152,11 @@ Exit: hybrid editing feels better than plain source for daily writing.
 Pre-declared fallback (`plan.md` § Known risks): if this stalls, the logs centre pane ships as a **single pane toggling source ⇄ rendered** and this phase moves after v1.
 The phase-5 split view itself is not the fallback — it dies in phase 7, because the design's centre column has no room for two panes.
 
+## Polish backlog (queued from daily-driving, no phase of its own)
+
+- [ ] Logs screen: the time rail and the jump panel are collapsible, so the centre pane can take the whole width while writing (requested after the first phase-8 writing sessions).
+  - [ ] Decide the mechanism (keystroke, click on the pane edge, or both) and whether the collapsed state persists across sessions. **→ ADR**
+
 ## Phase 9 — Links UX
 
 Goal: links are cheap to write and visible in both directions.
