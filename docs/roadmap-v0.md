@@ -156,6 +156,7 @@ The phase-5 split view itself is not the fallback — it dies in phase 7, becaus
 
 - [ ] Logs screen: the time rail and the jump panel are collapsible, so the centre pane can take the whole width while writing (requested after the first phase-8 writing sessions).
   - [ ] Decide the mechanism (keystroke, click on the pane edge, or both) and whether the collapsed state persists across sessions. **→ ADR**
+- [ ] Replace the active block's textarea with a homemade widget that draws its own box caret (WebKitGTK has no `caret-shape`, so a native textarea caret stays a bar). This is the buffer-owned-cursor path `adr/2026-07-buffer-is-path-plus-string.md` sketched and v2's vim layer needs anyway — building it pulls that v2 groundwork forward and supersedes the textarea half of `adr/2026-07-hybrid-active-block-textarea.md`. The costs that ADR lists (hand-rolled selection, clipboard, key repeat, French dead-key composition) come with it; the `Editor`/`Buffer` layer underneath is untouched.
 
 ## Phase 9 — Links UX
 
