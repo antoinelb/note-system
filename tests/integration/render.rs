@@ -182,6 +182,24 @@ fn the_theme_input_picks_the_templates_palette_column() {
     assert!(light.contains("#45415a"), "the light-column ink");
 }
 
+#[test]
+fn checklist_items_render_as_task_circles() {
+    // `- [ ]` / `- [x]` become the template's task circles
+    // (adr/2026-07-checklist-rendering.md); the done colour is the
+    // fingerprint of the transformed item
+    let note = vault().join("permanent/zettelkasten.typ");
+    let text = "#import \"/templates/template.typ\": *\n\
+                #show: note\n- [ ] ouvert\n\n- [x] fait\n";
+
+    let dark = render_svg(&vault(), &note, text, RenderTheme::Dark)
+        .expect("the checklist renders");
+    assert!(dark.contains("#6fb08c"), "the dark done circle: {dark}");
+
+    let paper = render_svg(&vault(), &note, text, RenderTheme::Paper)
+        .expect("the checklist renders on paper too");
+    assert!(paper.contains("#4a8a6a"), "the paper done circle");
+}
+
 // The cache tests instrument through the filesystem: deleting the template
 // makes recompilation impossible, so a successful render can only be a hit.
 

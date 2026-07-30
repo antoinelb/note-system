@@ -34,9 +34,10 @@ fences) never contain a top-level `Parbreak`.
   text). The synthesized preamble deliberately omits `#meta` — the
   template's `meta()` emits the visible meta line where called, and only
   block 0 should show it. Fragment-friendly page margins are the template's
-  own business: its in-app palette columns carry tight vertical margins
+  own business: its in-app palette columns carry bare margins
   (`adr/2026-07-note-rendering-theme-input.md`), so stacked fragments —
-  block 0 included — keep a uniform rhythm.
+  block 0 included — keep a uniform rhythm and share the source
+  textarea's left edge.
 - **Cache**: `FragmentCache`, keyed by a hash of (note path, fragment
   source), caching errors as well as SVGs, bounded by mark-and-sweep on
   every resegmentation. This grows out of and replaces `SvgCache` — the
