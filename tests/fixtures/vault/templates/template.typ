@@ -1,8 +1,35 @@
 // Prose typography per design/wireframes-v0.md § Typography, at 1px = 0.75pt:
 // body 15px → 11.25pt, sheet title 26px → 19.5pt, meta line 9px → 6.75pt.
-// Colour literals are values from the palette's light column — typst pages
-// are white, and templates cannot consume the app's CSS variables
-// (adr/2026-07-theme-attribute-on-app-root.md).
+// The app compiles with a `theme` input and gets a transparent page and the
+// matching palette column; vanilla typst (make check-vault, exports) gets
+// the paper look (adr/2026-07-note-rendering-theme-input.md). Colour
+// literals live here because templates cannot consume the app's CSS
+// variables (adr/2026-07-theme-attribute-on-app-root.md); the dark column
+// mirrors assets/theme.css.
+#let palette = (
+  paper: (
+    page: white,
+    ink: rgb("#45415a"),
+    muted: rgb("#8b87a0"),
+    hairline: rgb("#d0cdda"),
+    link: rgb("#6b5fa8"),
+  ),
+  light: (
+    page: none,
+    ink: rgb("#45415a"),
+    muted: rgb("#8b87a0"),
+    hairline: rgb("#d0cdda"),
+    link: rgb("#6b5fa8"),
+  ),
+  dark: (
+    page: none,
+    ink: rgb("#c9c4dd"),
+    muted: rgb("#6f6a8c"),
+    hairline: rgb("#332c52"),
+    link: rgb("#8f84c9"),
+  ),
+).at(sys.inputs.at("theme", default: "paper"))
+
 #let meta(id: none, type: none, created: none, tags: (), origin: none) = {
   let parts = ()
   if id != none { parts.push([#id]) }
@@ -12,24 +39,24 @@
   if parts.len() > 0 {
     block(
       width: 100%,
-      stroke: (bottom: 0.5pt + rgb("#d0cdda")),
+      stroke: (bottom: 0.5pt + palette.hairline),
       inset: (bottom: 4pt),
       below: 1.2em,
       text(
         font: "DejaVu Sans Mono",
         size: 6.75pt,
-        fill: rgb("#8b87a0"),
+        fill: palette.muted,
         parts.join([ · ]),
       ),
     )
   }
 }
 
-#let l(id) = text(fill: rgb("#6b5fa8"), [#id])
+#let l(id) = text(fill: palette.link, [#id])
 
 #let note(doc) = {
-  set page(width: 14cm, height: auto, margin: 1.5cm)
-  set text(font: "Parisienne", size: 11.25pt, fill: rgb("#45415a"))
+  set page(width: 14cm, height: auto, margin: 1.5cm, fill: palette.page)
+  set text(font: "Parisienne", size: 11.25pt, fill: palette.ink)
   set par(leading: 0.75em)
   show heading.where(level: 1): set text(size: 19.5pt, weight: 600)
   doc

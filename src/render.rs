@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use typst::diag::{FileError, FileResult, PackageError};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Dict, Duration, IntoValue};
 use typst::layout::Abs;
 use typst::syntax::{
     FileId, RootedPath, Source, VirtualPath, VirtualRoot, VirtualizeError,
@@ -24,13 +24,48 @@ static FONTS: LazyLock<FontStore> = LazyLock::new(|| {
     font_store.extend(typst_kit::fonts::system());
     font_store
 });
-static LIBRARY: LazyLock<LazyHash<Library>> =
+static PAPER_LIBRARY: LazyLock<LazyHash<Library>> =
     LazyLock::new(|| LazyHash::new(Library::default()));
+static DARK_LIBRARY: LazyLock<LazyHash<Library>> =
+    LazyLock::new(|| themed_library("dark"));
+static LIGHT_LIBRARY: LazyLock<LazyHash<Library>> =
+    LazyLock::new(|| themed_library("light"));
+
+/// The template reads `sys.inputs.theme` and picks its palette column, so
+/// the app's theme travels as a compile input — the one channel a template
+/// has, since it cannot consume CSS variables
+/// (adr/2026-07-note-rendering-theme-input.md).
+fn themed_library(theme: &str) -> LazyHash<Library> {
+    let mut inputs = Dict::new();
+    inputs.insert("theme".into(), theme.into_value());
+    LazyHash::new(Library::builder().with_inputs(inputs).build())
+}
+
+/// Which palette column notes compile with. `Paper` is what the vanilla
+/// CLI produces without inputs (white page, for `make check-vault` and
+/// exports); the app always passes its own theme.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum RenderTheme {
+    Paper,
+    Dark,
+    Light,
+}
+
+impl RenderTheme {
+    fn library(self) -> &'static LazyHash<Library> {
+        match self {
+            RenderTheme::Paper => &PAPER_LIBRARY,
+            RenderTheme::Dark => &DARK_LIBRARY,
+            RenderTheme::Light => &LIGHT_LIBRARY,
+        }
+    }
+}
 
 pub struct VaultWorld {
     root: PathBuf,
     main: FileId,
     source: Source,
+    theme: RenderTheme,
 }
 
 impl VaultWorld {
@@ -38,6 +73,7 @@ impl VaultWorld {
         root: &Path,
         note: &Path,
         text: String,
+        theme: RenderTheme,
     ) -> Result<VaultWorld, VirtualizeError> {
         let vpath = VirtualPath::virtualize(root, note)?;
         let main = RootedPath::new(VirtualRoot::Project, vpath).intern();
@@ -46,6 +82,7 @@ impl VaultWorld {
             root: root.to_path_buf(),
             main,
             source,
+            theme,
         })
     }
 
@@ -67,7 +104,7 @@ impl VaultWorld {
 
 impl World for VaultWorld {
     fn library(&self) -> &LazyHash<Library> {
-        &LIBRARY
+        self.theme.library()
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
@@ -131,13 +168,14 @@ impl FragmentCache {
         root: &Path,
         note: &Path,
         source: &str,
+        theme: RenderTheme,
     ) -> Result<String, String> {
-        let key = hash_fragment(note, source);
+        let key = hash_fragment(note, source, theme);
         self.touched.insert(key);
         self.entries
             .entry(key)
             .or_insert_with(|| {
-                render_svg(root, note, source).map_err(describe)
+                render_svg(root, note, source, theme).map_err(describe)
             })
             .clone()
     }
@@ -161,8 +199,9 @@ pub fn render_svg(
     root: &Path,
     note: &Path,
     text: &str,
+    theme: RenderTheme,
 ) -> Result<String, RenderError> {
-    let world = VaultWorld::new(root, note, text.to_string())?;
+    let world = VaultWorld::new(root, note, text.to_string(), theme)?;
 
     match typst::compile::<PagedDocument>(&world).output {
         Ok(doc) => Ok(typst_svg::svg_merged(
@@ -178,13 +217,15 @@ pub fn render_svg(
 
 /// The path joins the hash because fragments compile under their note's
 /// path: two notes could hold byte-identical blocks whose relative
-/// resolution differs. Stable only within this process: `DefaultHasher` may
-/// change across Rust releases, so these hashes must never be persisted to
-/// `.index/`.
-fn hash_fragment(note: &Path, source: &str) -> u64 {
+/// resolution differs; the theme joins it because the same source renders
+/// differently per palette column. Stable only within this process:
+/// `DefaultHasher` may change across Rust releases, so these hashes must
+/// never be persisted to `.index/`.
+fn hash_fragment(note: &Path, source: &str, theme: RenderTheme) -> u64 {
     let mut hasher = DefaultHasher::new();
     note.hash(&mut hasher);
     source.hash(&mut hasher);
+    theme.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -307,7 +348,7 @@ mod tests {
         let note = vault.join("permanent/zettelkasten.typ");
         // the text is irrelevant to `read`; an empty buffer keeps the
         // fixture free of a disk read
-        VaultWorld::new(&vault, &note, String::new())
+        VaultWorld::new(&vault, &note, String::new(), RenderTheme::Paper)
             .expect("a fixture path inside the vault virtualizes")
     }
 

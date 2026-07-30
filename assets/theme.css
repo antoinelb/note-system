@@ -179,10 +179,11 @@ body {
   box-sizing: border-box;
   margin: 4px 0;
   padding: 8px;
-  border: 1px solid var(--ember);
-  border-radius: 2px;
+  border: none;
   background: transparent;
   color: var(--ink-bright);
+  /* the one warm element is the ember and the caret (plan.md § design) */
+  caret-color: var(--ember);
   font: 14px ui-monospace, "DejaVu Sans Mono", monospace;
   line-height: 1.5;
   resize: none;

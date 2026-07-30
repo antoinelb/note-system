@@ -13,6 +13,9 @@ rather than the browser's").
 
 - The active block's rendered SVG is replaced by a **`<textarea>`** showing
   that block's source; every keystroke stays native to the webview.
+  (Wireframe 1b's alert-colour border was dropped on first use: the warm
+  element is the caret, not a frame —
+  `adr/2026-07-note-rendering-theme-input.md`.)
   The buffer's one edit operation is `Buffer::replace_range(span, text)` —
   the widget hands back the whole block value, the buffer splices it into
   the note. Stale or non-boundary spans drop the edit instead of panicking.

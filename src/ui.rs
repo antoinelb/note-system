@@ -15,7 +15,7 @@ use crate::domain::{NoteCategory, NoteType};
 use crate::editor::Editor;
 use crate::index::{Index, IndexError};
 use crate::logs::{self, Selection};
-use crate::render::FragmentCache;
+use crate::render::{FragmentCache, RenderTheme};
 use crate::time;
 
 /// One idle timer drives the save (adr/2026-07-debounced-autosave.md);
@@ -66,7 +66,9 @@ pub fn App() -> Element {
     let vault = use_context::<VaultRoot>();
     let today = use_context::<Today>();
     let loaded = use_hook(|| load(vault.0));
-    let mut light = use_signal(|| false);
+    // shared down the tree: the shell compiles note fragments in the
+    // current theme's palette column
+    let mut light = use_context_provider(|| Signal::new(false));
     let quit_flush = use_context_provider(QuitFlush::default);
     // absent in the headless tests, where there is no window to close
     let closer = try_consume_context::<Closer>();
@@ -191,8 +193,19 @@ fn Shell(
     let exists = note_list.iter().any(|(existing, _)| existing == &id);
     let rows = logs::rail_rows(&note_list, Some(&(scale.clone(), id.clone())));
     let crumbs = logs::breadcrumbs(&scale, &id);
-    let panes =
-        block_panes(&editor.read(), &root, &mut fragments.borrow_mut());
+    // reading the theme here re-renders every fragment on Ctrl+T
+    let light = use_context::<Signal<bool>>();
+    let theme = if light() {
+        RenderTheme::Light
+    } else {
+        RenderTheme::Dark
+    };
+    let panes = block_panes(
+        &editor.read(),
+        &root,
+        theme,
+        &mut fragments.borrow_mut(),
+    );
     let notice = editor.read().notice().map(str::to_string);
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
@@ -633,6 +646,7 @@ enum Pane {
 fn block_panes(
     editor: &Editor,
     root: &Path,
+    theme: RenderTheme,
     cache: &mut FragmentCache,
 ) -> Option<Vec<Pane>> {
     let (file, text) = editor.note()?;
@@ -658,6 +672,7 @@ fn block_panes(
                             root,
                             file,
                             &blocks::fragment_source(text, block),
+                            theme,
                         ),
                     }
                 }
