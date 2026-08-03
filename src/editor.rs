@@ -87,6 +87,24 @@ impl Editor {
         }
     }
 
+    /// The link picker's accepted completion: `text` goes in at the widget's
+    /// caret (`units`, UTF-16 code units within the active block, the same
+    /// probe `slide` reads). Routed through `edit` rather than splicing
+    /// directly — the widget's contract is "here is the block's whole new
+    /// content", and reusing it keeps one staleness policy instead of two
+    /// (adr/2026-08-ctrl-l-link-picker.md).
+    pub fn insert(&mut self, units: usize, text: &str) {
+        let Some(slice) = self.active_source() else {
+            self.notice = Some(STALE_EDIT.to_string());
+            return;
+        };
+        let mut value = slice.to_string();
+        // byte_offset_of_utf16 answers a char boundary or the end, so
+        // insert_str cannot panic here
+        value.insert_str(blocks::byte_offset_of_utf16(slice, units), text);
+        self.edit(&value);
+    }
+
     /// A click on a rendered block: flush any pending edit, resegment (the
     /// edit may have split or merged blocks), then land on the block owning
     /// the clicked block's first byte — a coordinate, so it survives the
@@ -104,12 +122,7 @@ impl Editor {
     /// was ordinary caret movement and nothing happens.
     pub fn slide(&mut self, units: usize, up: bool) {
         let Some(index) = self.active else { return };
-        let slice = self
-            .blocks
-            .get(index)
-            .zip(self.note())
-            .and_then(|(block, (_, text))| text.get(block.content()))
-            .unwrap_or("");
+        let slice = self.active_source().unwrap_or("");
         let caret = blocks::byte_offset_of_utf16(slice, units);
         let target = match blocks::boundary_slide(slice, caret, up) {
             Some(blocks::Slide::Prev) if index > 0 => {
@@ -159,6 +172,14 @@ impl Editor {
                 .err()
                 .map(|err| format!("{}: {err}", note.file().display()))
         })
+    }
+
+    /// The active block's own text, or `None` when there is no active block
+    /// or its span no longer fits the buffer — the widget diverged.
+    fn active_source(&self) -> Option<&str> {
+        let block = self.blocks.get(self.active?)?;
+        let (_, text) = self.note()?;
+        text.get(block.content())
     }
 }
 
@@ -440,6 +461,69 @@ mod tests {
         let (_, text) = editor.note().expect("still open");
         assert!(text.contains("prose"), "the neighbours survive: {text}");
         assert!(!text.contains("title"), "the emptied block is gone: {text}");
+    }
+
+    #[test]
+    fn insert_splices_at_the_caret_wherever_it_sits() {
+        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        for (units, expected) in [
+            (0, "#l(\"x\")= title\n"),
+            (2, "= #l(\"x\")title\n"),
+            // past the block's end clamps to it — the separator is not the
+            // widget's to write into
+            (99, "= title#l(\"x\")\n"),
+        ] {
+            let (_dir, mut editor) = open_note(NOTE);
+            editor.activate(editor.blocks()[1].range.start);
+            editor.insert(units, "#l(\"x\")");
+            let (_, text) = editor.note().expect("still open");
+            assert!(text.contains(expected), "at {units}: {text}");
+            assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
+            assert_eq!(editor.notice(), None);
+        }
+    }
+
+    #[test]
+    fn insert_counts_the_caret_in_utf16_units_like_the_widget() {
+        let (_dir, mut editor) = open_note("été\n\nprose\n");
+        editor.activate(0);
+        // "été" is 5 bytes but 3 code units: after the first é is byte 2
+        editor.insert(1, "!");
+        let (_, text) = editor.note().expect("still open");
+        assert!(text.starts_with("é!té"), "{text}");
+    }
+
+    #[test]
+    fn insert_against_a_stale_editor_is_dropped_loudly() {
+        // no block active
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.insert(0, "#l(\"x\")");
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+
+        // an active index the block map no longer has
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.blocks.clear();
+        editor.insert(0, "#l(\"x\")");
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+
+        // a span that no longer fits the buffer
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.blocks[0].content_end = NOTE.len() + 40;
+        editor.insert(0, "#l(\"x\")");
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, NOTE, "a refused insert changes nothing");
+
+        // a block map outliving the note it was cut from — unreachable
+        // through the widget (a closed editor has no blocks to activate),
+        // but the guard exists so a future caller cannot make it reachable
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.buffer = None;
+        editor.insert(0, "#l(\"x\")");
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
     }
 
     #[test]

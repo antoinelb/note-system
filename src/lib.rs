@@ -4,6 +4,7 @@ pub mod blocks;
 pub mod domain;
 pub mod editor;
 pub mod index;
+pub mod links;
 pub mod logs;
 pub mod parse;
 pub mod render;

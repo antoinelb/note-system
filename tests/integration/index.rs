@@ -409,8 +409,8 @@ fn completions_offer_every_linkable_note_with_its_title() {
     );
     // missing-meta.typ has a title but no id — it cannot be a link target
     assert!(
-        !all.iter().any(|(_, title)| title.as_deref()
-            == Some("Note without meta")),
+        !all.iter()
+            .any(|(_, title)| title.as_deref() == Some("Note without meta")),
         "{all:?}"
     );
 
@@ -806,7 +806,9 @@ fn snapshot(index: &Index) -> Vec<Vec<PathBuf>> {
             .expect("by category"),
         index.notes_by_type(&NoteType::Daily).expect("by type"),
         index.notes_by_tag("method").expect("by tag"),
-        backlink_paths(index.backlinks(&id("zettelkasten")).expect("backlinks")),
+        backlink_paths(
+            index.backlinks(&id("zettelkasten")).expect("backlinks"),
+        ),
         index.typeless_notes().expect("typeless"),
         index
             .dangling_links()
