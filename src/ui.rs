@@ -14,6 +14,7 @@ use crate::blocks;
 use crate::domain::{NoteCategory, NoteType};
 use crate::editor::Editor;
 use crate::index::{Index, IndexError};
+use crate::links;
 use crate::logs::{self, Selection};
 use crate::render::{FragmentCache, RenderTheme};
 use crate::time;
@@ -44,6 +45,16 @@ pub struct CaretProbe(
     pub  Arc<
         dyn Fn() -> Pin<Box<dyn Future<Output = Option<usize>>>> + Send + Sync,
     >,
+);
+
+/// How an accepted completion puts the caret back after the link it wrote:
+/// `main` injects a JS `setSelectionRange`, the headless tests inject a
+/// recorder — the `CaretProbe` pattern in the other direction
+/// (adr/2026-08-ctrl-l-link-picker.md).
+#[derive(Clone)]
+pub struct CaretWriter(
+    #[allow(clippy::type_complexity)]
+    pub  Arc<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()>>> + Send + Sync>,
 );
 
 /// The quit chord lands on the `.app` root, but the open buffer lives in
@@ -143,6 +154,23 @@ fn Shell(
     // absent in headless tests that don't inject a fake: arrows then stay
     // ordinary caret movement
     let probe = try_consume_context::<CaretProbe>();
+    let writer = try_consume_context::<CaretWriter>();
+
+    // the link picker: open with its anchor frozen at the caret Ctrl+L
+    // probed, because the textarea loses focus behind it and its text can no
+    // longer move (adr/2026-08-ctrl-l-link-picker.md). The query and the
+    // highlight are their own signals so every handler that moves them is
+    // total — an `Option` here would branch on a state the handlers cannot
+    // be in, since they only exist while the picker does.
+    let mut picker = use_signal(|| None::<Picker>);
+    let mut query = use_signal(String::new);
+    let mut highlighted = use_signal(|| 0usize);
+    // the uncontrolled textarea only shows a spliced-in link if it remounts,
+    // and it remounts when its key changes — keystrokes never touch this
+    let mut epoch = use_signal(|| 0u32);
+    // where the caret goes once that remount lands; a plain cell, like
+    // QuitFlush, because only the mount handler ever reads it
+    let pending_caret = use_hook(|| Rc::new(std::cell::Cell::new(None)));
 
     // the Ctrl+Q flush: reports whether the open note reached disk, so a
     // failed save can hold the app open instead of losing the buffer
@@ -188,6 +216,19 @@ fn Shell(
         }
     });
 
+    // one accept path for Enter and for a click on a row; the anchor comes
+    // from the render that drew the row, so nothing here has to look it up
+    let accept = use_callback({
+        let pending_caret = pending_caret.clone();
+        move |(anchor, link_id): (usize, String)| {
+            let text = links::format_link(&link_id);
+            editor.write().insert(anchor, &text);
+            pending_caret.set(Some(anchor + text.encode_utf16().count()));
+            picker.set(None);
+            epoch += 1;
+        }
+    });
+
     let (scale, id) = selected();
     let note_list = notes();
     let exists = note_list.iter().any(|(existing, _)| existing == &id);
@@ -203,6 +244,17 @@ fn Shell(
     let panes =
         block_panes(&editor.read(), &root, theme, &mut fragments.borrow_mut());
     let notice = editor.read().notice().map(str::to_string);
+    let footer = link_footer(&root, &editor.read(), &id, &note_list);
+    // the matches are cloned out of the picker so rsx borrows nothing from
+    // the signal it also writes
+    let open_picker = picker.read().as_ref().map(|open| {
+        let matches: Vec<links::Completion> =
+            links::filter(&open.entries, &query.read())
+                .into_iter()
+                .cloned()
+                .collect();
+        (open.anchor, matches)
+    });
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
     let day_ids: HashSet<&str> =
@@ -213,8 +265,36 @@ fn Shell(
     let keyboard = {
         let root = root.clone();
         let fragments = fragments.clone();
+        let probe = probe.clone();
         move |event: KeyboardEvent| {
             match event.key() {
+                // the link picker (adr/2026-08-ctrl-l-link-picker.md). It
+                // lands here rather than on the app root because it needs the
+                // editor, the caret probe and the index — none of which the
+                // root has. Only ever meaningful over an active block: with
+                // nothing to type into, there is no caret to anchor to.
+                Key::Character(ref character)
+                    if character == "l"
+                        && event.modifiers().ctrl()
+                        && picker.peek().is_none()
+                        && editor.peek().active().is_some() =>
+                {
+                    let Some(probe) = probe.clone() else { return };
+                    let root = root.clone();
+                    spawn(async move {
+                        let Some(anchor) = (probe.0)().await else {
+                            return;
+                        };
+                        match completions(&root) {
+                            Ok(entries) => {
+                                query.set(String::new());
+                                highlighted.set(0);
+                                picker.set(Some(Picker { anchor, entries }));
+                            }
+                            Err(msg) => editor.write().set_notice(msg),
+                        }
+                    });
+                }
                 // months page by keystroke as well as by scrolling; arrows
                 // move the grid only, never the selection
                 // (adr/2026-07-month-paging-arrow-keys.md)
@@ -320,7 +400,10 @@ fn Shell(
                                                 let rows = text.split('\n').count();
                                                 rsx! {
                                                     textarea {
-                                                        key: "{start}",
+                                                        // the epoch remounts it after a link is
+                                                        // spliced in, so the uncontrolled value is
+                                                        // rebuilt from the buffer
+                                                        key: "{start}-{epoch}",
                                                         class: "block-active",
                                                         rows: "{rows}",
                                                         spellcheck: "false",
@@ -328,8 +411,24 @@ fn Shell(
                                                         // the webview: a swapped-in textarea asks for
                                                         // its own focus, and a refusal has no one to
                                                         // tell — the caret simply stays where it was
-                                                        onmounted: move |event| async move {
-                                                            let _ = event.set_focus(true).await;
+                                                        onmounted: {
+                                                            let pending_caret = pending_caret.clone();
+                                                            let writer = writer.clone();
+                                                            move |event: Event<MountedData>| {
+                                                                let caret = pending_caret.take();
+                                                                let writer = writer.clone();
+                                                                async move {
+                                                                    let _ = event.set_focus(true).await;
+                                                                    // after an accepted completion, the
+                                                                    // caret belongs past the link, not at
+                                                                    // whatever the webview picks
+                                                                    if let Some(units) = caret
+                                                                        && let Some(writer) = writer
+                                                                    {
+                                                                        (writer.0)(units).await;
+                                                                    }
+                                                                }
+                                                            }
                                                         },
                                                         initial_value: "{text}",
                                                         oninput: move |event| {
@@ -415,6 +514,116 @@ fn Shell(
                                 " to start one from the template"
                             }
                         },
+                    }
+                }
+                {
+                    match open_picker {
+                        Some((anchor, matches)) => {
+                            let rows = matches.clone();
+                            rsx! {
+                            div { class: "link-picker",
+                                input {
+                                    class: "picker-query",
+                                    placeholder: "link to…",
+                                    onmounted: move |event| async move {
+                                        let _ = event.set_focus(true).await;
+                                    },
+                                    oninput: move |event| {
+                                        query.set(event.value());
+                                        highlighted.set(0);
+                                    },
+                                    onkeydown: move |event: KeyboardEvent| {
+                                        let key = event.key();
+                                        let last = matches.len().saturating_sub(1);
+                                        match key {
+                                            Key::Escape => picker.set(None),
+                                            Key::Enter => {
+                                                // no matches: the keystroke does
+                                                // nothing rather than guessing
+                                                if let Some(entry) = matches.get(highlighted()) {
+                                                    accept.call((anchor, entry.id.clone()));
+                                                }
+                                            }
+                                            Key::ArrowDown => {
+                                                highlighted.set((highlighted() + 1).min(last));
+                                            }
+                                            Key::ArrowUp => {
+                                                highlighted.set(highlighted().saturating_sub(1));
+                                            }
+                                            _ => {}
+                                        }
+                                        // the picker owns every plain key while it
+                                        // is open; the ctrl chords still bubble
+                                        if !event.modifiers().ctrl() {
+                                            event.stop_propagation();
+                                        }
+                                    },
+                                }
+                                if rows.is_empty() {
+                                    div { class: "picker-empty", "no matching note" }
+                                }
+                                for (rank, entry) in rows.into_iter().enumerate() {
+                                    div {
+                                        key: "{entry.id}",
+                                        class: "picker-row",
+                                        class: if rank == highlighted() { "selected" },
+                                        onclick: {
+                                            let id = entry.id.clone();
+                                            move |_| accept.call((anchor, id.clone()))
+                                        },
+                                        span { class: "picker-id", "{entry.id}" }
+                                        if let Some(title) = entry.title {
+                                            span { class: "picker-title", "{title}" }
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                        }
+                        None => rsx! {},
+                    }
+                }
+                {
+                    match footer {
+                        Some(Ok((back, out))) if !back.is_empty() || !out.is_empty() => rsx! {
+                            div { class: "links-footer",
+                                for (arrow, entries) in [("←", back), ("→", out)] {
+                                    if !entries.is_empty() {
+                                        div { class: "links-row",
+                                            span { class: "links-arrow", "{arrow}" }
+                                            for link in entries {
+                                                {
+                                                    match link.scale {
+                                                        // only a time note has somewhere to
+                                                        // open in v0; the rest are visible
+                                                        // but inert until v1's table
+                                                        Some(scale) => {
+                                                            let target = (scale, link.label.clone());
+                                                            rsx! {
+                                                                span {
+                                                                    class: "link-entry link-jump",
+                                                                    onclick: move |_| select.call(target.clone()),
+                                                                    "{link.label}"
+                                                                }
+                                                            }
+                                                        }
+                                                        None => rsx! {
+                                                            span {
+                                                                class: "link-entry",
+                                                                class: if link.dangling { "link-dangling" },
+                                                                "{link.label}"
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
+                        _ => rsx! {},
                     }
                 }
                 {
@@ -683,6 +892,83 @@ fn block_panes(
     )
 }
 
+/// The open link picker's fixed half. `anchor` is the caret Ctrl+L froze, in
+/// UTF-16 code units within the active block; `entries` is the index
+/// snapshot the query filters, taken once at open because nothing can change
+/// it while the popup holds focus (adr/2026-08-ctrl-l-link-picker.md). The
+/// moving half — query and highlight — lives in its own signals.
+#[derive(Clone, PartialEq)]
+struct Picker {
+    anchor: usize,
+    entries: Vec<links::Completion>,
+}
+
+/// Everything the picker can offer, read at the moment it opens.
+fn completions(root: &Path) -> Result<Vec<links::Completion>, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("links: {err:?}"))?;
+    Ok(index
+        .completions()
+        .map_err(|err| format!("links: {err:?}"))?
+        .into_iter()
+        .map(links::Completion::new)
+        .collect())
+}
+
+/// The both-directions footer under the open note, or `None` when no note is
+/// open — absence, not an empty row. Outgoing links are read from the live
+/// buffer so a link marks itself dangling as it is typed; backlinks come
+/// from the index, which no in-session edit can change
+/// (adr/2026-08-links-footer-both-directions.md).
+type Footer = (Vec<links::FooterLink>, Vec<links::FooterLink>);
+
+fn link_footer(
+    root: &Path,
+    editor: &Editor,
+    own: &str,
+    time_notes: &[(String, NoteType)],
+) -> Option<Result<Footer, String>> {
+    let (_, text) = editor.note()?;
+    Some(both_directions(root, text, own, time_notes))
+}
+
+fn both_directions(
+    root: &Path,
+    text: &str,
+    own: &str,
+    time_notes: &[(String, NoteType)],
+) -> Result<Footer, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("links: {err:?}"))?;
+    let targets: Vec<crate::domain::NoteId> = crate::parse::parse_note(text)
+        .links
+        .into_iter()
+        .map(|link| link.target)
+        .collect();
+    // resolved up front rather than inside the classifier, so a database
+    // that cannot answer is an error rather than a note full of ghosts
+    let mut known = Vec::new();
+    for target in &targets {
+        if index
+            .path_for_id(target)
+            .map_err(|err| format!("links: {err:?}"))?
+            .is_some()
+        {
+            known.push(target.0.clone());
+        }
+    }
+    let out = links::outgoing(
+        &targets,
+        own,
+        |id| known.iter().any(|found| found == id),
+        time_notes,
+    );
+    let sources = index
+        .backlinks(&crate::domain::NoteId(own.to_string()))
+        .map_err(|err| format!("links: {err:?}"))?;
+    Ok((links::backlinks(&sources, own, time_notes), out))
+}
+
 /// The "captured today" block: the capture and generated notes the index
 /// dates to `day`. Opened per read, the same pattern as any other
 /// per-event index use — the day gathers what happened in it.
@@ -722,22 +1008,24 @@ mod tests {
     /// Initial click-listener layout, established empirically (see the
     /// mounted-app doc): registration runs jump-panel first — the header's
     /// ‹ today › buttons, the three seasons, then each grid row as gutter +
-    /// day cells — then the centre's two inactive blocks (today's preamble
-    /// and heading), then the two crumb jumps, then the five rail rows top
-    /// to bottom.
+    /// day cells — then the note's two link-footer entries, the centre's two
+    /// inactive blocks (today's preamble and heading), the two crumb jumps,
+    /// and finally the five rail rows top to bottom.
     const CAL_BACK: usize = 0;
     const CAL_TODAY: usize = 1;
     const CAL_FORWARD: usize = 2;
     const SEASON_AUTUMN: usize = 5;
     const GUTTER_W31: usize = 36;
-    const BLOCK_PREAMBLE: usize = 42;
-    const BLOCK_HEADING: usize = 43;
-    const CRUMB_WEEK: usize = 44;
-    const RAIL_SUMMER: usize = 46;
-    const RAIL_W30: usize = 47;
-    const RAIL_DAY_23: usize = 48;
-    const RAIL_DAY_22: usize = 49;
-    const RAIL_DAY_21: usize = 50;
+    const FOOTER_BACKLINK: usize = 42;
+    const FOOTER_OUTGOING: usize = 43;
+    const BLOCK_PREAMBLE: usize = 44;
+    const BLOCK_HEADING: usize = 45;
+    const CRUMB_WEEK: usize = 46;
+    const RAIL_SUMMER: usize = 48;
+    const RAIL_W30: usize = 49;
+    const RAIL_DAY_23: usize = 50;
+    const RAIL_DAY_22: usize = 51;
+    const RAIL_DAY_21: usize = 52;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
     /// one gutter per started week row.
     const fn day_cell(day: usize) -> usize {
@@ -1022,9 +1310,9 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            51,
-            "3 header + 3 seasons + 5 gutters + 31 days + 2 crumbs \
-             + 2 blocks + 5 rail: {html}"
+            53,
+            "3 header + 3 seasons + 5 gutters + 31 days + 2 footer links \
+             + 2 blocks + 2 crumbs + 5 rail: {html}"
         );
     }
 
@@ -1611,6 +1899,389 @@ mod tests {
         assert!(html.contains("captured today:"), "{html}");
     }
 
+    // -- the link picker: Ctrl+L, filter, accept -----------------------------
+
+    #[test]
+    fn ctrl_l_opens_the_picker_and_enter_writes_the_link() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, written) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        // the caret sits right after "= 2026-07-23\n"
+        let anchor = "= 2026-07-23\n".len();
+        *caret.lock().expect("the probe cell never poisons") = Some(anchor);
+        let (input, picker_keys) = open_picker(&mut dom, keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("link-picker"), "{html}");
+        assert!(html.contains("2026-w30"), "the vault is listed: {html}");
+
+        type_into(&mut dom, input, "summer");
+        assert_eq!(
+            picker_ids(&dom),
+            vec!["2026-summer"],
+            "the query filters the list"
+        );
+
+        let mutations = press_for_mutations(
+            &mut dom,
+            picker_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "accepting closes it: {html}");
+        assert!(
+            source_of(&dom).contains(r#"#l("2026-summer")"#),
+            "spliced at the caret: {}",
+            source_of(&dom)
+        );
+        // the accept remounted the textarea; the renderer then announces it,
+        // which is when the caret is put back
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        assert_eq!(
+            *written.lock().expect("the writer cell never poisons"),
+            vec![anchor + r#"#l("2026-summer")"#.len()],
+            "the caret lands past the link it just wrote"
+        );
+    }
+
+    #[test]
+    fn a_row_click_accepts_the_completion_too() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+
+        let mutations =
+            press_for_mutations(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        // the picker's own click targets, after the input's listeners
+        let rows = listeners(&mutations, "click");
+        click(&mut dom, rows[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+        assert!(
+            source_of(&dom).starts_with(r#"#l("2026-07-21")"#),
+            "the first row went in at the caret: {}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn the_arrows_move_the_highlight_and_stop_at_both_ends() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        let (input, picker_keys) = open_picker(&mut dom, keys);
+
+        // two entries: the daily notes 22 and 23
+        type_into(&mut dom, input, "2026-07-2");
+        let selected = |dom: &VirtualDom| {
+            let html = dioxus_ssr::render(dom);
+            html.split("picker-row selected")
+                .nth(1)
+                .and_then(|rest| rest.split("picker-id\">").nth(1))
+                .and_then(|rest| rest.split('<').next())
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no highlighted row: {html}"))
+        };
+        assert_eq!(selected(&dom), "2026-07-21", "the first row starts lit");
+
+        press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
+        assert_eq!(selected(&dom), "2026-07-22");
+        press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
+        assert_eq!(selected(&dom), "2026-07-23", "the last row holds");
+
+        press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
+        assert_eq!(selected(&dom), "2026-07-21", "and the first one holds");
+    }
+
+    #[test]
+    fn escape_closes_the_picker_and_a_query_that_matches_nothing_writes_nothing()
+     {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        let (input, picker_keys) = open_picker(&mut dom, keys);
+
+        type_into(&mut dom, input, "fantôme");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching note"), "{html}");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("link-picker"),
+            "enter matched nothing: {html}"
+        );
+        assert!(!source_of(&dom).contains("fant"), "and wrote nothing");
+
+        // an unhandled key inside the picker is absorbed, not acted on
+        press(
+            &mut dom,
+            picker_keys,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "escape closes it: {html}");
+        assert!(
+            html.contains("= 2026-07-23"),
+            "the source is intact: {html}"
+        );
+    }
+
+    #[test]
+    fn the_theme_chord_still_works_over_an_open_picker() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        let (_, picker_keys) = open_picker(&mut dom, keys);
+
+        press(
+            &mut dom,
+            picker_keys,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        assert!(html.contains("link-picker"), "and it stays open: {html}");
+    }
+
+    #[test]
+    fn ctrl_l_needs_an_active_block_a_probe_and_a_closed_picker() {
+        let vault = temp_vault();
+
+        // no active block: the caret is nowhere to anchor to
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys, _) = pane_targets(&mut dom, &clicks);
+        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+
+        // a probe that answers nothing: no anchor, no picker
+        let (_, block_keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+
+        // open, then a second Ctrl+L leaves the first one alone
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        let (input, _) = open_picker(&mut dom, block_keys);
+        type_into(&mut dom, input, "summer");
+        press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
+        assert_eq!(
+            picker_ids(&dom),
+            vec!["2026-summer"],
+            "the second chord left the open picker alone"
+        );
+
+        // and without an injected probe at all, the chord is inert
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+    }
+
+    #[test]
+    fn an_index_that_cannot_list_notes_becomes_the_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE notes")
+            .expect("the sabotage succeeds");
+
+        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+        assert!(html.contains("links:"), "{html}");
+    }
+
+    #[test]
+    fn a_picker_over_an_unopenable_index_says_so() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        replace_database_with_a_directory(vault.path());
+
+        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("links:"), "{html}");
+    }
+
+    #[test]
+    fn accepting_without_a_caret_writer_still_splices() {
+        // `main` always injects one; a renderer that cannot move the caret
+        // must still not lose the link
+        let vault = temp_vault();
+        let caret = Arc::new(std::sync::Mutex::new(Some(0usize)));
+        let feed = caret.clone();
+        let probe = CaretProbe(Arc::new(move || {
+            let units = *feed.lock().expect("the probe cell never poisons");
+            Box::pin(async move { units })
+        }));
+        let (mut dom, mutations) = mounted_app_with_probe(
+            Some(vault.path().to_path_buf()),
+            None,
+            Some(probe),
+            None,
+        );
+        let clicks = listeners(&mutations, "click");
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, picker_keys) = open_picker(&mut dom, keys);
+        type_into(&mut dom, input, "summer");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        assert!(
+            source_of(&dom).contains(r#"#l("2026-summer")"#),
+            "{}",
+            source_of(&dom)
+        );
+    }
+
+    // -- the links footer: both directions, dangling marked ------------------
+
+    #[test]
+    fn the_footer_shows_both_directions_and_jumps_where_it_can() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("links-footer"), "{html}");
+        assert!(html.contains('←') && html.contains('→'), "{html}");
+        assert_eq!(
+            html.matches("link-entry link-jump").count(),
+            2,
+            "both directions reach 2026-07-22: {html}"
+        );
+
+        click(&mut dom, clicks[FOOTER_OUTGOING]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">22"), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+
+        // and the other direction jumps the same way, from the day it
+        // landed on back to the one that links to it
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[FOOTER_BACKLINK]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">22"), "{html}");
+    }
+
+    #[test]
+    fn a_backlink_from_a_permanent_note_is_visible_but_inert() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/alpha.typ"),
+            linking(note("alpha"), "2026-07-23"),
+        )
+        .expect("alpha is rewritten");
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"<span class="link-entry ">alpha</span>"#),
+            "no jump, no dangling mark: {html}"
+        );
+    }
+
+    #[test]
+    fn a_link_to_nothing_is_marked_as_it_is_typed() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        // the heading block loses its outgoing link and gains a ghost one
+        type_and_settle(&mut dom, input, "= 2026-07-23\n#l(\"fantôme\")\n");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("link-dangling\">fantôme"), "{html}");
+        assert_eq!(
+            html.matches("link-entry link-jump").count(),
+            1,
+            "only the backlink stays clickable: {html}"
+        );
+    }
+
+    #[test]
+    fn a_direction_with_nothing_in_it_renders_no_row() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        type_and_settle(&mut dom, input, "= 2026-07-23\n");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains('←'), "the backlink survives: {html}");
+        assert!(!html.contains('→'), "the outgoing row is gone: {html}");
+    }
+
+    #[test]
+    fn a_note_with_no_links_and_an_empty_day_carry_no_footer() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        // 2026-07-21 links nowhere and nothing links to it
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("links-footer"), "{html}");
+
+        // and an empty day has no note to have links at all
+        click(&mut dom, clicks[day_cell(24)]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("links-footer"), "{html}");
+    }
+
+    #[test]
+    fn a_database_that_will_not_answer_surfaces_in_the_footer() {
+        for sabotage in ["DROP TABLE notes", "DROP TABLE links"] {
+            let vault = temp_vault();
+            let (mut dom, clicks, _, _) =
+                rendered_app(Some(vault.path().to_path_buf()));
+            let saboteur = rusqlite::Connection::open(
+                vault.path().join(".index/index.db"),
+            )
+            .expect("a second connection opens");
+            saboteur
+                .execute_batch(sabotage)
+                .expect("the sabotage succeeds");
+            click(&mut dom, clicks[RAIL_DAY_23]);
+            let html = dioxus_ssr::render(&dom);
+            assert!(html.contains("links:"), "after {sabotage}: {html}");
+        }
+    }
+
+    #[test]
+    fn a_footer_over_an_unopenable_index_says_so() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        replace_database_with_a_directory(vault.path());
+        click(&mut dom, clicks[RAIL_DAY_23]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("links:"), "{html}");
+    }
+
     // -- harness -------------------------------------------------------------
 
     /// An index built over the vault, then vandalised through a second
@@ -1682,13 +2353,14 @@ mod tests {
         root: Option<PathBuf>,
         closer: Option<Closer>,
     ) -> (VirtualDom, Mutations) {
-        mounted_app_with_probe(root, closer, None)
+        mounted_app_with_probe(root, closer, None, None)
     }
 
     fn mounted_app_with_probe(
         root: Option<PathBuf>,
         closer: Option<Closer>,
         probe: Option<CaretProbe>,
+        writer: Option<CaretWriter>,
     ) -> (VirtualDom, Mutations) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
@@ -1701,6 +2373,9 @@ mod tests {
         }
         if let Some(probe) = probe {
             dom.insert_any_root_context(Box::new(probe));
+        }
+        if let Some(writer) = writer {
+            dom.insert_any_root_context(Box::new(writer));
         }
         let mutations = dom.rebuild_to_vec();
         (dom, mutations)
@@ -1715,15 +2390,41 @@ mod tests {
         Vec<ElementId>,
         Arc<std::sync::Mutex<Option<usize>>>,
     ) {
+        let (dom, clicks, caret, _) = probe_and_writer_app(root);
+        (dom, clicks, caret)
+    }
+
+    /// The link picker's harness: a scripted probe feeding it an anchor and
+    /// a recording caret writer, so both halves of the round trip are
+    /// observable.
+    #[allow(clippy::type_complexity)]
+    fn probe_and_writer_app(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        Arc<std::sync::Mutex<Option<usize>>>,
+        Arc<std::sync::Mutex<Vec<usize>>>,
+    ) {
         let caret = Arc::new(std::sync::Mutex::new(None::<usize>));
         let feed = caret.clone();
         let probe = CaretProbe(Arc::new(move || {
             let units = *feed.lock().expect("the probe cell never poisons");
             Box::pin(async move { units })
         }));
-        let (dom, mutations) = mounted_app_with_probe(root, None, Some(probe));
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = written.clone();
+        let writer = CaretWriter(Arc::new(move |units| {
+            recorder
+                .lock()
+                .expect("the writer cell never poisons")
+                .push(units);
+            Box::pin(async {})
+        }));
+        let (dom, mutations) =
+            mounted_app_with_probe(root, None, Some(probe), Some(writer));
         let clicks = listeners(&mutations, "click");
-        (dom, clicks, caret)
+        (dom, clicks, caret, written)
     }
 
     /// Fires a keydown. The physical code is irrelevant to every handler,
@@ -1734,6 +2435,17 @@ mod tests {
         key: Key,
         modifiers: Modifiers,
     ) {
+        press_for_mutations(dom, target, key, modifiers);
+    }
+
+    /// Like `press`, but hands back the mutations it caused — how the
+    /// listeners a keystroke mounts (the link picker's input) are harvested.
+    fn press_for_mutations(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Mutations {
         with_reactor(|| {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedKeyboardData::new(
@@ -1751,8 +2463,8 @@ mod tests {
                 target,
             );
             dom.process_events();
-            dom.render_immediate_to_vec();
-        });
+            dom.render_immediate_to_vec()
+        })
     }
 
     /// Drives the autosave through its restart, its `QUIET` sleep and the
@@ -1854,6 +2566,70 @@ mod tests {
         });
     }
 
+    /// The picker's rows, in order — the assertions want the list itself,
+    /// not a substring of a page that also holds the rail.
+    fn picker_ids(dom: &VirtualDom) -> Vec<String> {
+        dioxus_ssr::render(dom)
+            .split(r#"<span class="picker-id">"#)
+            .skip(1)
+            .filter_map(|rest| rest.split('<').next().map(str::to_string))
+            .collect()
+    }
+
+    /// The active textarea's text, unescaped — the rendered page HTML-escapes
+    /// the quotes an `#l(..)` call is made of.
+    fn source_of(dom: &VirtualDom) -> String {
+        dioxus_ssr::render(dom)
+            .split(r#"initial_value=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default()
+            .replace("&#34;", "\"")
+    }
+
+    /// The link chord, spelled once.
+    fn ctrl_l() -> Key {
+        Key::Character("l".into())
+    }
+
+    /// Opens the picker with Ctrl+L and returns its input's (input, keydown)
+    /// targets. The probe cell must already hold the anchor. The mount
+    /// event is delivered too — the query field asks for focus the way the
+    /// active textarea does, and a headless refusal is what it must absorb.
+    fn open_picker(
+        dom: &mut VirtualDom,
+        keys: ElementId,
+    ) -> (ElementId, ElementId) {
+        let mutations =
+            press_for_mutations(dom, keys, ctrl_l(), Modifiers::CONTROL);
+        let inputs = listeners(&mutations, "input");
+        let keydowns = listeners(&mutations, "keydown");
+        mount(dom, listeners(&mutations, "mounted")[0]);
+        (inputs[0], keydowns[0])
+    }
+
+    /// The logs pane's own targets, for the tests that press a key with no
+    /// block active.
+    fn pane_targets(
+        dom: &mut VirtualDom,
+        clicks: &[ElementId],
+    ) -> (ElementId, ElementId, ElementId) {
+        // a click on a rail row re-renders without mounting a textarea, so
+        // the pane keydown target is still the one from the initial mount
+        let mutations = click_for_mutations(dom, clicks[RAIL_DAY_23]);
+        let keys = listeners(&mutations, "keydown");
+        let target = *keys.last().unwrap_or(&clicks[0]);
+        (clicks[0], target, target)
+    }
+
+    /// Makes `Index::open` fail for every later read: the database path
+    /// becomes a directory, which SQLite cannot open.
+    fn replace_database_with_a_directory(vault: &Path) {
+        let db = vault.join(".index/index.db");
+        std::fs::remove_file(&db).expect("the database is removed");
+        std::fs::create_dir(&db).expect("a directory takes its place");
+    }
+
     /// Activates a block and returns the textarea's (input, keydown)
     /// targets from the mount mutations.
     fn activate_block(
@@ -1927,8 +2703,16 @@ mod tests {
                 "time/2026-07-21.typ",
                 format!("{}#let x = (\n", time_note("2026-07-21", "daily")),
             ),
-            ("time/2026-07-22.typ", time_note("2026-07-22", "daily")),
-            ("time/2026-07-23.typ", time_note("2026-07-23", "daily")),
+            // the two link directions the footer shows, both resolving so
+            // the vault still opens with zero loops
+            (
+                "time/2026-07-22.typ",
+                linking(time_note("2026-07-22", "daily"), "2026-07-23"),
+            ),
+            (
+                "time/2026-07-23.typ",
+                linking(time_note("2026-07-23", "daily"), "2026-07-22"),
+            ),
             ("time/2026-w30.typ", time_note("2026-w30", "weekly")),
             ("time/2026-summer.typ", time_note("2026-summer", "seasonal")),
             (
@@ -1979,6 +2763,12 @@ mod tests {
              created: \"2026-07-01\")\n\
              \n= {id}\n"
         )
+    }
+
+    /// Adds a link to the note's heading block — no blank line, so the block
+    /// count the editor tests count on is unchanged.
+    fn linking(note: String, target: &str) -> String {
+        format!("{note}#l(\"{target}\")\n")
     }
 
     fn note(id: &str) -> String {

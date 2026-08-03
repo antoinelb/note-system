@@ -216,6 +216,90 @@ body {
 }
 
 /* the day gathers what happened in it */
+/* -- links: the Ctrl+L picker and the both-directions footer -------------- */
+
+.link-picker {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  padding: 8px;
+}
+
+.picker-query {
+  width: 100%;
+  box-sizing: border-box;
+  font: 16px Lato, sans-serif;
+  color: var(--ink-bright);
+  background: transparent;
+  border: none;
+  outline: none;
+  caret-color: var(--ember);
+  padding: 0 0 8px 0;
+}
+
+.picker-query::placeholder {
+  color: var(--ink-faint);
+}
+
+.picker-row {
+  font: 16px Lato, sans-serif;
+  color: var(--ink-muted);
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+/* the rail's selection grammar: bold bright ink, no box, no fill */
+.picker-row.selected {
+  color: var(--ink-bright);
+  font-weight: 700;
+}
+
+.picker-title {
+  padding-left: 8px;
+  font-size: 14px;
+  color: var(--ink-faint);
+}
+
+.picker-empty {
+  font: 16px Lato, sans-serif;
+  color: var(--ink-faint);
+  padding: 4px 0;
+}
+
+/* the captured block's idiom: the footer belongs to the note the same way */
+.links-footer {
+  margin-top: 16px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 8px;
+}
+
+.links-row {
+  font: 16px Lato, sans-serif;
+  color: var(--ink-muted);
+  padding: 2px 0;
+}
+
+.links-arrow {
+  padding-right: 8px;
+  color: var(--ink-faint);
+}
+
+.link-entry {
+  padding-right: 12px;
+}
+
+.link-jump {
+  cursor: pointer;
+}
+
+.link-jump:hover {
+  color: var(--ink-bright);
+}
+
+/* the one warm hue doubles as the alert hue: a link with no note */
+.link-dangling {
+  color: var(--ember);
+}
+
 .captured {
   margin-top: 24px;
   border-top: 1px solid var(--hairline);

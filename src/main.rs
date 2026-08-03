@@ -28,5 +28,18 @@ fn main() {
                 .map(|units| units as usize)
             })
         })))
+        // and back the other way: after an accepted completion the caret
+        // belongs past the link it wrote
+        // (adr/2026-08-ctrl-l-link-picker.md)
+        .with_context(ui::CaretWriter(std::sync::Arc::new(|units| {
+            Box::pin(async move {
+                let _ = dioxus::document::eval(&format!(
+                    "const el = document.activeElement; \
+                     if (el && el.tagName === 'TEXTAREA') \
+                         el.setSelectionRange({units}, {units});"
+                ))
+                .await;
+            })
+        })))
         .launch(ui::App)
 }
