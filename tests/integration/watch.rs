@@ -95,11 +95,11 @@ fn rewriting_a_note_drops_the_rows_of_its_previous_contents() {
         index.notes_by_tag("method").expect("by tag"),
         Vec::<PathBuf>::new()
     );
-    assert_eq!(
+    assert!(
         index
             .backlinks(&NoteId("elsewhere".into()))
-            .expect("backlinks"),
-        Vec::<PathBuf>::new()
+            .expect("backlinks")
+            .is_empty()
     );
     assert_eq!(
         index.notes_by_type(&NoteType::Claim).expect("by type"),

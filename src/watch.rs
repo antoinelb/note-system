@@ -185,6 +185,7 @@ fn touch(
         path: path.to_path_buf(),
         category,
         meta: parsed_note.meta,
+        title: parsed_note.title,
         links: parsed_note.links,
     };
     index.update_note(&note)

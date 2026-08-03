@@ -7,7 +7,7 @@ use note_system::domain::{
     Link, Meta, MetaAnomaly, MetaStatus, Note, NoteCategory, NoteId, NoteType,
 };
 use note_system::index::{
-    DanglingLink, Index, IndexError, SCHEMA_VERSION, scan_vault,
+    Backlink, DanglingLink, Index, IndexError, SCHEMA_VERSION, scan_vault,
 };
 use note_system::time;
 
@@ -332,7 +332,7 @@ fn notes_by_tag_matches_exactly() {
 fn backlinks_resolve_target_ids_to_distinct_source_paths() {
     let (_dir, index) = fixture_index();
     assert_eq!(
-        index.backlinks(&id("zettelkasten")).expect("query"),
+        backlink_paths(index.backlinks(&id("zettelkasten")).expect("query")),
         paths(&[
             "permanent/atomic-notes.typ",
             "permanent/link-traps.typ",
@@ -342,13 +342,82 @@ fn backlinks_resolve_target_ids_to_distinct_source_paths() {
         ])
     );
     assert_eq!(
-        index.backlinks(&id("luhmann")).expect("query"),
+        backlink_paths(index.backlinks(&id("luhmann")).expect("query")),
         paths(&["permanent/smart-notes.typ", "permanent/zettelkasten.typ"])
     );
     assert_eq!(
-        index.backlinks(&id("no-such-id")).expect("query"),
+        backlink_paths(index.backlinks(&id("no-such-id")).expect("query")),
         no_paths()
     );
+}
+
+#[test]
+fn backlinks_carry_the_source_id_the_footer_labels_them_with() {
+    let (_dir, mut index) = temp_index();
+    let mut anonymous = note(
+        "permanent/anonyme.typ",
+        NoteCategory::Permanent,
+        None,
+        Some(NoteType::Idea),
+        &[],
+        &["target"],
+    );
+    anonymous.meta = MetaStatus::Missing;
+    let notes = vec![
+        anonymous,
+        note(
+            "permanent/named.typ",
+            NoteCategory::Permanent,
+            Some("named"),
+            Some(NoteType::Idea),
+            &[],
+            &["target"],
+        ),
+    ];
+    index.rebuild(&notes).expect("rebuild");
+    assert_eq!(
+        index.backlinks(&id("target")).expect("query"),
+        vec![
+            Backlink {
+                source: PathBuf::from("permanent/anonyme.typ"),
+                id: None,
+            },
+            Backlink {
+                source: PathBuf::from("permanent/named.typ"),
+                id: Some("named".to_string()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn completions_offer_every_linkable_note_with_its_title() {
+    let (_dir, index) = fixture_index();
+    let all = index.completions().expect("query");
+
+    assert!(
+        all.contains(&(
+            "atomic-notes".to_string(),
+            Some("Atomic notes recombine better".to_string())
+        )),
+        "{all:?}"
+    );
+    // a capture's only heading is `== Summary`: no title, still linkable
+    assert!(
+        all.contains(&("capture-articles-zettel".to_string(), None)),
+        "{all:?}"
+    );
+    // missing-meta.typ has a title but no id — it cannot be a link target
+    assert!(
+        !all.iter().any(|(_, title)| title.as_deref()
+            == Some("Note without meta")),
+        "{all:?}"
+    );
+
+    let ids: Vec<&str> = all.iter().map(|(id, _)| id.as_str()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted, "the picker gets a deterministic order");
 }
 
 #[test]
@@ -374,7 +443,7 @@ fn repeated_links_from_one_note_yield_one_backlink_row() {
     ];
     index.rebuild(&notes).expect("rebuild");
     assert_eq!(
-        index.backlinks(&id("target")).expect("query"),
+        backlink_paths(index.backlinks(&id("target")).expect("query")),
         paths(&["permanent/insistant.typ"])
     );
 }
@@ -416,7 +485,7 @@ fn duplicate_ids_are_stored_not_rejected() {
     // a link to a duplicated id resolves — it is debt, not a dangling link
     assert_eq!(index.dangling_links().expect("query"), no_dangling());
     assert_eq!(
-        index.backlinks(&id("twin")).expect("query"),
+        backlink_paths(index.backlinks(&id("twin")).expect("query")),
         paths(&["permanent/c.typ"])
     );
     // a duplicated id still resolves to one deterministic path
@@ -737,7 +806,7 @@ fn snapshot(index: &Index) -> Vec<Vec<PathBuf>> {
             .expect("by category"),
         index.notes_by_type(&NoteType::Daily).expect("by type"),
         index.notes_by_tag("method").expect("by tag"),
-        index.backlinks(&id("zettelkasten")).expect("backlinks"),
+        backlink_paths(index.backlinks(&id("zettelkasten")).expect("backlinks")),
         index.typeless_notes().expect("typeless"),
         index
             .dangling_links()
@@ -767,6 +836,7 @@ fn note(
             origin: None,
             anomalies: vec![],
         }),
+        title: None,
         links: links
             .iter()
             .map(|t| Link {
@@ -794,6 +864,7 @@ fn anomalous_note() -> Note {
                 ),
             ],
         }),
+        title: None,
         links: vec![],
     }
 }
@@ -816,6 +887,12 @@ fn anomaly_rows(
 
 fn paths(relative: &[&str]) -> Vec<PathBuf> {
     relative.iter().map(PathBuf::from).collect()
+}
+
+/// The source paths of a backlink query, for the assertions that care about
+/// *which notes link here* rather than how the footer will label them.
+fn backlink_paths(rows: Vec<Backlink>) -> Vec<PathBuf> {
+    rows.into_iter().map(|row| row.source).collect()
 }
 
 // `vec![]` alone cannot infer its element type through assert_eq!

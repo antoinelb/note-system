@@ -6,13 +6,20 @@ const MAX_NODES: usize = 100_000;
 
 pub struct ParsedNote {
     pub meta: MetaStatus,
+    /// The note's first level-1 heading, the human name the link picker
+    /// searches beside the id (adr/2026-08-titles-in-index.md). Content, not
+    /// metadata — a note may have none.
+    pub title: Option<String>,
     pub links: Vec<Link>,
 }
 
 pub fn parse_note(source: &str) -> ParsedNote {
     let root = typst_syntax::parse(source);
     let mut meta = MetaStatus::Missing;
+    let mut title = None;
     let mut links = Vec::new();
+    // children are pushed reversed, so popping walks the tree in document
+    // order — what "the first heading wins" means
     let mut stack = vec![&root];
 
     for _ in 0..MAX_NODES {
@@ -35,10 +42,26 @@ pub fn parse_note(source: &str) -> ParsedNote {
                 _ => {}
             }
         }
+        if title.is_none()
+            && let Some(heading) = node.cast::<ast::Heading>()
+        {
+            title = extract_title(heading);
+        }
         stack.extend(node.children().rev());
     }
 
-    ParsedNote { meta, links }
+    ParsedNote { meta, title, links }
+}
+
+/// A level-1 heading's text; deeper headings are sections inside a note, not
+/// its name, and a heading with nothing but whitespace names nothing.
+fn extract_title(heading: ast::Heading) -> Option<String> {
+    if heading.depth().get() != 1 {
+        return None;
+    }
+    let text = heading.body().to_untyped().full_text();
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn extract_meta(call: ast::FuncCall) -> Meta {
@@ -339,6 +362,41 @@ mod tests {
             stack.extend(node.children().rev());
         }
         panic!("no named argument found in the probe source");
+    }
+
+    #[test]
+    fn the_first_level_one_heading_is_the_title() {
+        let parsed = parse_note("= Atomic notes\n\nprose\n\n= Second\n");
+        assert_eq!(parsed.title, Some("Atomic notes".to_string()));
+    }
+
+    #[test]
+    fn deeper_headings_are_sections_not_titles() {
+        let parsed = parse_note("== A section\n\n=== Another\n");
+        assert_eq!(parsed.title, None);
+        // a section above the title does not shadow it
+        let parsed = parse_note("== A section\n\n= The title\n");
+        assert_eq!(parsed.title, Some("The title".to_string()));
+    }
+
+    #[test]
+    fn a_note_without_a_heading_has_no_title() {
+        assert_eq!(parse_note("").title, None);
+        assert_eq!(parse_note("just prose\n").title, None);
+    }
+
+    #[test]
+    fn a_blank_heading_names_nothing() {
+        assert_eq!(parse_note("=\n").title, None);
+        assert_eq!(parse_note("=   \n").title, None);
+    }
+
+    #[test]
+    fn a_title_keeps_the_markup_it_contains_verbatim() {
+        // the title is a label, not rendered content: what the picker
+        // searches is the source text as written
+        let parsed = parse_note(r#"= Notes on #emph[flow]"#);
+        assert_eq!(parsed.title, Some("Notes on #emph[flow]".to_string()));
     }
 
     fn present(parsed: ParsedNote) -> Meta {

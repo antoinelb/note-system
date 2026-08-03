@@ -9,7 +9,7 @@ use crate::domain::{
 use crate::parse;
 use rusqlite::{Connection, Row, Transaction};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 const FOREIGN_KEYS: &str = "PRAGMA foreign_keys = on;";
 const SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -18,7 +18,8 @@ CREATE TABLE notes (
     id       TEXT,
     type     TEXT,
     created  TEXT,
-    origin   TEXT
+    origin   TEXT,
+    title    TEXT
 );
 CREATE TABLE links (
     source_path TEXT NOT NULL REFERENCES notes(path) ON DELETE CASCADE,
@@ -58,6 +59,15 @@ impl From<rusqlite::Error> for IndexError {
 pub struct DanglingLink {
     pub source: PathBuf,
     pub target: NoteId,
+}
+
+/// A note linking *to* the one being read. The source's own id is carried
+/// along because the footer labels backlinks by id, and an id-less source
+/// (visible debt, still a real link) has to fall back to its filename.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Backlink {
+    pub source: PathBuf,
+    pub id: Option<String>,
 }
 
 pub struct Index {
@@ -141,16 +151,43 @@ impl Index {
     pub fn backlinks(
         &self,
         target: &NoteId,
-    ) -> Result<Vec<PathBuf>, IndexError> {
-        query_paths(
+    ) -> Result<Vec<Backlink>, IndexError> {
+        query_rows(
             &self.connection,
             concat!(
-                "SELECT distinct source_path ",
+                "SELECT DISTINCT notes.path, notes.id ",
                 "FROM links ",
-                "WHERE target_id = ?1 ",
-                "ORDER BY source_path"
+                "JOIN notes ON notes.path = links.source_path ",
+                "WHERE links.target_id = ?1 ",
+                "ORDER BY notes.path"
             ),
             [target.0.as_str()],
+            |row| {
+                Ok(Backlink {
+                    source: PathBuf::from(row.get::<_, String>(0)?),
+                    id: row.get::<_, Option<String>>(1)?,
+                })
+            },
+        )
+    }
+
+    /// Every note the link picker can offer, as (id, title). An id-less note
+    /// cannot be a link target, so it is not a completion — it is open-loops
+    /// debt instead. Duplicate ids are not deduplicated: a collision is an
+    /// error to see, not to hide (adr/2026-07-id-collision-is-an-error.md).
+    pub fn completions(
+        &self,
+    ) -> Result<Vec<(String, Option<String>)>, IndexError> {
+        query_rows(
+            &self.connection,
+            "SELECT id, title FROM notes WHERE id IS NOT NULL ORDER BY id",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
     }
 
@@ -320,6 +357,7 @@ pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
                     path: Path::new(category.as_dir()).join(&name),
                     category,
                     meta: parsed_note.meta,
+                    title: parsed_note.title,
                     links: parsed_note.links,
                 })
             }
@@ -391,8 +429,9 @@ fn insert_note(
     };
     transaction.execute(
         concat!(
-            "INSERT INTO notes (path, category, id, type, created, origin)",
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            "INSERT INTO notes ",
+            "(path, category, id, type, created, origin, title)",
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
         ),
         rusqlite::params![
             note.path.to_string_lossy(),
@@ -401,6 +440,7 @@ fn insert_note(
             meta.note_type.as_ref().map(NoteType::as_name),
             meta.created,
             meta.origin.as_deref(),
+            note.title.as_deref(),
         ],
     )?;
     for tag in &meta.tags {
@@ -697,6 +737,46 @@ mod tests {
     }
 
     #[test]
+    fn completions_report_rows_that_will_not_decode() {
+        // one blob per column read, so each `?` in the closure fires
+        for plant in [
+            "INSERT INTO notes (path, category, id, title)
+             VALUES ('permanent/blob-id.typ', 'permanent', x'00', 'ok');",
+            "INSERT INTO notes (path, category, id, title)
+             VALUES ('permanent/blob-title.typ', 'permanent', 'ok', x'00');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(index.completions(), Err(IndexError::Sqlite(_))));
+        }
+    }
+
+    #[test]
+    fn backlinks_report_rows_that_will_not_decode() {
+        for plant in [
+            "INSERT INTO notes (path, category, id)
+             VALUES (x'00', 'permanent', 'source');
+             INSERT INTO links (source_path, target_id)
+             VALUES (x'00', 'target');",
+            "INSERT INTO notes (path, category, id)
+             VALUES ('permanent/blob-id.typ', 'permanent', x'00');
+             INSERT INTO links (source_path, target_id)
+             VALUES ('permanent/blob-id.typ', 'target');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(
+                index.backlinks(&NoteId("target".to_string())),
+                Err(IndexError::Sqlite(_))
+            ));
+        }
+    }
+
+    #[test]
     fn captured_on_gathers_captures_and_generated_by_creation_date() {
         let (dir, mut index) = temp_index();
         let notes = scan_vault(&fixture_vault()).expect("scan fixture");
@@ -971,7 +1051,7 @@ mod tests {
             index
                 .backlinks(&NoteId("elsewhere".to_string()))
                 .expect("backlinks"),
-            Vec::<PathBuf>::new()
+            Vec::<Backlink>::new()
         );
         assert_eq!(
             index
@@ -1130,6 +1210,7 @@ mod tests {
                     ),
                 ],
             }),
+            title: Some("A rich note".to_string()),
             links: vec![Link {
                 target: NoteId("elsewhere".to_string()),
             }],

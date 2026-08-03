@@ -120,6 +120,9 @@ pub struct Note {
     pub path: std::path::PathBuf, // vault-relative
     pub category: NoteCategory,
     pub meta: MetaStatus,
+    /// Content-derived, not a `#meta` field: the first level-1 heading
+    /// (adr/2026-08-titles-in-index.md).
+    pub title: Option<String>,
     pub links: Vec<Link>,
 }
 
