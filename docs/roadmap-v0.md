@@ -5,7 +5,7 @@ The plan carries the *what* and *why*; this file carries the *order* and the *st
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr/2026-07-two-screens-table-and-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
-**Next step → Phase 9, first unchecked box.**
+**Next step → Phase 10, first unchecked box.**
 
 ## How we work
 
@@ -162,10 +162,12 @@ The phase-5 split view itself is not the fallback — it dies in phase 7, becaus
 
 Goal: links are cheap to write and visible in both directions.
 
-- [ ] `#l` insertion: hotkey + autocomplete over note ids/titles from the index.
-- [ ] Backlinks panel on the open note.
-- [ ] Dangling links visibly marked (in the panel at minimum).
-- [ ] Tests: autocomplete filtering, backlink query wiring.
+- [x] `#l` insertion: hotkey + autocomplete over note ids/titles from the index.
+  - [x] Titles are the note's first `=` heading, parsed with `typst-syntax` and stored in a new `notes.title` column (schema v2, no migration — the index is disposable). **→ ADR** (`adr/2026-08-titles-in-index.md`)
+  - [x] Ctrl+L on the logs pane, over an active block only; the anchor is probed once and cannot go stale behind the popup, which owns its own query field. Accepting splices through `Editor::insert` and remounts the textarea, then a new `CaretWriter` puts the caret past the link. **→ ADR** (`adr/2026-08-ctrl-l-link-picker.md`)
+- [x] Backlinks panel on the open note: a both-directions footer (`←` from the index, `→` parsed from the live buffer so it is fresh under edits), clickable only for time notes — the rest wait for v1's table. **→ ADR** (`adr/2026-08-links-footer-both-directions.md`)
+- [x] Dangling links visibly marked — `--ember`, in the footer's `→` row, appearing as the link is typed.
+- [x] Tests: autocomplete filtering, backlink query wiring.
 
 Exit: you never type a full `#l("...")` by hand.
 
@@ -189,6 +191,6 @@ Exit: v0 checklist below is fully green.
 - [ ] The design language: palette and type scale as theme variables, dark **and** light, the one-line chrome (phase 6)
 - [ ] The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid (phase 7)
 - [ ] Hybrid block editor with live rendering — or the source ⇄ rendered toggle via the declared fallback (phases 5, 8)
-- [ ] Link index, backlinks panel, dangling-link detection (phases 3, 9)
+- [x] Link index, backlinks panel, dangling-link detection (phases 3, 9)
 - [ ] Capture notes + open-loops ember and list (phase 10)
 - [ ] `make test` green with 100% coverage; every note compiles with vanilla typst
