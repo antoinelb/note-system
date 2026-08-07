@@ -8,6 +8,7 @@ pub mod index;
 pub mod links;
 pub mod logs;
 pub mod loops;
+pub mod palette;
 pub mod parse;
 pub mod render;
 pub mod template;

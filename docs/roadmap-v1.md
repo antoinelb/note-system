@@ -24,11 +24,11 @@ Goal: every command reachable by name — Ctrl+P summons a fuzzy-searched list o
 
 Spec: the deck never drew a palette — designed here in the phase-6-v0 vocabulary, like the loops list was, on the link-picker overlay pattern (the design has no buttons).
 
-- [ ] Ctrl+P opens the palette; typing filters; Enter runs; Escape closes and restores focus — the link-picker interaction grammar.
-- [ ] The command set at birth: the chords the app already answers (theme toggle, capture, loops list, link picker, time movement…), each under a plain English name; the exact list and labels. **→ ADR**
-- [ ] The palette stays complete by construction: every later phase that adds a keystroke adds its palette entry in the same change — a line item in each phase's work, not an audit at the end.
-- [ ] The overlay's shape and metrics (undrawn in the deck). **→ ADR**
-- [ ] Tests: filter narrows to the match, Enter dispatches the command, Escape restores focus, the registered set matches the app's chords.
+- [x] Ctrl+P opens the palette; typing filters; Enter runs; Escape closes and restores focus — the link-picker interaction grammar.
+- [x] The command set at birth: the chords the app already answers (theme toggle, capture, loops list, link picker, time movement…), each under a plain English name; the exact list and labels. **→ ADR** (`adr/2026-08-palette-birth-command-list.md`)
+- [x] The palette stays complete by construction: every later phase that adds a keystroke adds its palette entry in the same change — a line item in each phase's work, not an audit at the end.
+- [x] The overlay's shape and metrics (undrawn in the deck). **→ ADR** (`adr/2026-08-command-palette-overlay-shape.md`)
+- [x] Tests: filter narrows to the match, Enter dispatches the command, Escape restores focus, the registered set matches the app's chords.
 
 Exit: every chord the app answers is also reachable by name through Ctrl+P.
 
@@ -143,7 +143,7 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 
 ## v1 exit criteria (from `plan.md` and `adr/2026-07-permanent-notes-wait-for-table.md`)
 
-- [ ] Command palette: every command reachable by name via Ctrl+P (phase 0)
+- [x] Command palette: every command reachable by name via Ctrl+P (phase 0)
 - [ ] Canvas with persistent positions that survive index rebuilds (phases 1–2)
 - [ ] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
 - [ ] Tethered writing sheet on card click, dimmed table behind it (phase 3)

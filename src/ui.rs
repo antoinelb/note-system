@@ -18,6 +18,7 @@ use crate::index::{Index, IndexError};
 use crate::links;
 use crate::logs::{self, Selection};
 use crate::loops;
+use crate::palette;
 use crate::render::{FragmentCache, RenderTheme};
 use crate::time;
 use crate::watch;
@@ -109,6 +110,15 @@ struct QuitFlush(Rc<RefCell<Option<Callback<(), bool>>>>);
 #[derive(Clone, Copy, Debug)]
 pub struct Today(pub Date);
 
+/// The app-global commands as callbacks, provided by `App` so the Shell's
+/// palette runs them through the very code paths the root chords use
+/// (adr/2026-08-palette-birth-command-list.md).
+#[derive(Clone, Copy)]
+struct RootCommands {
+    toggle_theme: Callback<()>,
+    quit: Callback<()>,
+}
+
 #[component]
 pub fn App() -> Element {
     let vault = use_context::<VaultRoot>();
@@ -120,6 +130,19 @@ pub fn App() -> Element {
     let quit_flush = use_context_provider(QuitFlush::default);
     // absent in the headless tests, where there is no window to close
     let closer = try_consume_context::<Closer>();
+    let toggle_theme = use_callback(move |()| light.set(!light()));
+    let quit = use_callback(move |()| {
+        // flush before close, so a quit inside the autosave's quiet window
+        // cannot drop the last keystrokes; a save that fails cancels the
+        // quit and surfaces its error
+        // (adr/2026-07-ctrl-q-flushes-then-closes.md)
+        let flush = *quit_flush.0.borrow();
+        let saved = flush.is_none_or(|flush| flush.call(()));
+        if saved && let Some(closer) = &closer {
+            (closer.0)();
+        }
+    });
+    use_context_provider(|| RootCommands { toggle_theme, quit });
     rsx! {
         document::Stylesheet { href: asset!("/assets/theme.css") }
         div {
@@ -136,19 +159,11 @@ pub fn App() -> Element {
                 if event.modifiers().ctrl()
                     && event.key() == Key::Character("t".to_string())
                 {
-                    light.set(!light());
+                    toggle_theme.call(());
                 } else if event.modifiers().ctrl()
                     && event.key() == Key::Character("q".to_string())
                 {
-                    // flush before close, so a quit inside the autosave's
-                    // quiet window cannot drop the last keystrokes; a save
-                    // that fails cancels the quit and surfaces its error
-                    // (adr/2026-07-ctrl-q-flushes-then-closes.md)
-                    let flush = *quit_flush.0.borrow();
-                    let saved = flush.is_none_or(|flush| flush.call(()));
-                    if saved && let Some(closer) = &closer {
-                        (closer.0)();
-                    }
+                    quit.call(());
                 }
             },
             {
@@ -198,6 +213,8 @@ fn Shell(
     let writer = try_consume_context::<CaretWriter>();
     let clipboard = try_consume_context::<Clipboard>();
     let now = try_consume_context::<Now>();
+    // always provided by App above; the palette dispatches through it
+    let root_commands = use_context::<RootCommands>();
 
     // the link picker: open with its anchor frozen at the caret Ctrl+L
     // probed, because the textarea loses focus behind it and its text can no
@@ -208,6 +225,14 @@ fn Shell(
     let mut picker = use_signal(|| None::<Picker>);
     let mut query = use_signal(String::new);
     let mut highlighted = use_signal(|| 0usize);
+
+    // the command palette, the same split for the same reason: the frozen
+    // half (what was true when Ctrl+P landed) in one signal, the moving
+    // query and highlight in their own
+    // (adr/2026-08-command-palette-overlay-shape.md)
+    let mut palette = use_signal(|| None::<Palette>);
+    let mut palette_query = use_signal(String::new);
+    let mut palette_highlighted = use_signal(|| 0usize);
     // the uncontrolled textarea only shows a spliced-in link if it remounts,
     // and it remounts when its key changes — keystrokes never touch this
     let mut epoch = use_signal(|| 0u32);
@@ -288,6 +313,16 @@ fn Shell(
         }
     });
 
+    // the small movements, lifted so chord, button, wheel and palette all
+    // run one path (adr/2026-08-palette-birth-command-list.md)
+    let page = use_callback(move |forward: bool| {
+        month.set(logs::page_month(month(), forward));
+    });
+    let toggle_loops = use_callback(move |()| loops_open.set(!loops_open()));
+    let go_today = use_callback(move |()| {
+        select.call((NoteType::Daily, time::day_id(today)))
+    });
+
     // Where the logs pane is, so focus can be put back on it. A keydown
     // only bubbles up from whatever has focus, and the window's chords
     // (Ctrl+Q, Ctrl+T) are handled on the app root — so when the active
@@ -299,12 +334,17 @@ fn Shell(
     use_effect({
         let pane = pane.clone();
         move || {
-            // both are read every time, so the effect follows both
+            // all three are read every time, so the effect follows them
+            // all. While the palette is up the pane must not take focus —
+            // the palette's input just asked for it in its own mount; when
+            // it closes, this re-runs and the pane gets it back
             let editing = editor.read().active().is_some();
             let listing = loops_open();
+            let summoned = palette.read().is_some();
             let handle = pane.borrow().clone();
             if let Some(handle) = handle
                 && (!editing || listing)
+                && !summoned
             {
                 // a headless refusal has no one to tell; the caret simply
                 // stays where it was
@@ -312,6 +352,28 @@ fn Shell(
                     let _ = handle.set_focus(true).await;
                 });
             }
+        }
+    });
+
+    // the follow's landing half, from a caret already in hand — the palette
+    // runs this against the offset it froze at open, where a live probe
+    // would answer `null` because its own input took the focus
+    let follow_at = use_callback(move |units: usize| {
+        let target = {
+            let editor = editor.peek();
+            editor.active_source().and_then(|slice| {
+                links::link_at(
+                    slice,
+                    blocks::byte_offset_of_utf16(slice, units),
+                )
+            })
+        };
+        // only time notes have somewhere to open; the rest wait for
+        // v1's table (adr/2026-07-permanent-notes-wait-for-table.md)
+        if let Some(target) = target
+            && let Some(scale) = links::scale_of(&target, &notes.peek())
+        {
+            select.call((scale, target));
         }
     });
 
@@ -323,28 +385,12 @@ fn Shell(
         move |()| {
             let Some(probe) = probe.clone() else { return };
             spawn(async move {
+                // the probe answers `null` unless a textarea has focus, so
+                // a note with no active block stops here
                 let Some(units) = (probe.0)().await else {
                     return;
                 };
-                // the probe answers `null` unless a textarea has focus, so
-                // a note with no active block stops here
-                let target = {
-                    let editor = editor.peek();
-                    editor.active_source().and_then(|slice| {
-                        links::link_at(
-                            slice,
-                            blocks::byte_offset_of_utf16(slice, units),
-                        )
-                    })
-                };
-                // only time notes have somewhere to open; the rest wait for
-                // v1's table (adr/2026-07-permanent-notes-wait-for-table.md)
-                if let Some(target) = target
-                    && let Some(scale) =
-                        links::scale_of(&target, &notes.peek())
-                {
-                    select.call((scale, target));
-                }
+                follow_at.call(units);
             });
         }
     });
@@ -361,6 +407,118 @@ fn Shell(
             epoch += 1;
         }
     });
+
+    // the capture chord's working half, lifted so the palette runs the same
+    // body; the chord's own guard (no active block) stays in its match arm,
+    // because it exists to keep one keystroke from being both paste and
+    // capture — which a palette run cannot be
+    let capture_clipboard = use_callback({
+        let root = root.clone();
+        let clipboard = clipboard.clone();
+        let now = now.clone();
+        move |()| {
+            let Some(clipboard) = clipboard.clone() else {
+                return;
+            };
+            let Some(now) = now.clone() else { return };
+            let root = root.clone();
+            spawn(async move {
+                let Some(pasted) = (clipboard.0)().await else {
+                    return;
+                };
+                // one clock read stamps both halves, so a capture cannot
+                // be filed on a day its id disagrees with
+                let stamp = (now.0)();
+                let notice = match crate::template::create_capture(
+                    &root,
+                    &crate::capture::capture_id(&stamp),
+                    &stamp.date().to_string(),
+                    &pasted,
+                ) {
+                    Ok(path) => {
+                        format!("captured {}", crate::domain::stem_of(&path))
+                    }
+                    Err(err) => format!("capture: {err:?}"),
+                };
+                editor.write().set_notice(notice);
+            });
+        }
+    });
+
+    // the picker's opening half, from an anchor already in hand — Ctrl+L
+    // probes and then lands here; the palette lands here with the caret it
+    // froze at open (adr/2026-08-command-palette-overlay-shape.md)
+    let open_picker_at = use_callback({
+        let root = root.clone();
+        move |anchor: usize| match completions(&root) {
+            Ok(entries) => {
+                query.set(String::new());
+                highlighted.set(0);
+                picker.set(Some(Picker { anchor, entries }));
+            }
+            Err(msg) => editor.write().set_notice(msg),
+        }
+    });
+
+    // closing the palette puts the focus back itself, because nothing else
+    // will: with no block active the effect above re-takes the pane, and
+    // with one active a remount with the frozen caret pending re-takes the
+    // textarea — the accepted completion's machinery
+    // (adr/2026-08-command-palette-overlay-shape.md)
+    let close_palette = use_callback({
+        let pending_caret = pending_caret.clone();
+        move |restore: bool| {
+            let caret = (*palette.peek()).and_then(|open| open.caret);
+            palette.set(None);
+            if restore && editor.peek().active().is_some() {
+                pending_caret.set(caret);
+                epoch += 1;
+            }
+        }
+    });
+
+    // one run path for Enter and for a click on a row. Focus settles first,
+    // then the command runs — except the two that must keep it: `insert
+    // link`'s picker owns the focus it just took, and `follow link`
+    // replaces the editor wholesale, where a stale pending caret would leak
+    // into the next note's textarea. Exhaustive on purpose: a CommandId
+    // added without wiring does not compile
+    // (adr/2026-08-palette-birth-command-list.md).
+    let run_command =
+        use_callback(move |(frozen, id): (Palette, palette::CommandId)| {
+            let restores = !matches!(
+                id,
+                palette::CommandId::InsertLink
+                    | palette::CommandId::FollowLink
+            );
+            close_palette.call(restores);
+            match id {
+                palette::CommandId::ToggleTheme => {
+                    root_commands.toggle_theme.call(());
+                }
+                palette::CommandId::Quit => root_commands.quit.call(()),
+                palette::CommandId::CaptureClipboard => {
+                    capture_clipboard.call(());
+                }
+                // the caret commands run against the frozen offset; when
+                // the open froze none (a headless run without a probe),
+                // they quietly decline — the chords' own guard idiom
+                palette::CommandId::InsertLink => {
+                    if let Some(anchor) = frozen.caret {
+                        open_picker_at.call(anchor);
+                    }
+                }
+                palette::CommandId::FollowLink => {
+                    if let Some(units) = frozen.caret {
+                        follow_at.call(units);
+                    }
+                }
+                palette::CommandId::PreviousMonth => page.call(false),
+                palette::CommandId::NextMonth => page.call(true),
+                palette::CommandId::OpenLoops => toggle_loops.call(()),
+                palette::CommandId::GoToToday => go_today.call(()),
+            }
+        });
 
     let (scale, id) = selected();
     let note_list = notes();
@@ -388,6 +546,17 @@ fn Shell(
                 .collect();
         (open.anchor, matches)
     });
+    // the palette's rows, cloned out the same way; which commands exist at
+    // all was decided at open (adr/2026-08-palette-birth-command-list.md)
+    let open_palette = palette().map(|frozen| {
+        let matches = palette::filter(
+            &palette_query.read(),
+            palette::Context {
+                block_active: frozen.block_active,
+            },
+        );
+        (frozen, matches)
+    });
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
     let day_ids: HashSet<&str> =
@@ -399,8 +568,6 @@ fn Shell(
         let root = root.clone();
         let fragments = fragments.clone();
         let probe = probe.clone();
-        let clipboard = clipboard.clone();
-        let now = now.clone();
         move |event: KeyboardEvent| {
             match event.key() {
                 // the open-loops list is a destination you leave; escape
@@ -420,32 +587,7 @@ fn Shell(
                         && event.modifiers().shift()
                         && editor.peek().active().is_none() =>
                 {
-                    let Some(clipboard) = clipboard.clone() else {
-                        return;
-                    };
-                    let Some(now) = now.clone() else { return };
-                    let root = root.clone();
-                    spawn(async move {
-                        let Some(pasted) = (clipboard.0)().await else {
-                            return;
-                        };
-                        // one clock read stamps both halves, so a capture
-                        // cannot be filed on a day its id disagrees with
-                        let stamp = (now.0)();
-                        let notice = match crate::template::create_capture(
-                            &root,
-                            &crate::capture::capture_id(&stamp),
-                            &stamp.date().to_string(),
-                            &pasted,
-                        ) {
-                            Ok(path) => format!(
-                                "captured {}",
-                                crate::domain::stem_of(&path)
-                            ),
-                            Err(err) => format!("capture: {err:?}"),
-                        };
-                        editor.write().set_notice(notice);
-                    });
+                    capture_clipboard.call(());
                 }
                 // the link picker (adr/2026-08-ctrl-l-link-picker.md). It
                 // lands here rather than on the app root because it needs the
@@ -459,30 +601,46 @@ fn Shell(
                         && editor.peek().active().is_some() =>
                 {
                     let Some(probe) = probe.clone() else { return };
-                    let root = root.clone();
                     spawn(async move {
                         let Some(anchor) = (probe.0)().await else {
                             return;
                         };
-                        match completions(&root) {
-                            Ok(entries) => {
-                                query.set(String::new());
-                                highlighted.set(0);
-                                picker.set(Some(Picker { anchor, entries }));
-                            }
-                            Err(msg) => editor.write().set_notice(msg),
-                        }
+                        open_picker_at.call(anchor);
+                    });
+                }
+                // the command palette — beside Ctrl+L for the reason its
+                // ADR gives: the dispatch needs what only this pane has in
+                // scope. What is true now is frozen now: by dispatch time
+                // the palette's input owns the focus and the probe would
+                // answer null (adr/2026-08-command-palette-overlay-shape.md)
+                Key::Character(ref character)
+                    if character == "p"
+                        && event.modifiers().ctrl()
+                        && palette.peek().is_none()
+                        && picker.peek().is_none() =>
+                {
+                    // the webview answers a bare Ctrl+P with a print dialog
+                    event.prevent_default();
+                    let probe = probe.clone();
+                    spawn(async move {
+                        let block_active = editor.peek().active().is_some();
+                        let caret = match probe {
+                            Some(probe) if block_active => (probe.0)().await,
+                            _ => None,
+                        };
+                        palette_query.set(String::new());
+                        palette_highlighted.set(0);
+                        palette.set(Some(Palette {
+                            block_active,
+                            caret,
+                        }));
                     });
                 }
                 // months page by keystroke as well as by scrolling; arrows
                 // move the grid only, never the selection
                 // (adr/2026-07-month-paging-arrow-keys.md)
-                Key::ArrowLeft => {
-                    month.set(logs::page_month(month(), false));
-                }
-                Key::ArrowRight => {
-                    month.set(logs::page_month(month(), true));
-                }
+                Key::ArrowLeft => page.call(false),
+                Key::ArrowRight => page.call(true),
                 // Ctrl+Enter follows the link under the caret
                 // (adr/2026-08-ctrl-enter-opens-time-links.md). The modifier
                 // is matched in the pattern so the plain-Enter arm below
@@ -528,7 +686,7 @@ fn Shell(
         Chrome {
             screen: Screen::Logs,
             loops: loops.read().len(),
-            on_ember: move |_| loops_open.set(!loops_open()),
+            on_ember: move |_| toggle_loops.call(()),
         }
         div {
             class: "logs",
@@ -560,6 +718,76 @@ fn Shell(
                 }
             }
             section { class: "centre",
+                // the palette floats (position: fixed), so it leads the
+                // pane in source without displacing anything on screen
+                {
+                    match open_palette {
+                        Some((frozen, matches)) => {
+                            let rows = matches.clone();
+                            rsx! {
+                            div { class: "command-palette",
+                                div { class: "palette-head type-label", "commands" }
+                                input {
+                                    class: "picker-query",
+                                    placeholder: "command…",
+                                    onmounted: move |event| async move {
+                                        let _ = event.set_focus(true).await;
+                                    },
+                                    oninput: move |event| {
+                                        palette_query.set(event.value());
+                                        palette_highlighted.set(0);
+                                    },
+                                    onkeydown: move |event: KeyboardEvent| {
+                                        let key = event.key();
+                                        let last = matches.len().saturating_sub(1);
+                                        match key {
+                                            Key::Escape => close_palette.call(true),
+                                            Key::Enter => {
+                                                // no matches: the keystroke does
+                                                // nothing rather than guessing
+                                                if let Some(command) = matches.get(palette_highlighted()) {
+                                                    run_command.call((frozen, command.id));
+                                                }
+                                            }
+                                            Key::ArrowDown => {
+                                                palette_highlighted.set((palette_highlighted() + 1).min(last));
+                                            }
+                                            Key::ArrowUp => {
+                                                palette_highlighted.set(palette_highlighted().saturating_sub(1));
+                                            }
+                                            _ => {}
+                                        }
+                                        // the palette owns every plain key while
+                                        // it is open; the ctrl chords still bubble
+                                        if !event.modifiers().ctrl() {
+                                            event.stop_propagation();
+                                        }
+                                    },
+                                }
+                                if rows.is_empty() {
+                                    div { class: "picker-empty", "no matching command" }
+                                }
+                                for (rank, command) in rows.into_iter().enumerate() {
+                                    div {
+                                        key: "{command.label}",
+                                        class: "palette-row",
+                                        class: if rank == palette_highlighted() { "selected" },
+                                        onclick: {
+                                            let id = command.id;
+                                            move |_| run_command.call((frozen, id))
+                                        },
+                                        span { class: "palette-label", "{command.label}" }
+                                        if let Some(chord) = command.chord {
+                                            span { class: "palette-chord", "{chord}" }
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                        }
+                        None => rsx! {},
+                    }
+                }
                 div { class: "crumbs",
                     for crumb in crumbs {
                         {
@@ -864,7 +1092,7 @@ fn Shell(
                 onwheel: move |event| {
                     let delta = event.delta().strip_units().y;
                     if delta != 0.0 {
-                        month.set(logs::page_month(month(), delta > 0.0));
+                        page.call(delta > 0.0);
                     }
                 },
                 div { class: "cal-head",
@@ -874,23 +1102,17 @@ fn Shell(
                     span { class: "cal-nav",
                         button {
                             class: "cal-arrow",
-                            onclick: move |_| {
-                                month.set(logs::page_month(month(), false))
-                            },
+                            onclick: move |_| page.call(false),
                             "‹"
                         }
                         button {
                             class: "cal-today",
-                            onclick: move |_| {
-                                select.call((NoteType::Daily, time::day_id(today)))
-                            },
+                            onclick: move |_| go_today.call(()),
                             "today"
                         }
                         button {
                             class: "cal-arrow",
-                            onclick: move |_| {
-                                month.set(logs::page_month(month(), true))
-                            },
+                            onclick: move |_| page.call(true),
                             "›"
                         }
                     }
@@ -1150,6 +1372,19 @@ fn block_panes(
 struct Picker {
     anchor: usize,
     entries: Vec<links::Completion>,
+}
+
+/// The open command palette's fixed half — the `Picker.anchor` idiom.
+/// `block_active` decides which commands exist at all
+/// (adr/2026-08-palette-birth-command-list.md); `caret` is the offset the
+/// caret commands run against, probed at open because by dispatch time the
+/// palette's own input holds the focus and the probe would answer `null`
+/// (adr/2026-08-command-palette-overlay-shape.md). The moving half — query
+/// and highlight — lives in its own signals, like the picker's.
+#[derive(Clone, Copy, PartialEq)]
+struct Palette {
+    block_active: bool,
+    caret: Option<usize>,
 }
 
 /// Everything the picker can offer, read at the moment it opens.
@@ -3070,6 +3305,416 @@ mod tests {
         assert!(html.contains("links:"), "{html}");
     }
 
+    // -- the command palette: every command reachable by name ---------------
+
+    #[test]
+    fn ctrl_p_opens_the_palette_and_typing_filters() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, _) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("command-palette"), "{html}");
+        assert!(html.contains(">commands<"), "the head names it: {html}");
+        assert!(html.contains("ctrl+shift+v"), "the chords show: {html}");
+        assert_eq!(
+            palette_labels(&dom),
+            vec![
+                "toggle theme",
+                "quit",
+                "capture clipboard",
+                "previous month",
+                "next month",
+                "open loops",
+                "go to today",
+            ],
+            "no block active: the caret commands are hidden"
+        );
+
+        type_into(&mut dom, input, "THEME");
+        assert_eq!(
+            palette_labels(&dom),
+            vec!["toggle theme"],
+            "the query filters, ignoring case"
+        );
+    }
+
+    #[test]
+    fn over_an_active_block_all_nine_commands_are_listed() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        open_palette(&mut dom, keys);
+        let labels = palette_labels(&dom);
+        assert_eq!(labels.len(), 9, "{labels:?}");
+        assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
+        assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn the_palette_runs_toggle_theme_and_closes() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "theme");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        assert!(!html.contains("command-palette"), "and it closed: {html}");
+    }
+
+    #[test]
+    fn a_row_click_runs_the_command_too() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let mutations = press_for_mutations(
+            &mut dom,
+            keys[LOGS_KEYS],
+            ctrl_p(),
+            Modifiers::CONTROL,
+        );
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        // the first row is `toggle theme`, the registry's order
+        click(&mut dom, listeners(&mutations, "click")[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        assert!(!html.contains("command-palette"), "{html}");
+    }
+
+    #[test]
+    fn the_palette_runs_quit() {
+        let vault = temp_vault();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let recorder = closed.clone();
+        let closer = Closer(Arc::new(move || {
+            recorder.store(true, Ordering::SeqCst);
+        }));
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), Some(closer));
+        let keys = listeners(&mutations, "keydown")[LOGS_KEYS];
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "quit");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(closed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_palette_runs_capture_clipboard() {
+        let vault = temp_vault();
+        let (mut dom, _, keydowns) = capture_app(
+            Some(vault.path().to_path_buf()),
+            Some("pris du web".to_string()),
+            Some(CAPTURED_AT),
+        );
+        let (input, palette_keys) =
+            open_palette(&mut dom, keydowns[LOGS_KEYS]);
+        type_into(&mut dom, input, "capture");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("captured capture-"), "{html}");
+    }
+
+    #[test]
+    fn the_palette_runs_insert_link_at_the_frozen_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, written) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING);
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        // the palette holds the offset it froze; a live probe would now
+        // answer nothing, its own input having taken the focus
+        *caret.lock().expect("the probe cell never poisons") = None;
+
+        type_into(&mut dom, input, "insert");
+        let mutations = press_for_mutations(
+            &mut dom,
+            palette_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("link-picker"), "{html}");
+        assert!(!html.contains("command-palette"), "{html}");
+
+        // the picker works exactly as if Ctrl+L had opened it
+        let picker_input = listeners(&mutations, "input")[0];
+        let picker_keys = listeners(&mutations, "keydown")[0];
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        type_into(&mut dom, picker_input, "summer");
+        let accept = press_for_mutations(
+            &mut dom,
+            picker_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        assert!(
+            source_of(&dom).contains(r#"#l("2026-summer")"#),
+            "spliced at the frozen anchor: {}",
+            source_of(&dom)
+        );
+        mount(&mut dom, listeners(&accept, "mounted")[0]);
+        assert_eq!(
+            *written.lock().expect("the writer cell never poisons"),
+            vec![LINK_IN_HEADING + r#"#l("2026-summer")"#.len()],
+            "the caret lands past the link, from the frozen offset"
+        );
+    }
+
+    #[test]
+    fn the_palette_runs_follow_link_from_the_frozen_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING + 3);
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "follow");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "the command jumped to the linked day: {html}"
+        );
+    }
+
+    #[test]
+    fn the_caret_commands_decline_without_a_frozen_caret() {
+        // a probe that answers nothing froze no caret: both commands are
+        // listed (a block is active) but quietly decline
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "insert link");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+        assert!(!html.contains("command-palette"), "closed all the same");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "follow");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
+            "the selection stayed put: {html}"
+        );
+    }
+
+    #[test]
+    fn the_palette_pages_the_month_both_ways() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "previous");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("june 2026"), "{html}");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "next");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("july 2026"), "{html}");
+    }
+
+    #[test]
+    fn the_palette_toggles_the_loops_list() {
+        let vault = debt_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "loops");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("loops-list"), "{html}");
+
+        // the same command is the way back
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "loops");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("loops-list"), "{html}");
+    }
+
+    #[test]
+    fn the_palette_goes_back_to_today() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">21"), "{html}");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "today");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">23"), "{html}");
+    }
+
+    #[test]
+    fn escape_closes_the_palette_and_the_pane_takes_focus_back() {
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let keys = listeners(&mutations, "keydown")[LOGS_KEYS];
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[0],
+        );
+
+        let (_, palette_keys) = open_palette(&mut dom, keys);
+        block_on(settle(&mut dom));
+        // while the palette is up, the pane leaves focus to its input
+        let up = focused.load(Ordering::SeqCst);
+
+        press(&mut dom, palette_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("command-palette"),
+            "escape closed it: {html}"
+        );
+        block_on(settle(&mut dom));
+        assert!(
+            focused.load(Ordering::SeqCst) > up,
+            "the pane asked for focus once the palette closed"
+        );
+    }
+
+    #[test]
+    fn escape_over_a_block_remounts_the_textarea_with_the_frozen_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, written) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING);
+
+        let (_, palette_keys) = open_palette(&mut dom, keys);
+        let mutations = press_for_mutations(
+            &mut dom,
+            palette_keys,
+            Key::Escape,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "still editing: {html}");
+        // the textarea came back; its mount puts the caret where Ctrl+P
+        // froze it
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        assert_eq!(
+            *written.lock().expect("the writer cell never poisons"),
+            vec![LINK_IN_HEADING],
+            "the caret went back where the palette found it"
+        );
+    }
+
+    #[test]
+    fn enter_over_no_matching_command_does_nothing() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "xyzzy");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching command"), "{html}");
+
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("command-palette"),
+            "enter matched nothing: {html}"
+        );
+        // an unhandled key inside the palette is absorbed, not acted on
+        press(
+            &mut dom,
+            palette_keys,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("command-palette"), "{html}");
+    }
+
+    #[test]
+    fn the_palette_arrows_move_the_highlight_and_stop_at_both_ends() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        // two rows: previous month, next month
+        type_into(&mut dom, input, "month");
+        let selected = |dom: &VirtualDom| {
+            let html = dioxus_ssr::render(dom);
+            html.split("palette-row selected")
+                .nth(1)
+                .and_then(|rest| rest.split(r#"palette-label">"#).nth(1))
+                .and_then(|rest| rest.split('<').next())
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no highlighted row: {html}"))
+        };
+        assert_eq!(selected(&dom), "previous month", "the first row is lit");
+
+        press(&mut dom, palette_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, palette_keys, Key::ArrowDown, Modifiers::empty());
+        assert_eq!(selected(&dom), "next month", "the last row holds");
+
+        press(&mut dom, palette_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, palette_keys, Key::ArrowUp, Modifiers::empty());
+        assert_eq!(selected(&dom), "previous month", "the first one holds");
+    }
+
+    #[test]
+    fn ctrl_p_guards_and_the_chords_still_bubble_over_it() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "theme");
+
+        // a second Ctrl+P leaves the open palette alone
+        press(&mut dom, keys[LOGS_KEYS], ctrl_p(), Modifiers::CONTROL);
+        assert_eq!(
+            palette_labels(&dom),
+            vec!["toggle theme"],
+            "the second chord left the open palette alone"
+        );
+
+        // the theme chord works over the open palette, which stays up
+        press(
+            &mut dom,
+            palette_keys,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        assert!(html.contains("command-palette"), "still open: {html}");
+
+        // and over an open link picker, Ctrl+P is inert
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, block_keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        open_picker(&mut dom, block_keys);
+        press(&mut dom, block_keys, ctrl_p(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("command-palette"), "{html}");
+        assert!(html.contains("link-picker"), "{html}");
+    }
+
     // -- harness -------------------------------------------------------------
 
     /// An index built over the vault, then vandalised through a second
@@ -3444,6 +4089,34 @@ mod tests {
         Key::Character("l".into())
     }
 
+    /// The palette chord, spelled once.
+    fn ctrl_p() -> Key {
+        Key::Character("p".into())
+    }
+
+    /// Opens the palette with Ctrl+P and returns its input's (input,
+    /// keydown) targets — `open_picker`, one overlay over.
+    fn open_palette(
+        dom: &mut VirtualDom,
+        keys: ElementId,
+    ) -> (ElementId, ElementId) {
+        let mutations =
+            press_for_mutations(dom, keys, ctrl_p(), Modifiers::CONTROL);
+        let inputs = listeners(&mutations, "input");
+        let keydowns = listeners(&mutations, "keydown");
+        mount(dom, listeners(&mutations, "mounted")[0]);
+        (inputs[0], keydowns[0])
+    }
+
+    /// The palette's rows, in order — `picker_ids` for the other overlay.
+    fn palette_labels(dom: &VirtualDom) -> Vec<String> {
+        dioxus_ssr::render(dom)
+            .split(r#"<span class="palette-label">"#)
+            .skip(1)
+            .filter_map(|rest| rest.split('<').next().map(str::to_string))
+            .collect()
+    }
+
     /// Opens the picker with Ctrl+L and returns its input's (input, keydown)
     /// targets. The probe cell must already hold the anchor. The mount
     /// event is delivered too — the query field asks for focus the way the
@@ -3735,9 +4408,12 @@ mod tests {
         with_reactor(|| {
             let data: Rc<dyn Any> =
                 Rc::new(PlatformEventData::new(Box::new(backing)));
+            // mounted announces one element and never bubbles in the real
+            // renderer; a bubbled one here would also reach the pane's
+            // onmounted and swap its recorded handle for this backing
             dom.runtime().handle_event(
                 "mounted",
-                Event::new(data, true),
+                Event::new(data, false),
                 target,
             );
             dom.process_events();
