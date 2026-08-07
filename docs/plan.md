@@ -139,6 +139,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 - Capture notes (desktop shortcut into `app --capture`, or Ctrl+Shift+V in the app) + open-loops counter opening a flat list (captures + dangling links + typeless notes)
 
 **v1 — the table** (task breakdown and current state: `roadmap-v1.md`; the vault starts from scratch, no migration — `adr/2026-08-vault-starts-from-scratch.md`)
+- Command palette: Ctrl+P fuzzy-searches every app command by name, Obsidian-style (first step — `adr/2026-08-command-palette-first-in-v1.md`)
 - Canvas with persistent positions, two-level semantic zoom (titles → rendered bodies)
 - Tethered writing sheet on card click, dimmed table behind it; tag & type filters; type colors; jump-to-note
 - Auto-placement of new notes near linked ones; on-demand cluster arrange
