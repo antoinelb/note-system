@@ -187,6 +187,7 @@ fn touch(
         meta: parsed_note.meta,
         title: parsed_note.title,
         links: parsed_note.links,
+        summarized: parsed_note.summarized,
     };
     index.update_note(&note)
 }

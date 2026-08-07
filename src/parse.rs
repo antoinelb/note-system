@@ -1,8 +1,14 @@
 use crate::domain::{Link, Meta, MetaAnomaly, MetaStatus, NoteId, NoteType};
 use jiff::civil::Date;
 use typst_syntax::ast::{self, AstNode};
+use typst_syntax::{SyntaxKind, SyntaxNode};
 
 pub(crate) const MAX_NODES: usize = 100_000;
+
+/// The capture template's own heading, and so the contract between that
+/// template and summarized-detection: translate one and the other must
+/// follow (adr/2026-08-summarized-nonempty-summary-section.md).
+const SUMMARY_HEADING: &str = "Summary";
 
 pub struct ParsedNote {
     pub meta: MetaStatus,
@@ -11,6 +17,9 @@ pub struct ParsedNote {
     /// metadata — a note may have none.
     pub title: Option<String>,
     pub links: Vec<Link>,
+    /// Whether the note's `== Summary` section has anything in it. Only
+    /// captures are ever asked, but every note is parsed the same way.
+    pub summarized: bool,
 }
 
 pub fn parse_note(source: &str) -> ParsedNote {
@@ -50,7 +59,12 @@ pub fn parse_note(source: &str) -> ParsedNote {
         stack.extend(node.children().rev());
     }
 
-    ParsedNote { meta, title, links }
+    ParsedNote {
+        meta,
+        title,
+        links,
+        summarized: summarized(&root),
+    }
 }
 
 /// A level-1 heading's text; deeper headings are sections inside a note, not
@@ -62,6 +76,42 @@ fn extract_title(heading: ast::Heading) -> Option<String> {
     let text = heading.body().to_untyped().full_text();
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Whether the `== Summary` section holds anything at all — the debt a
+/// capture carries until its own summary is written
+/// (adr/2026-08-summarized-nonempty-summary-section.md).
+///
+/// Sections are top-level siblings in the parse tree, so one pass over the
+/// root's children is the whole job: the section runs from its heading to
+/// the next heading of depth 1 or 2, and the first child in it that is not
+/// blank space closes the loop. A deeper heading is structure the user wrote
+/// *inside* the summary, so it counts as content rather than ending it.
+fn summarized(root: &SyntaxNode) -> bool {
+    let mut in_summary = false;
+    for child in root.children() {
+        if let Some(heading) = child.cast::<ast::Heading>()
+            && heading.depth().get() <= 2
+        {
+            in_summary = heading.depth().get() == 2
+                && heading
+                    .body()
+                    .to_untyped()
+                    .full_text()
+                    .trim()
+                    .eq_ignore_ascii_case(SUMMARY_HEADING);
+            continue;
+        }
+        if in_summary
+            && !matches!(
+                child.kind(),
+                SyntaxKind::Space | SyntaxKind::Parbreak
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn extract_meta(call: ast::FuncCall) -> Meta {
@@ -397,6 +447,59 @@ mod tests {
         // searches is the source text as written
         let parsed = parse_note(r#"= Notes on #emph[flow]"#);
         assert_eq!(parsed.title, Some("Notes on #emph[flow]".to_string()));
+    }
+
+    #[test]
+    fn an_empty_summary_section_is_the_open_loop_a_capture_starts_as() {
+        // the capture template as it is written to disk
+        let parsed = parse_note("== Summary\n\n== Original\n\ndump\n");
+        assert!(!parsed.summarized);
+        // and once the summary is written, the loop closes
+        let parsed =
+            parse_note("== Summary\n\nce que ça dit\n\n== Original\n");
+        assert!(parsed.summarized);
+    }
+
+    #[test]
+    fn only_the_summary_sections_own_content_counts() {
+        // content before the heading belongs to no section of ours
+        assert!(!parse_note("intro\n\n== Summary\n").summarized);
+        // and the section ends at the next heading of its depth or above
+        assert!(!parse_note("== Summary\n\n= Ailleurs\n\nprose\n").summarized);
+        assert!(!parse_note("== Summary\n\n== Original\n\ndump\n").summarized);
+    }
+
+    #[test]
+    fn structure_written_inside_the_summary_is_content_too() {
+        assert!(
+            parse_note("== Summary\n\n=== Un point\n\n== Original\n")
+                .summarized
+        );
+        assert!(parse_note("== Summary\n\n- une liste\n").summarized);
+    }
+
+    #[test]
+    fn blank_space_alone_never_closes_the_loop() {
+        assert!(!parse_note("== Summary\n").summarized);
+        assert!(!parse_note("== Summary\n\n\n\n== Original\n").summarized);
+        assert!(!parse_note("").summarized);
+    }
+
+    #[test]
+    fn a_note_with_no_summary_heading_has_no_loop_to_close() {
+        // every note is parsed the same way; only captures are ever asked
+        assert!(!parse_note("= A note\n\nprose\n").summarized);
+        // a summary heading at another depth is a different section
+        assert!(!parse_note("= Summary\n\nprose\n").summarized);
+        assert!(!parse_note("=== Summary\n\nprose\n").summarized);
+    }
+
+    #[test]
+    fn the_summary_heading_is_read_case_insensitively() {
+        // the template says "Summary"; a hand-written note that shouts or
+        // whispers it still gets credit for the prose under it
+        assert!(parse_note("== SUMMARY\n\nprose\n").summarized);
+        assert!(parse_note("== summary\n\nprose\n").summarized);
     }
 
     fn present(parsed: ParsedNote) -> Meta {

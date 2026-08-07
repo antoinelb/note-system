@@ -11,6 +11,10 @@ use crate::time;
 /// What the user is looking at: one of the three time scales plus its id.
 pub type Selection = (NoteType, String);
 
+/// What an unsummarized capture is tagged with, wherever it is listed — the
+/// "captured today" block and the open-loops list say the same thing.
+pub const STILL_OPEN: &str = "still open";
+
 /// One rail line. `exists: false` marks the spliced-in selected id whose
 /// note is not on disk — rendered dim + italic, never written by navigation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,13 +219,22 @@ pub fn selection_label(scale: &NoteType, id: &str) -> String {
     }
 }
 
-/// "capture-articles-zettel · capture" — one line of the "captured today"
-/// block; phase 10's summarized-detection refines the tag to "still open".
+/// "capture-articles-zettel · still open" — one line of the "captured today"
+/// block. A capture still owing its summary says so instead of naming its
+/// category, which the day already knows it by
+/// (adr/2026-08-summarized-nonempty-summary-section.md); everything else is
+/// tagged by category.
 pub fn captured_line(
     stem: &str,
     category: &crate::domain::NoteCategory,
+    still_open: bool,
 ) -> String {
-    format!("{stem} · {}", category.as_dir())
+    let tag = if still_open {
+        STILL_OPEN
+    } else {
+        category.as_dir()
+    };
+    format!("{stem} · {tag}")
 }
 
 /// "w30" — the short week form used in crumbs and empty-note lines.
@@ -498,13 +511,29 @@ mod tests {
     }
 
     #[test]
-    fn captured_lines_tag_the_category() {
+    fn captured_lines_tag_the_category_or_the_open_loop() {
         assert_eq!(
-            captured_line("capture-articles-zettel", &NoteCategory::Capture),
-            "capture-articles-zettel · capture"
+            captured_line(
+                "capture-idea-canvas",
+                &NoteCategory::Capture,
+                false
+            ),
+            "capture-idea-canvas · capture"
         );
         assert_eq!(
-            captured_line("digest-smart-notes", &NoteCategory::Generated),
+            captured_line(
+                "capture-articles-zettel",
+                &NoteCategory::Capture,
+                true
+            ),
+            "capture-articles-zettel · still open"
+        );
+        assert_eq!(
+            captured_line(
+                "digest-smart-notes",
+                &NoteCategory::Generated,
+                false
+            ),
             "digest-smart-notes · generated"
         );
     }

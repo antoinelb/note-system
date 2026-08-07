@@ -6,6 +6,7 @@ pub mod editor;
 pub mod index;
 pub mod links;
 pub mod logs;
+pub mod loops;
 pub mod parse;
 pub mod render;
 pub mod template;

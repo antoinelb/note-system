@@ -3,8 +3,6 @@
 //! without a VirtualDom lives here, so the components stay wiring
 //! (`adr/2026-07-ui-covered-at-100.md`).
 
-use std::path::Path;
-
 use typst_syntax::ast;
 
 use crate::domain::{NoteId, NoteType};
@@ -109,7 +107,7 @@ pub fn backlinks(
         .filter_map(|row| {
             let label = match &row.id {
                 Some(id) => id.clone(),
-                None => stem_of(&row.source),
+                None => crate::domain::stem_of(&row.source),
             };
             (label != own).then(|| FooterLink {
                 scale: scale_of(&label, time_notes),
@@ -186,15 +184,6 @@ pub fn scale_of(
         .iter()
         .find(|(known, _)| known == id)
         .map(|(_, scale)| scale.clone())
-}
-
-/// A path's filename without its extension; a path that ends in no name at
-/// all keeps whatever it does have, so the entry is never blank.
-fn stem_of(path: &Path) -> String {
-    path.file_stem()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
 }
 
 #[cfg(test)]

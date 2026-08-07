@@ -709,6 +709,16 @@ fn typeless_notes_exclude_captures_but_include_missing_meta() {
     );
 }
 
+#[test]
+fn unsummarized_captures_are_the_ones_with_an_empty_summary_section() {
+    let (_dir, index) = fixture_index();
+    // capture-idea-canvas wrote its summary; capture-articles-zettel did not
+    assert_eq!(
+        index.unsummarized_captures().expect("query"),
+        paths(&["capture/capture-articles-zettel.typ"])
+    );
+}
+
 // ---------------------------------------------------------------- storage fidelity
 
 #[test]
@@ -845,6 +855,7 @@ fn note(
                 target: NoteId(t.to_string()),
             })
             .collect(),
+        summarized: false,
     }
 }
 
@@ -868,6 +879,7 @@ fn anomalous_note() -> Note {
         }),
         title: None,
         links: vec![],
+        summarized: false,
     }
 }
 

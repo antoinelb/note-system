@@ -124,6 +124,20 @@ pub struct Note {
     /// (adr/2026-08-titles-in-index.md).
     pub title: Option<String>,
     pub links: Vec<Link>,
+    /// Content-derived too: whether the `== Summary` section holds anything.
+    /// Only captures are asked, and an unsummarized one is open-loops debt
+    /// (adr/2026-08-summarized-nonempty-summary-section.md).
+    pub summarized: bool,
+}
+
+/// A note's filename without its extension, which is its id for every note
+/// the app writes (`adr/2026-07-id-scheme-kebab-frozen.md`). A path that ends
+/// in no name at all keeps whatever it does have, so a label is never blank.
+pub fn stem_of(path: &std::path::Path) -> String {
+    path.file_stem()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]

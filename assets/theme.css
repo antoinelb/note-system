@@ -265,6 +265,26 @@ body {
   padding: 4px 0;
 }
 
+/* the ember's destination (adr/2026-08-loops-list-overlay.md): the picker's
+   bordered box, the captured block's line idiom. A destination, not a
+   workspace — nothing here is clickable */
+.loops-list {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  padding: 8px;
+}
+
+.loops-head {
+  color: var(--ink-faint);
+  padding-bottom: 8px;
+}
+
+.loops-line {
+  font: 16px Lato, sans-serif;
+  color: var(--ink-muted);
+  padding: 4px 0;
+}
+
 /* the captured block's idiom: the footer belongs to the note the same way */
 .links-footer {
   margin-top: 16px;

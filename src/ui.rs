@@ -16,6 +16,7 @@ use crate::editor::Editor;
 use crate::index::{Index, IndexError};
 use crate::links;
 use crate::logs::{self, Selection};
+use crate::loops;
 use crate::render::{FragmentCache, RenderTheme};
 use crate::time;
 
@@ -133,7 +134,7 @@ pub fn App() -> Element {
 fn Shell(
     root: PathBuf,
     notes: Vec<(String, NoteType)>,
-    loops: usize,
+    loops: Vec<String>,
     today: Date,
 ) -> Element {
     // the editor opens today's note before the signal takes the notes list;
@@ -145,6 +146,10 @@ fn Shell(
         move || open_selected(&root, exists, &id)
     });
     let mut notes = use_signal(|| notes);
+    // the open loops themselves; the ember shows how many there are and the
+    // overlay shows which (adr/2026-08-loops-list-overlay.md)
+    let loops = use_signal(|| loops);
+    let mut loops_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
     // the fragment cache is a memo store, not UI state: nothing should
@@ -268,6 +273,9 @@ fn Shell(
         let probe = probe.clone();
         move |event: KeyboardEvent| {
             match event.key() {
+                // the open-loops list is a destination you leave; escape
+                // reaches here only when no block owns it
+                Key::Escape if loops_open() => loops_open.set(false),
                 // the link picker (adr/2026-08-ctrl-l-link-picker.md). It
                 // lands here rather than on the app root because it needs the
                 // editor, the caret probe and the index — none of which the
@@ -371,7 +379,11 @@ fn Shell(
     };
 
     rsx! {
-        Chrome { screen: Screen::Logs, loops }
+        Chrome {
+            screen: Screen::Logs,
+            loops: loops.read().len(),
+            on_ember: move |_| loops_open.set(!loops_open()),
+        }
         div {
             class: "logs",
             // the enter-to-create keystroke lands here and the theme/quit
@@ -616,6 +628,17 @@ fn Shell(
                         None => rsx! {},
                     }
                 }
+                // the ember's destination: what the count is made of, and
+                // nothing else — no ages, no grouping, no per-item actions
+                // (adr/2026-07-debt-counter-then-list.md)
+                if loops_open() && !loops.read().is_empty() {
+                    div { class: "loops-list",
+                        div { class: "loops-head type-label", "open loops" }
+                        for line in loops() {
+                            div { key: "{line}", class: "loops-line", "{line}" }
+                        }
+                    }
+                }
                 {
                     match footer {
                         Some(Ok((back, out))) if !back.is_empty() || !out.is_empty() => rsx! {
@@ -783,9 +806,14 @@ enum Screen {
 
 /// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
 /// current screen's lit, and the open-loops ember. Zero loops renders
-/// nothing at all — absence, not a zero.
+/// nothing at all — absence, not a zero — so the ember is clickable exactly
+/// when there is a list to show (adr/2026-08-loops-list-overlay.md).
 #[component]
-fn Chrome(screen: Screen, loops: usize) -> Element {
+fn Chrome(
+    screen: Screen,
+    loops: usize,
+    on_ember: EventHandler<()>,
+) -> Element {
     rsx! {
         header { class: "chrome",
             svg {
@@ -808,15 +836,22 @@ fn Chrome(screen: Screen, loops: usize) -> Element {
                 line { x1: "9.5", y1: "1", x2: "9.5", y2: "3.5", stroke: "currentColor" }
             }
             if loops > 0 {
-                span { class: "ember", "{loops}" }
+                span {
+                    class: "ember",
+                    onclick: move |_| on_ember.call(()),
+                    "{loops}"
+                }
             }
         }
     }
 }
 
-/// What the shell mounts with: the vault root, the rail's time notes and
-/// the ember count.
-type Loaded = (PathBuf, Vec<(String, NoteType)>, usize);
+/// What one look at the index yields: the rail's time notes, and the open
+/// loops themselves rather than a count of them.
+type Survey = (Vec<(String, NoteType)>, Vec<String>);
+
+/// What the shell mounts with: the vault root and that survey.
+type Loaded = (PathBuf, Vec<(String, NoteType)>, Vec<String>);
 
 fn load(root: Option<PathBuf>) -> Result<Loaded, String> {
     match root {
@@ -828,9 +863,7 @@ fn load(root: Option<PathBuf>) -> Result<Loaded, String> {
     }
 }
 
-fn load_notes(
-    root: &Path,
-) -> Result<(Vec<(String, NoteType)>, usize), IndexError> {
+fn load_notes(root: &Path) -> Result<Survey, IndexError> {
     let notes = crate::index::scan_vault(root)?;
     let index_path = root.join(".index");
     std::fs::create_dir_all(&index_path)?;
@@ -843,17 +876,19 @@ fn load_notes(
 /// ember's count. Separate from `load_notes` so its error arms stay
 /// reachable — after a successful rebuild they only fire on a sabotaged
 /// database.
-fn survey(
-    index: &Index,
-) -> Result<(Vec<(String, NoteType)>, usize), IndexError> {
-    Ok((index.time_notes()?, loop_count(index)?))
+fn survey(index: &Index) -> Result<Survey, IndexError> {
+    Ok((index.time_notes()?, open_loops(index)?))
 }
 
-/// The v0 open-loops count: typeless notes + dangling links
-/// (adr/2026-07-debt-counter-then-list.md). Unsummarized captures join in
-/// phase 10, which also moves the count onto the watcher.
-fn loop_count(index: &Index) -> Result<usize, IndexError> {
-    Ok(index.typeless_notes()?.len() + index.dangling_links()?.len())
+/// The open loops themselves, not a count of them: the chrome's ember shows
+/// this list's length and clicking it shows the list, so the two cannot
+/// drift apart (adr/2026-08-loops-list-overlay.md).
+fn open_loops(index: &Index) -> Result<Vec<String>, IndexError> {
+    Ok(loops::lines(
+        &index.typeless_notes()?,
+        &index.dangling_links()?,
+        &index.unsummarized_captures()?,
+    ))
 }
 
 /// The selected note's editor: opened when the index says the note exists,
@@ -1011,9 +1046,19 @@ fn captured_lines(root: &Path, day: &str) -> Result<Vec<String>, String> {
     let captured = index
         .captured_on(day)
         .map_err(|err| format!("captured today: {err:?}"))?;
+    // a capture that still owes its summary says so rather than naming its
+    // category — the same debt the open-loops list counts
+    let open: HashSet<String> = index
+        .unsummarized_captures()
+        .map_err(|err| format!("captured today: {err:?}"))?
+        .iter()
+        .map(|path| crate::domain::stem_of(path))
+        .collect();
     Ok(captured
         .iter()
-        .map(|(stem, category)| logs::captured_line(stem, category))
+        .map(|(stem, category)| {
+            logs::captured_line(stem, category, open.contains(stem))
+        })
         .collect())
 }
 
@@ -1066,6 +1111,10 @@ mod tests {
     }
     /// Which keydown listener is the logs pane's (the other is the root).
     const LOGS_KEYS: usize = 1;
+    /// The ember registers ahead of everything in the pane, so in a vault
+    /// with open loops it takes click listener 0 and every index above
+    /// shifts by one — which is why the base `temp_vault` has none.
+    const EMBER: usize = 0;
 
     // -- the App component, driven headlessly through a VirtualDom ----------
 
@@ -1276,6 +1325,14 @@ mod tests {
 
     // -- the chrome: two icons and the ember ---------------------------------
 
+    /// The chrome alone, so the table icon — which no screen mounts before
+    /// v1 — can be rendered. The ember handler has to be built inside a
+    /// running dom, which is what this wrapper is for.
+    #[component]
+    fn BareChrome(screen: Screen) -> Element {
+        rsx! { Chrome { screen, loops: 0, on_ember: move |()| {} } }
+    }
+
     #[test]
     fn the_lit_icon_follows_the_current_screen() {
         for (screen, lit, dim) in [
@@ -1283,8 +1340,8 @@ mod tests {
             (Screen::Logs, "icon-logs lit", "icon-table lit"),
         ] {
             let mut dom = VirtualDom::new_with_props(
-                Chrome,
-                ChromeProps { screen, loops: 0 },
+                BareChrome,
+                BareChromeProps { screen },
             );
             dom.rebuild_to_vec();
             let html = dioxus_ssr::render(&dom);
@@ -1304,15 +1361,45 @@ mod tests {
 
     #[test]
     fn the_ember_shows_the_open_loop_count() {
-        let vault = temp_vault();
-        std::fs::write(
-            vault.path().join("permanent/linky.typ"),
-            format!("{}#l(\"ghost\")\n", note("linky")),
-        )
-        .expect("the dangling note is written");
+        let vault = debt_vault();
         let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"<span class="ember">1</span>"#), "{html}");
+        // one loop of each kind, and the count is the list's own length
+        assert!(html.contains(r#"class="ember">3</span>"#), "{html}");
+    }
+
+    #[test]
+    fn the_ember_opens_the_flat_list_and_closes_it_again() {
+        let vault = debt_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        assert!(
+            !dioxus_ssr::render(&dom).contains("loops-list"),
+            "the list waits to be asked for"
+        );
+
+        click(&mut dom, clicks[EMBER]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("open loops"), "{html}");
+        for line in [
+            "mystere · typeless",
+            "linky → ghost · dangling",
+            "capture-zettel · still open",
+        ] {
+            assert!(html.contains(line), "missing {line}: {html}");
+        }
+
+        // a second click puts it away, and so does escape
+        click(&mut dom, clicks[EMBER]);
+        assert!(!dioxus_ssr::render(&dom).contains("loops-list"));
+        click(&mut dom, clicks[EMBER]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("loops-list"), "{html}");
+        assert!(
+            html.contains(r#"class="ember">3</span>"#),
+            "the count stays"
+        );
     }
 
     // -- the rail: every time note, newest first, nothing else ---------------
@@ -1899,7 +1986,7 @@ mod tests {
         let index = sabotaged_index(vault.path(), "DROP TABLE notes");
         let error = survey(&index).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
-        let error = loop_count(&index).unwrap_err();
+        let error = open_loops(&index).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -1926,6 +2013,26 @@ mod tests {
         saboteur
             .execute_batch("DROP TABLE notes")
             .expect("the sabotage succeeds");
+        click(&mut dom, clicks[RAIL_DAY_23]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(RENDERED_NOTE), "the note itself is fine");
+        assert!(html.contains("captured today:"), "{html}");
+    }
+
+    #[test]
+    fn a_missing_summarized_column_fails_the_survey_and_the_captured_block() {
+        // the one sabotage the sibling queries survive: typeless notes and
+        // dangling links still answer, only the summary column is gone
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let index = sabotaged_index(
+            vault.path(),
+            "ALTER TABLE notes DROP COLUMN summarized",
+        );
+        let error = open_loops(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+
         click(&mut dom, clicks[RAIL_DAY_23]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(RENDERED_NOTE), "the note itself is fine");
@@ -2784,6 +2891,41 @@ mod tests {
     /// cannot compile), the week, the season, one permanent note that must
     /// never surface, and a capture + generated pair created on `TODAY`
     /// for the "captured today" block.
+    /// `temp_vault` plus one of each kind of open loop: a note that never
+    /// picked a type, a link to nothing, and a capture that never got its
+    /// summary. The base vault is deliberately loop-free, so every ember
+    /// test starts here instead.
+    fn debt_vault() -> tempfile::TempDir {
+        let dir = temp_vault();
+        for (path, text) in [
+            (
+                "permanent/mystere.typ",
+                "#import \"/templates/template.typ\": *\n\
+                 #show: note\n\
+                 #meta(id: \"mystere\", created: \"2026-07-01\")\n\
+                 \n= mystere\n"
+                    .to_string(),
+            ),
+            (
+                "permanent/linky.typ",
+                format!("{}#l(\"ghost\")\n", note("linky")),
+            ),
+            (
+                "capture/capture-zettel.typ",
+                format!(
+                    "#import \"/templates/template.typ\": *\n\
+                     #show: note\n\
+                     #meta(id: \"capture-zettel\", created: \"{TODAY}\")\n\
+                     \n== Summary\n\n== Original\n\ncollé du navigateur\n"
+                ),
+            ),
+        ] {
+            std::fs::write(dir.path().join(path), text)
+                .expect("the debt note is written");
+        }
+        dir
+    }
+
     fn temp_vault() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("a temp dir is available");
         let root = dir.path();
@@ -2819,12 +2961,16 @@ mod tests {
             ("time/2026-w30.typ", time_note("2026-w30", "weekly")),
             ("time/2026-summer.typ", time_note("2026-summer", "seasonal")),
             (
+                // summarized, so the base vault still opens with zero open
+                // loops and the ember stays absent — every listener index
+                // below is counted without it
                 "capture/capture-idea.typ",
                 format!(
                     "#import \"/templates/template.typ\": *\n\
                      #show: note\n\
                      #meta(id: \"capture-idea\", created: \"{TODAY}\")\n\
-                     \n= capture-idea\n"
+                     \n= capture-idea\n\
+                     \n== Summary\n\nce que ça disait\n"
                 ),
             ),
             (

@@ -9,7 +9,7 @@ use crate::domain::{
 use crate::parse;
 use rusqlite::{Connection, Row, Transaction};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 const FOREIGN_KEYS: &str = "PRAGMA foreign_keys = on;";
 const SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -19,7 +19,8 @@ CREATE TABLE notes (
     type     TEXT,
     created  TEXT,
     origin   TEXT,
-    title    TEXT
+    title    TEXT,
+    summarized INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE links (
     source_path TEXT NOT NULL REFERENCES notes(path) ON DELETE CASCADE,
@@ -204,6 +205,23 @@ impl Index {
         )
     }
 
+    /// Captures whose `== Summary` section is still empty — the third kind
+    /// of open-loops debt, beside typeless notes and dangling links
+    /// (adr/2026-08-summarized-nonempty-summary-section.md). Only captures
+    /// carry this loop: a permanent note owes no summary to anyone.
+    pub fn unsummarized_captures(&self) -> Result<Vec<PathBuf>, IndexError> {
+        query_paths(
+            &self.connection,
+            concat!(
+                "SELECT path ",
+                "FROM notes ",
+                "WHERE category = ?1 AND summarized = 0 ",
+                "ORDER BY path"
+            ),
+            [NoteCategory::Capture.as_dir()],
+        )
+    }
+
     pub fn path_for_id(
         &self,
         id: &NoteId,
@@ -305,12 +323,7 @@ impl Index {
                 } else {
                     NoteCategory::Capture
                 };
-                let stem = path
-                    .file_stem()
-                    .unwrap_or(path.as_os_str())
-                    .to_string_lossy()
-                    .into_owned();
-                (stem, category)
+                (crate::domain::stem_of(path), category)
             })
             .collect())
     }
@@ -359,6 +372,7 @@ pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
                     meta: parsed_note.meta,
                     title: parsed_note.title,
                     links: parsed_note.links,
+                    summarized: parsed_note.summarized,
                 })
             }
         }
@@ -430,8 +444,8 @@ fn insert_note(
     transaction.execute(
         concat!(
             "INSERT INTO notes ",
-            "(path, category, id, type, created, origin, title)",
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            "(path, category, id, type, created, origin, title, summarized)",
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
         ),
         rusqlite::params![
             note.path.to_string_lossy(),
@@ -441,6 +455,7 @@ fn insert_note(
             meta.created,
             meta.origin.as_deref(),
             note.title.as_deref(),
+            note.summarized,
         ],
     )?;
     for tag in &meta.tags {
@@ -1214,6 +1229,7 @@ mod tests {
             links: vec![Link {
                 target: NoteId("elsewhere".to_string()),
             }],
+            summarized: true,
         }
     }
 }
