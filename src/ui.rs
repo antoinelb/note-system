@@ -349,11 +349,15 @@ fn Shell(
                 // capture/, no required fields, nothing to fill in
                 // (adr/2026-08-capture-headless-second-process.md). Shift
                 // uppercases the character the browser reports, so the chord
-                // is matched either way.
+                // is matched either way. Over an active block it stays the
+                // webview's own paste — capturing into a file you are not
+                // looking at, *and* pasting into the one you are, would be
+                // two actions on one keystroke.
                 Key::Character(ref character)
                     if character.eq_ignore_ascii_case("v")
                         && event.modifiers().ctrl()
-                        && event.modifiers().shift() =>
+                        && event.modifiers().shift()
+                        && editor.peek().active().is_none() =>
                 {
                     let Some(clipboard) = clipboard.clone() else {
                         return;
@@ -2381,7 +2385,7 @@ mod tests {
     #[test]
     fn the_capture_chord_writes_what_is_on_the_clipboard() {
         let vault = temp_vault();
-        let (mut dom, keys) = capture_app(
+        let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
             Some("collé du navigateur".to_string()),
             Some(CAPTURED_AT),
@@ -2404,7 +2408,7 @@ mod tests {
     fn a_capture_that_cannot_be_written_says_so() {
         // the same second twice: the second one's id is taken
         let vault = temp_vault();
-        let (mut dom, keys) = capture_app(
+        let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
             Some("deux fois".to_string()),
             Some(CAPTURED_AT),
@@ -2427,7 +2431,7 @@ mod tests {
         let before = count();
 
         // a clipboard that answers nothing captures nothing
-        let (mut dom, keys) = capture_app(
+        let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
             None,
             Some(CAPTURED_AT),
@@ -2436,7 +2440,7 @@ mod tests {
         assert_eq!(count(), before);
 
         // nor does one with no clock to stamp the note by
-        let (mut dom, keys) = capture_app(
+        let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
             Some("sans horloge".to_string()),
             None,
@@ -2449,6 +2453,30 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         capture_chord(&mut dom, &keys);
         assert_eq!(count(), before);
+    }
+
+    #[test]
+    fn over_an_active_block_the_chord_stays_an_ordinary_paste() {
+        let vault = temp_vault();
+        let captures = vault.path().join("capture");
+        let before = std::fs::read_dir(&captures)
+            .expect("the capture directory is there")
+            .count();
+        // a clipboard with something on it, but a block is being edited:
+        // the webview pastes into it and nothing is captured
+        let (mut dom, clicks, keys) = capture_app(
+            Some(vault.path().to_path_buf()),
+            Some("pour le bloc".to_string()),
+            Some(CAPTURED_AT),
+        );
+        activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        capture_chord(&mut dom, &keys);
+        assert_eq!(
+            std::fs::read_dir(&captures)
+                .expect("the capture directory is there")
+                .count(),
+            before
+        );
     }
 
     // -- the link picker: Ctrl+L, filter, accept -----------------------------
@@ -3056,7 +3084,7 @@ mod tests {
         root: Option<PathBuf>,
         pasted: Option<String>,
         now: Option<&str>,
-    ) -> (VirtualDom, Vec<ElementId>) {
+    ) -> (VirtualDom, Vec<ElementId>, Vec<ElementId>) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
@@ -3077,7 +3105,11 @@ mod tests {
             }))));
         }
         let mutations = dom.rebuild_to_vec();
-        (dom, listeners(&mutations, "keydown"))
+        (
+            dom,
+            listeners(&mutations, "click"),
+            listeners(&mutations, "keydown"),
+        )
     }
 
     /// Fires a keydown. The physical code is irrelevant to every handler,

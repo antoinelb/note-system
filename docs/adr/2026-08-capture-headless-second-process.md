@@ -42,6 +42,12 @@ a supported way to change the vault, tested since phase 3.
   as a notice. A webview that refuses the read captures nothing rather than
   an empty note. This is the roadmap's "hotkey + paste" for the case where
   the app is already in front of you and no DE shortcut is configured.
+- **The chord is inert over an active block**, where it stays the webview's
+  own paste. The keystroke reaches both: WebKit pastes into the textarea and
+  the chord would capture at the same time, which is two actions on one key.
+  Editing is also the wrong moment for it — a capture goes into a file you
+  are not looking at, so the chord belongs to the state where you are not
+  writing. The global shortcut has no such restriction.
 - **Nothing opens the capture afterwards.** Captures are fire-and-forget in
   v0: the logs centre pane shows time notes only, so a capture is written,
   counted as an open loop, and summarized later — outside the app until v1's
