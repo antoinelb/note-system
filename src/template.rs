@@ -23,8 +23,31 @@ pub fn create(
     if id.is_empty() {
         return Err(TemplateError::EmptyId(title.to_string()));
     }
-    let template = read_template(vault, note_type)?;
+    let template = read_template(vault, note_type.as_name())?;
     write_note(vault, category, &template, &id, title, created, content)
+}
+
+/// A capture, which has no title to derive an id from and no type to look a
+/// template up by: the id is built by the caller from the clock
+/// (`adr/2026-08-capture-timestamp-ids.md`) and the template is the
+/// category's own. It stands in for the title too — the capture template
+/// never uses that placeholder, and a capture is named by when it arrived.
+pub fn create_capture(
+    vault: &Path,
+    id: &str,
+    created: &str,
+    content: &str,
+) -> Result<PathBuf, TemplateError> {
+    let template = read_template(vault, NoteCategory::Capture.as_dir())?;
+    write_note(
+        vault,
+        &NoteCategory::Capture,
+        &template,
+        id,
+        id,
+        created,
+        content,
+    )
 }
 
 fn kebab_id(title: &str) -> String {
@@ -39,11 +62,7 @@ fn kebab_id(title: &str) -> String {
     id.trim_end_matches('-').to_string()
 }
 
-fn read_template(
-    vault: &Path,
-    note_type: &NoteType,
-) -> Result<String, TemplateError> {
-    let name = note_type.as_name();
+fn read_template(vault: &Path, name: &str) -> Result<String, TemplateError> {
     let path = vault.join("templates").join(format!("{name}.typ"));
     std::fs::read_to_string(&path).map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => {

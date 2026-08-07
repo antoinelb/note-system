@@ -58,6 +58,29 @@ pub struct CaretWriter(
     pub  Arc<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()>>> + Send + Sync>,
 );
 
+/// How the in-app capture chord reads what is on the clipboard: `main`
+/// injects a JS `navigator.clipboard.readText()`, the headless tests inject
+/// a scripted fake — the `CaretProbe` pattern again
+/// (adr/2026-08-capture-headless-second-process.md). `None` is a clipboard
+/// that would not answer, and captures nothing.
+#[derive(Clone)]
+pub struct Clipboard(
+    #[allow(clippy::type_complexity)]
+    pub  Arc<
+        dyn Fn() -> Pin<Box<dyn Future<Output = Option<String>>>>
+            + Send
+            + Sync,
+    >,
+);
+
+/// The clock a capture is stamped by, injected like `Today` and read only
+/// when one is written (adr/2026-08-capture-timestamp-ids.md). `Today` is
+/// the date every screen is drawn from and is read once at launch; a
+/// capture needs the time of day too, and needs it at the moment it
+/// arrives — so this is a closure rather than a value.
+#[derive(Clone)]
+pub struct Now(pub Arc<dyn Fn() -> jiff::Zoned + Send + Sync>);
+
 /// The quit chord lands on the `.app` root, but the open buffer lives in
 /// `Shell` — so `Shell` registers its flush here for `App` to call before
 /// closing (adr/2026-07-ctrl-q-flushes-then-closes.md, reinstated by
@@ -160,6 +183,8 @@ fn Shell(
     // ordinary caret movement
     let probe = try_consume_context::<CaretProbe>();
     let writer = try_consume_context::<CaretWriter>();
+    let clipboard = try_consume_context::<Clipboard>();
+    let now = try_consume_context::<Now>();
 
     // the link picker: open with its anchor frozen at the caret Ctrl+L
     // probed, because the textarea loses focus behind it and its text can no
@@ -271,11 +296,50 @@ fn Shell(
         let root = root.clone();
         let fragments = fragments.clone();
         let probe = probe.clone();
+        let clipboard = clipboard.clone();
+        let now = now.clone();
         move |event: KeyboardEvent| {
             match event.key() {
                 // the open-loops list is a destination you leave; escape
                 // reaches here only when no block owns it
                 Key::Escape if loops_open() => loops_open.set(false),
+                // in-app capture: what is on the clipboard becomes a note in
+                // capture/, no required fields, nothing to fill in
+                // (adr/2026-08-capture-headless-second-process.md). Shift
+                // uppercases the character the browser reports, so the chord
+                // is matched either way.
+                Key::Character(ref character)
+                    if character.eq_ignore_ascii_case("v")
+                        && event.modifiers().ctrl()
+                        && event.modifiers().shift() =>
+                {
+                    let Some(clipboard) = clipboard.clone() else {
+                        return;
+                    };
+                    let Some(now) = now.clone() else { return };
+                    let root = root.clone();
+                    spawn(async move {
+                        let Some(pasted) = (clipboard.0)().await else {
+                            return;
+                        };
+                        // one clock read stamps both halves, so a capture
+                        // cannot be filed on a day its id disagrees with
+                        let stamp = (now.0)();
+                        let notice = match crate::template::create_capture(
+                            &root,
+                            &crate::capture::capture_id(&stamp),
+                            &stamp.date().to_string(),
+                            &pasted,
+                        ) {
+                            Ok(path) => format!(
+                                "captured {}",
+                                crate::domain::stem_of(&path)
+                            ),
+                            Err(err) => format!("capture: {err:?}"),
+                        };
+                        editor.write().set_notice(notice);
+                    });
+                }
                 // the link picker (adr/2026-08-ctrl-l-link-picker.md). It
                 // lands here rather than on the app root because it needs the
                 // editor, the caret probe and the index — none of which the
@@ -2039,6 +2103,94 @@ mod tests {
         assert!(html.contains("captured today:"), "{html}");
     }
 
+    // -- in-app capture: the clipboard becomes a note ------------------------
+
+    /// The capture clock, on the same day as `TODAY` so the new note lands
+    /// in that day's "captured today" block.
+    const CAPTURED_AT: &str = "2026-07-23T09:15:42+02:00[Europe/Paris]";
+
+    fn capture_chord(dom: &mut VirtualDom, keys: &[ElementId]) {
+        press(
+            dom,
+            keys[LOGS_KEYS],
+            Key::Character("V".to_string()),
+            Modifiers::CONTROL | Modifiers::SHIFT,
+        );
+    }
+
+    #[test]
+    fn the_capture_chord_writes_what_is_on_the_clipboard() {
+        let vault = temp_vault();
+        let (mut dom, keys) = capture_app(
+            Some(vault.path().to_path_buf()),
+            Some("collé du navigateur".to_string()),
+            Some(CAPTURED_AT),
+        );
+        capture_chord(&mut dom, &keys);
+
+        let written =
+            vault.path().join("capture/capture-2026-07-23-091542.typ");
+        let text = std::fs::read_to_string(&written).expect("the capture");
+        assert!(text.contains("collé du navigateur"), "{text}");
+        assert!(text.contains(r#"created: "2026-07-23""#), "{text}");
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("captured capture-2026-07-23-091542"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_capture_that_cannot_be_written_says_so() {
+        // the same second twice: the second one's id is taken
+        let vault = temp_vault();
+        let (mut dom, keys) = capture_app(
+            Some(vault.path().to_path_buf()),
+            Some("deux fois".to_string()),
+            Some(CAPTURED_AT),
+        );
+        capture_chord(&mut dom, &keys);
+        capture_chord(&mut dom, &keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("capture: AlreadyExists"), "{html}");
+    }
+
+    #[test]
+    fn the_capture_chord_needs_a_clipboard_that_answers_and_a_clock() {
+        let vault = temp_vault();
+        let captures = vault.path().join("capture");
+        let count = || {
+            std::fs::read_dir(&captures)
+                .expect("the capture directory is there")
+                .count()
+        };
+        let before = count();
+
+        // a clipboard that answers nothing captures nothing
+        let (mut dom, keys) = capture_app(
+            Some(vault.path().to_path_buf()),
+            None,
+            Some(CAPTURED_AT),
+        );
+        capture_chord(&mut dom, &keys);
+        assert_eq!(count(), before);
+
+        // nor does one with no clock to stamp the note by
+        let (mut dom, keys) = capture_app(
+            Some(vault.path().to_path_buf()),
+            Some("sans horloge".to_string()),
+            None,
+        );
+        capture_chord(&mut dom, &keys);
+        assert_eq!(count(), before);
+
+        // and with no clipboard injected at all the chord is inert
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        capture_chord(&mut dom, &keys);
+        assert_eq!(count(), before);
+    }
+
     // -- the link picker: Ctrl+L, filter, accept -----------------------------
 
     #[test]
@@ -2637,6 +2789,37 @@ mod tests {
         (dom, clicks, caret, written)
     }
 
+    /// The app with a scripted clipboard and a fixed capture clock, for the
+    /// in-app capture chord. `now: None` leaves the clock uninjected, the
+    /// way a headless run without it would find things.
+    fn capture_app(
+        root: Option<PathBuf>,
+        pasted: Option<String>,
+        now: Option<&str>,
+    ) -> (VirtualDom, Vec<ElementId>) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
+            move || {
+                let pasted = pasted.clone();
+                Box::pin(async move { pasted })
+            },
+        ))));
+        if let Some(now) = now {
+            let stamp: jiff::Zoned =
+                now.parse().expect("the capture clock is a valid timestamp");
+            dom.insert_any_root_context(Box::new(Now(Arc::new(move || {
+                stamp.clone()
+            }))));
+        }
+        let mutations = dom.rebuild_to_vec();
+        (dom, listeners(&mutations, "keydown"))
+    }
+
     /// Fires a keydown. The physical code is irrelevant to every handler,
     /// which read only the key and its modifiers.
     fn press(
@@ -2960,6 +3143,16 @@ mod tests {
             ),
             ("time/2026-w30.typ", time_note("2026-w30", "weekly")),
             ("time/2026-summer.typ", time_note("2026-summer", "seasonal")),
+            // the shape the real one has: an empty Summary over the paste,
+            // which is what makes a fresh capture an open loop
+            (
+                "templates/capture.typ",
+                "#import \"/templates/template.typ\": *\n\
+                 #show: note\n\
+                 #meta(id: \"{{id}}\", created: \"{{created}}\")\n\
+                 \n== Summary\n\n== Original\n\n{{content}}\n"
+                    .to_string(),
+            ),
             (
                 // summarized, so the base vault still opens with zero open
                 // loops and the ember stays absent — every listener index
