@@ -460,6 +460,20 @@ fn Shell(
         }
     });
 
+    // escaping the picker must hand focus back itself, like the palette's
+    // close below: its input held the focus, and losing it to `<body>`
+    // would kill every chord. The picker only ever opens over an active
+    // block, so the way back is always the textarea remount, with the
+    // anchor pending so the caret stands where Ctrl+L found it
+    let close_picker = use_callback({
+        let pending_caret = pending_caret.clone();
+        move |anchor: usize| {
+            picker.set(None);
+            pending_caret.set(Some(anchor));
+            epoch += 1;
+        }
+    });
+
     // closing the palette puts the focus back itself, because nothing else
     // will: with no block active the effect above re-takes the pane, and
     // with one active a remount with the frozen caret pending re-takes the
@@ -968,7 +982,7 @@ fn Shell(
                                         let key = event.key();
                                         let last = matches.len().saturating_sub(1);
                                         match key {
-                                            Key::Escape => picker.set(None),
+                                            Key::Escape => close_picker.call(anchor),
                                             Key::Enter => {
                                                 // no matches: the keystroke does
                                                 // nothing rather than guessing
@@ -2949,6 +2963,37 @@ mod tests {
         assert!(
             html.contains("= 2026-07-23"),
             "the source is intact: {html}"
+        );
+    }
+
+    #[test]
+    fn escaping_the_picker_remounts_the_textarea_at_the_anchor() {
+        // the picker's input held the focus; escape hands it back to the
+        // textarea instead of stranding it outside the app
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, written) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING);
+        let (_, picker_keys) = open_picker(&mut dom, keys);
+
+        let mutations = press_for_mutations(
+            &mut dom,
+            picker_keys,
+            Key::Escape,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "{html}");
+        assert!(html.contains("block-active"), "still editing: {html}");
+        // the escape remounted the textarea; its mount puts the caret back
+        // on the anchor Ctrl+L froze
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        assert_eq!(
+            *written.lock().expect("the writer cell never poisons"),
+            vec![LINK_IN_HEADING],
+            "the caret went back where the picker was anchored"
         );
     }
 
