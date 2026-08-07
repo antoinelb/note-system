@@ -37,7 +37,7 @@ Daily, weekly and season notes follow the current Obsidian pattern: quotes secti
 
 ### Capture notes
 
-Created instantly via global hotkey or paste. No required fields, no summary required at creation. Debt mechanism: a capture without a self-written summary appears in the open-loops panel and stays gray on the canvas. Promotion to permanent = choosing a type + writing your own summary/prose. The pasted original is retained (e.g. in an appendix block) after promotion.
+Created instantly, two ways: a desktop shortcut pipes a paste into `app --capture`, a short-lived headless process that writes the file and exits (`adr/2026-08-capture-headless-second-process.md`), and Ctrl+Shift+V does the same from inside the app. Ids are the clock to the second (`adr/2026-08-capture-timestamp-ids.md`). No required fields, no summary required at creation. Debt mechanism: a capture whose `== Summary` section is still empty (`adr/2026-08-summarized-nonempty-summary-section.md`) appears in the open-loops list and stays gray on the canvas. Promotion to permanent = choosing a type + writing your own summary/prose. The pasted original is retained (e.g. in an appendix block) after promotion.
 
 ## Storage layout
 
@@ -136,7 +136,7 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 - The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid
 - Hybrid block editor with live typst rendering (split-view fallback)
 - Link index, backlinks panel, dangling-link detection
-- Capture notes (global hotkey, paste) + open-loops counter opening a flat list (captures + dangling links)
+- Capture notes (desktop shortcut into `app --capture`, or Ctrl+Shift+V in the app) + open-loops counter opening a flat list (captures + dangling links + typeless notes)
 
 **v1 — the table**
 - Canvas with persistent positions, two-level semantic zoom (titles → rendered bodies)

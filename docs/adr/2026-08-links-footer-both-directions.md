@@ -24,7 +24,9 @@ marked" the deck explicitly kept as *editor* vocabulary.
   itself dangling *as it is typed*, and stops the moment its note exists.
 - **Backlinks come from the index**, which is right for them: they depend on
   *other* files, and those cannot change in-session until the watcher lands
-  in phase 10.
+  in phase 10. (It has, `adr/2026-08-watcher-feeds-the-ui.md`: the index now
+  keeps up with the vault, and both halves of this decision still hold — the
+  buffer is still fresher than any index for the note being typed into.)
 - **Clickable only where the app can go.** A time note opens in the centre
   pane, so its entry jumps; a permanent, capture or generated note has
   nowhere to be shown until v1's table

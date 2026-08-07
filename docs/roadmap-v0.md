@@ -5,7 +5,7 @@ The plan carries the *what* and *why*; this file carries the *order* and the *st
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr/2026-07-two-screens-table-and-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
-**Next step → Phase 10, first unchecked box.**
+**Next step → v1, the table (`plan.md` § Roadmap); or the polish backlog below.**
 
 ## How we work
 
@@ -176,22 +176,26 @@ Exit: you never type a full `#l("...")` by hand.
 
 Goal: zero-friction capture in, visible debt out — v0 complete.
 
-- [ ] In-app capture: hotkey + paste → new file in `capture/` from the capture template, no required fields.
-- [ ] Global (OS-level) capture strategy on Linux/Wayland: true global hotkey vs a DE shortcut launching `app --capture` through single-instance IPC. **→ ADR**
-- [ ] Define what marks a capture "summarized" (suggestion: a non-empty summary block from the capture template). **→ ADR**
-- [ ] Feed the phase-6 ember its real count, and make clicking it open a flat list of unsummarized captures, dangling links and typeless notes. No ages, no grouping, no per-item actions — the queries already exist from phase 3 (`adr/2026-07-debt-counter-then-list.md`).
+- [x] In-app capture: hotkey + paste → new file in `capture/` from the capture template, no required fields. Ctrl+Shift+V reads the clipboard through an injected `navigator.clipboard.readText()` (the `CaretProbe` seam) and reports the new id as a notice; the capture itself is never opened, since the centre pane shows time notes only.
+- [x] Global (OS-level) capture strategy on Linux/Wayland: true global hotkey vs a DE shortcut launching `app --capture` through single-instance IPC. **→ ADR** (`adr/2026-08-capture-headless-second-process.md` — a DE shortcut runs `wl-paste | app --capture`, a short-lived headless process that writes the file and exits; no IPC, no single-instance, and it works with the app closed. Ids are the clock to the second, `adr/2026-08-capture-timestamp-ids.md`.)
+- [x] Define what marks a capture "summarized" (suggestion: a non-empty summary block from the capture template). **→ ADR** (`adr/2026-08-summarized-nonempty-summary-section.md` — any non-whitespace content between `== Summary` and the next heading of depth ≤ 2, detected in `parse_note`, stored in `notes.summarized`, schema 3)
+- [x] Feed the phase-6 ember its real count, and make clicking it open a flat list of unsummarized captures, dangling links and typeless notes. No ages, no grouping, no per-item actions — the queries already exist from phase 3 (`adr/2026-07-debt-counter-then-list.md`). **→ ADR** (`adr/2026-08-loops-list-overlay.md` — an overlay in the centre pane, on the link-picker pattern; `survey` returns the lines themselves, so the count *is* the list's length)
   - **Known design gap**: the deck never drew the open-loops screen ("show the loops screen in this language" is in its own *try next*). The flat list is therefore designed here, in phase-6 vocabulary, not transcribed from a wireframe.
-- [ ] Tests: capture creation, summarized-detection, counter total matches the list.
+- [x] The count moves onto the watcher: `main` starts `VaultWatcher` and forwards its batches to the shell, which reapplies them to the index and refreshes the rail and the loops. Without this the headless `--capture` process would write files the running app never notices. **→ ADR** (`adr/2026-08-watcher-feeds-the-ui.md`)
+- [x] Tests: capture creation, summarized-detection, counter total matches the list (which now holds by construction — the ember renders the list's length).
 
 Exit: v0 checklist below is fully green.
 
 ## v0 exit criteria (from `plan.md`)
 
-- [ ] Vault structure + `#meta`/`#l` conventions + shared template (phase 1)
-- [ ] File CRUD, creation from per-type templates, time notes (day/week/season) with derived prev/next movement (phase 5)
-- [ ] The design language: palette and type scale as theme variables, dark **and** light, the one-line chrome (phase 6)
-- [ ] The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid (phase 7)
-- [ ] Hybrid block editor with live rendering — or the source ⇄ rendered toggle via the declared fallback (phases 5, 8)
+- [x] Vault structure + `#meta`/`#l` conventions + shared template (phase 1)
+- [x] File CRUD, creation from per-type templates, time notes (day/week/season) with derived prev/next movement (phase 5)
+- [x] The design language: palette and type scale as theme variables, dark **and** light, the one-line chrome (phase 6)
+- [x] The logs screen: time rail, rendered centre pane with scale chain and "captured today", month grid (phase 7)
+- [x] Hybrid block editor with live rendering — or the source ⇄ rendered toggle via the declared fallback (phases 5, 8) — the hybrid editor landed, so the fallback was never called on
 - [x] Link index, backlinks panel, dangling-link detection (phases 3, 9)
-- [ ] Capture notes + open-loops ember and list (phase 10)
-- [ ] `make test` green with 100% coverage; every note compiles with vanilla typst
+- [x] Capture notes + open-loops ember and list (phase 10)
+- [x] `make test` green with 100% coverage; every note compiles with vanilla typst (`make check-vault`)
+
+**v0 is complete.** What remains is the polish backlog above — queued from
+daily-driving, not blocking — and v1, the table (`plan.md` § Roadmap).
