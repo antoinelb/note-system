@@ -2,7 +2,7 @@ use crate::domain::{Link, Meta, MetaAnomaly, MetaStatus, NoteId, NoteType};
 use jiff::civil::Date;
 use typst_syntax::ast::{self, AstNode};
 
-const MAX_NODES: usize = 100_000;
+pub(crate) const MAX_NODES: usize = 100_000;
 
 pub struct ParsedNote {
     pub meta: MetaStatus,
@@ -165,7 +165,7 @@ fn extract_origin(meta: &mut Meta, named: ast::Named) {
     }
 }
 
-fn extract_link_target(call: ast::FuncCall) -> Option<NoteId> {
+pub(crate) fn extract_link_target(call: ast::FuncCall) -> Option<NoteId> {
     for arg in call.args().items() {
         if let ast::Arg::Pos(expr) = arg {
             return get_string_value(expr).map(NoteId);

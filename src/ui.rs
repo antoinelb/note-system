@@ -304,6 +304,39 @@ fn Shell(
                 Key::ArrowRight => {
                     month.set(logs::page_month(month(), true));
                 }
+                // Ctrl+Enter follows the link under the caret
+                // (adr/2026-08-ctrl-enter-opens-time-links.md). The modifier
+                // is matched in the pattern so the plain-Enter arm below
+                // never sees the chord — it would read it as "create the
+                // selected note" and write a file the user never asked for.
+                Key::Enter if event.modifiers().ctrl() => {
+                    let Some(probe) = probe.clone() else { return };
+                    spawn(async move {
+                        let Some(units) = (probe.0)().await else {
+                            return;
+                        };
+                        // the probe answers `null` unless a textarea has
+                        // focus, so a note with no active block stops here
+                        let target = {
+                            let editor = editor.peek();
+                            editor.active_source().and_then(|slice| {
+                                links::link_at(
+                                    slice,
+                                    blocks::byte_offset_of_utf16(slice, units),
+                                )
+                            })
+                        };
+                        // only time notes have somewhere to open; the rest
+                        // wait for v1's table
+                        // (adr/2026-07-permanent-notes-wait-for-table.md)
+                        if let Some(target) = target
+                            && let Some(scale) =
+                                links::scale_of(&target, &notes.peek())
+                        {
+                            select.call((scale, target));
+                        }
+                    });
+                }
                 // only enter writes the file — navigating never does
                 Key::Enter => {
                     let (scale, id) = selected();
@@ -2095,6 +2128,76 @@ mod tests {
         press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
+    }
+
+    // -- Ctrl+Enter: following the link under the caret ---------------------
+
+    /// The heading block of the fixture's selected day is
+    /// `= 2026-07-23\n#l("2026-07-22")`, so the link opens at this offset.
+    const LINK_IN_HEADING: usize = "= 2026-07-23\n".len();
+
+    #[test]
+    fn ctrl_enter_opens_the_time_note_under_the_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        // inside the `#l("2026-07-22")` the heading block ends with
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING + 3);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "the chord jumped to the linked day: {html}"
+        );
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+    }
+
+    #[test]
+    fn ctrl_enter_away_from_a_link_neither_jumps_nor_creates() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        // in the heading text, well before the link
+        *caret.lock().expect("the probe cell never poisons") = Some(2);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
+            "the selection stayed put: {html}"
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_without_an_active_block_writes_no_file() {
+        let vault = temp_vault();
+        // an empty day is selected, the one the plain Enter would create
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[day_cell(20)]);
+        let (_, keys, _) = pane_targets(&mut dom, &clicks);
+
+        // the probe answers nothing, the way it does with no textarea focused
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        // and again with an answer, which no block can be measured against
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        assert!(
+            !vault.path().join("time/2026-07-20.typ").exists(),
+            "the chord is not the create keystroke"
+        );
+
+        // and with no probe injected at all it is simply inert
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">23"), "{html}");
     }
 
     #[test]

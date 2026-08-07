@@ -5,8 +5,11 @@
 
 use std::path::Path;
 
+use typst_syntax::ast;
+
 use crate::domain::{NoteId, NoteType};
 use crate::index::Backlink;
+use crate::parse::MAX_NODES;
 
 /// The picker never shows more than this many rows: past a handful, reading
 /// the list costs more than typing one more letter.
@@ -117,9 +120,68 @@ pub fn backlinks(
         .collect()
 }
 
+/// The `#l("...")` target the caret is standing in, for Ctrl+Enter
+/// (`adr/2026-08-ctrl-enter-opens-time-links.md`). `caret` is a byte offset
+/// into `block_text` — the active block's own source, the same slice the
+/// caret probe measures. A link with no string target leads nowhere, exactly
+/// as the footer reads it.
+pub fn link_at(block_text: &str, caret: usize) -> Option<String> {
+    let root = typst_syntax::parse(block_text);
+    // typst tokenizes the `#` as the call's left sibling rather than part of
+    // it, so the caret sitting on it is outside the span by a byte. Probing
+    // one further lets the chord fire from the very start of the link, where
+    // Home leaves the caret on a line that opens with one.
+    target_at(&root, caret).or_else(|| target_at(&root, caret + 1))
+}
+
+/// The link call whose span holds `caret`, walked from `root`. Both edges
+/// count as inside, so the caret just past a `)` still follows that link.
+fn target_at(root: &typst_syntax::SyntaxNode, caret: usize) -> Option<String> {
+    // (start, node); only nodes whose span holds the caret are ever pushed
+    // back, so the walk descends one root-to-link path rather than the tree
+    let mut stack = vec![(0usize, root)];
+
+    for _ in 0..MAX_NODES {
+        let Some((start, node)) = stack.pop() else {
+            break;
+        };
+        if caret < start || caret > start + node.len() {
+            continue;
+        }
+        if let Some(call) = node.cast::<ast::FuncCall>()
+            && let ast::Expr::Ident(name) = call.callee()
+            && name.as_str() == "l"
+        {
+            return crate::parse::extract_link_target(call).map(|id| id.0);
+        }
+        push_children(&mut stack, start, node);
+    }
+    None
+}
+
+/// The node's children with their own offsets, ordered so popping walks the
+/// text left to right — two links touching at the caret resolve to the first,
+/// the way reading does.
+fn push_children<'a>(
+    stack: &mut Vec<(usize, &'a typst_syntax::SyntaxNode)>,
+    start: usize,
+    node: &'a typst_syntax::SyntaxNode,
+) {
+    let base = stack.len();
+    let mut offset = start;
+    for child in node.children() {
+        stack.push((offset, child));
+        offset += child.len();
+    }
+    stack[base..].reverse();
+}
+
 /// The scale a time note is filed under, or `None` for everything the logs
 /// screen cannot display.
-fn scale_of(id: &str, time_notes: &[(String, NoteType)]) -> Option<NoteType> {
+pub fn scale_of(
+    id: &str,
+    time_notes: &[(String, NoteType)],
+) -> Option<NoteType> {
     time_notes
         .iter()
         .find(|(known, _)| known == id)
@@ -199,6 +261,57 @@ mod tests {
     #[test]
     fn a_completion_writes_a_plain_l_call() {
         assert_eq!(format_link("atomic-notes"), "#l(\"atomic-notes\")");
+    }
+
+    #[test]
+    fn the_caret_finds_the_link_it_stands_in() {
+        // `#` at byte 5, the call itself spanning 6..18
+        let text = r#"Voir #l("luhmann") demain"#;
+        assert_eq!(link_at(text, 12), Some("luhmann".to_string()));
+        // from the '#' the link opens with, and from just past its ')'
+        assert_eq!(link_at(text, 5), Some("luhmann".to_string()));
+        assert_eq!(link_at(text, 18), Some("luhmann".to_string()));
+        // a block that is nothing but a link, caret at its very start
+        assert_eq!(link_at(r#"#l("seul")"#, 0), Some("seul".to_string()));
+    }
+
+    #[test]
+    fn a_caret_outside_every_link_finds_nothing() {
+        let text = r#"Voir #l("luhmann") demain"#;
+        assert_eq!(link_at(text, 4), None);
+        assert_eq!(link_at(text, 19), None);
+        assert_eq!(link_at("prose sans lien", 3), None);
+        assert_eq!(link_at("", 0), None);
+    }
+
+    #[test]
+    fn the_caret_picks_the_link_it_is_in_not_its_neighbour() {
+        let text = r#"#l("a") et #l("bb")"#;
+        assert_eq!(link_at(text, 4), Some("a".to_string()));
+        assert_eq!(link_at(text, 15), Some("bb".to_string()));
+        // touching links resolve left to right, the way reading does
+        assert_eq!(link_at(r#"#l("a")#l("bb")"#, 7), Some("a".to_string()));
+    }
+
+    #[test]
+    fn a_link_nested_in_markup_is_still_under_the_caret() {
+        assert_eq!(
+            link_at(r#"Voir #emph[#l("nested")] ici"#, 16),
+            Some("nested".to_string())
+        );
+    }
+
+    #[test]
+    fn a_link_with_no_string_target_leads_nowhere() {
+        assert_eq!(link_at("#l()", 2), None);
+        assert_eq!(link_at("#l(fill: red)", 5), None);
+    }
+
+    #[test]
+    fn a_caret_past_multibyte_text_still_lands_in_the_link() {
+        // "été" is 5 bytes, so the byte offset is not the character count
+        let text = r#"été #l("hiver")"#;
+        assert_eq!(link_at(text, 9), Some("hiver".to_string()));
     }
 
     fn time_notes() -> Vec<(String, NoteType)> {

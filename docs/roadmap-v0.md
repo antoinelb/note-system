@@ -168,6 +168,7 @@ Goal: links are cheap to write and visible in both directions.
 - [x] Backlinks panel on the open note: a both-directions footer (`←` from the index, `→` parsed from the live buffer so it is fresh under edits), clickable only for time notes — the rest wait for v1's table. **→ ADR** (`adr/2026-08-links-footer-both-directions.md`)
 - [x] Dangling links visibly marked — `--ember`, in the footer's `→` row, appearing as the link is typed.
 - [x] Tests: autocomplete filtering, backlink query wiring.
+- [x] Extra functionnality: ctrl-enter on a link opens that note — over an active block, the `#l` under the caret is found by an offset-tracking `typst-syntax` walk (`links::link_at`), and time targets open through the same `select` a rail click uses; the rest stay inert. **→ ADR** (`adr/2026-08-ctrl-enter-opens-time-links.md`)
 
 Exit: you never type a full `#l("...")` by hand.
 

@@ -176,7 +176,7 @@ impl Editor {
 
     /// The active block's own text, or `None` when there is no active block
     /// or its span no longer fits the buffer — the widget diverged.
-    fn active_source(&self) -> Option<&str> {
+    pub fn active_source(&self) -> Option<&str> {
         let block = self.blocks.get(self.active?)?;
         let (_, text) = self.note()?;
         text.get(block.content())
