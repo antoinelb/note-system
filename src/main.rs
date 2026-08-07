@@ -1,4 +1,4 @@
-use note_system::{capture, time, ui, vault};
+use note_system::{capture, time, ui, vault, watch};
 
 fn main() {
     // `wl-paste | app --capture`: a short-lived headless process that writes
@@ -20,9 +20,16 @@ fn main() {
         return;
     }
 
+    let root = vault::vault_path();
+
     dioxus::LaunchBuilder::new()
         .with_cfg(dioxus::desktop::Config::new().with_menu(None))
-        .with_context(ui::VaultRoot(vault::vault_path()))
+        .with_context(ui::VaultRoot(root.clone()))
+        // the watcher's own thread forwards its batches into the async
+        // channel the shell awaits (adr/2026-08-watcher-feeds-the-ui.md);
+        // a watcher that will not start leaves the app on the index it
+        // loaded at launch, which is what it had before this existed
+        .with_context(watcher_feed(root.as_deref()))
         // called from the keydown handler, where the runtime context that
         // window() reads is current
         .with_context(ui::Closer(std::sync::Arc::new(|| {
@@ -76,4 +83,37 @@ fn main() {
             })
         })))
         .launch(ui::App)
+}
+
+/// Starts the vault watcher and bridges its blocking channel to the async
+/// one the shell awaits. The spawned thread owns the watcher — dropping it
+/// would stop the debouncer — and ends when the app closes the receiver.
+fn watcher_feed(root: Option<&std::path::Path>) -> ui::VaultFeed {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let started = root.map(watch::VaultWatcher::start);
+    match started {
+        Some(Ok(watcher)) => {
+            std::thread::spawn(move || {
+                for batch in watcher.changes.iter() {
+                    if sender.send(batch).is_err() {
+                        break;
+                    }
+                }
+            });
+            feed(Some(receiver))
+        }
+        Some(Err(error)) => {
+            eprintln!("the vault will not be watched: {error}");
+            feed(None)
+        }
+        None => feed(None),
+    }
+}
+
+fn feed(
+    receiver: Option<
+        tokio::sync::mpsc::UnboundedReceiver<Vec<watch::VaultChange>>,
+    >,
+) -> ui::VaultFeed {
+    ui::VaultFeed(std::sync::Arc::new(std::sync::Mutex::new(receiver)))
 }

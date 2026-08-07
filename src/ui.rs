@@ -4,11 +4,12 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use jiff::civil::Date;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::blocks;
 use crate::domain::{NoteCategory, NoteType};
@@ -19,6 +20,7 @@ use crate::logs::{self, Selection};
 use crate::loops;
 use crate::render::{FragmentCache, RenderTheme};
 use crate::time;
+use crate::watch;
 
 /// One idle timer drives the save (adr/2026-07-debounced-autosave.md);
 /// shortened under `cfg(test)` so the settled state is a few polls away.
@@ -71,6 +73,17 @@ pub struct Clipboard(
             + Send
             + Sync,
     >,
+);
+
+/// How the vault watcher reaches the screen: `main` starts the watcher on
+/// its own thread and hands the receiving end over here, the headless tests
+/// send batches by hand (adr/2026-08-watcher-feeds-the-ui.md). Taken out of
+/// the cell once, by the shell's first render — a receiver has one owner,
+/// and an app with no feed simply keeps the index it loaded at launch.
+#[derive(Clone)]
+pub struct VaultFeed(
+    #[allow(clippy::type_complexity)]
+    pub  Arc<Mutex<Option<UnboundedReceiver<Vec<watch::VaultChange>>>>>,
 );
 
 /// The clock a capture is stamped by, injected like `Today` and read only
@@ -171,7 +184,7 @@ fn Shell(
     let mut notes = use_signal(|| notes);
     // the open loops themselves; the ember shows how many there are and the
     // overlay shows which (adr/2026-08-loops-list-overlay.md)
-    let loops = use_signal(|| loops);
+    let mut loops = use_signal(|| loops);
     let mut loops_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
@@ -209,6 +222,35 @@ fn Shell(
     // once is enough: the Callback's identity is stable across re-renders,
     // only its captured closure is refreshed
     use_hook(move || register.0.borrow_mut().replace(quit_flush));
+
+    // the vault watcher, if one was handed over: every batch it debounces
+    // updates the index and refreshes what the screen derives from it — the
+    // rail and the open loops (adr/2026-08-watcher-feeds-the-ui.md). Taken
+    // out of its cell once; a second render finds `None` and starts nothing.
+    use_hook({
+        let root = root.clone();
+        move || {
+            let Some(feed) = try_consume_context::<VaultFeed>() else {
+                return;
+            };
+            let taken = feed.0.lock().ok().and_then(|mut cell| cell.take());
+            let Some(mut changes) = taken else { return };
+            spawn(async move {
+                loop {
+                    let Some(batch) = changes.recv().await else {
+                        break;
+                    };
+                    match refresh(&root, &batch) {
+                        Ok((time_notes, open)) => {
+                            notes.set(time_notes);
+                            loops.set(open);
+                        }
+                        Err(message) => editor.write().set_notice(message),
+                    }
+                }
+            });
+        }
+    });
 
     // one idle timer drives the save (adr/2026-07-debounced-autosave.md);
     // block boundaries still recompute only at the deactivation points
@@ -942,6 +984,28 @@ fn load_notes(root: &Path) -> Result<Survey, IndexError> {
 /// database.
 fn survey(index: &Index) -> Result<Survey, IndexError> {
     Ok((index.time_notes()?, open_loops(index)?))
+}
+
+/// One watcher batch applied: the index catches up with the files, then the
+/// screen catches up with the index. Opening the index per batch matches
+/// every other read in this module — the batches arrive debounced, seldom,
+/// and one at a time.
+fn refresh(
+    root: &Path,
+    batch: &[watch::VaultChange],
+) -> Result<Survey, String> {
+    absorb(root, batch).map_err(|err| format!("watching the vault: {err:?}"))
+}
+
+/// Open, apply, re-read: every step reports the same way, so the caller has
+/// one message to show rather than three.
+fn absorb(
+    root: &Path,
+    batch: &[watch::VaultChange],
+) -> Result<Survey, IndexError> {
+    let mut index = Index::open(&root.join(".index/index.db"))?;
+    watch::apply(&mut index, root, batch)?;
+    survey(&index)
 }
 
 /// The open loops themselves, not a count of them: the chrome's ember shows
@@ -2101,6 +2165,202 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(RENDERED_NOTE), "the note itself is fine");
         assert!(html.contains("captured today:"), "{html}");
+    }
+
+    // -- the watcher's batches reach the screen ------------------------------
+
+    /// The app with a vault feed injected, plus the sender the test keeps to
+    /// play the watcher itself.
+    fn watched_app(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        tokio::sync::mpsc::UnboundedSender<Vec<watch::VaultChange>>,
+    ) {
+        set_event_converter(Box::new(TestEvents));
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(VaultFeed(Arc::new(
+            Mutex::new(Some(receiver)),
+        ))));
+        with_reactor(|| dom.rebuild_to_vec());
+        (dom, sender)
+    }
+
+    /// Sends one batch and lets the shell's task run to its next await.
+    fn feed_batch(
+        dom: &mut VirtualDom,
+        sender: &tokio::sync::mpsc::UnboundedSender<Vec<watch::VaultChange>>,
+        batch: Vec<watch::VaultChange>,
+    ) {
+        sender.send(batch).expect("the shell holds the receiver");
+        block_on(settle(dom));
+    }
+
+    /// Writes an unsummarized capture into the vault, the way the headless
+    /// `--capture` process would while the app is open.
+    fn write_capture(vault: &Path, id: &str) -> PathBuf {
+        let path = vault.join(format!("capture/{id}.typ"));
+        std::fs::write(
+            &path,
+            format!(
+                "#import \"/templates/template.typ\": *\n\
+                 #show: note\n\
+                 #meta(id: \"{id}\", created: \"{TODAY}\")\n\
+                 \n== Summary\n\n== Original\n\nvenu du dehors\n"
+            ),
+        )
+        .expect("the capture is written");
+        path
+    }
+
+    #[test]
+    fn a_capture_written_from_outside_reaches_the_ember_and_the_day() {
+        let vault = temp_vault();
+        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        assert!(
+            !dioxus_ssr::render(&dom).contains("ember"),
+            "the vault opens with no loops"
+        );
+
+        let path = write_capture(vault.path(), "capture-du-dehors");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Capture,
+                path: PathBuf::from("capture/capture-du-dehors.typ"),
+            }],
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="ember">1</span>"#), "{html}");
+        assert!(html.contains("capture-du-dehors · still open"), "{html}");
+
+        // and it leaves again when the file does
+        std::fs::remove_file(&path).expect("the capture is deleted");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Removed(PathBuf::from(
+                "capture/capture-du-dehors.typ",
+            ))],
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("ember"), "back to nothing owed: {html}");
+    }
+
+    #[test]
+    fn a_rescan_batch_rebuilds_the_whole_index() {
+        let vault = temp_vault();
+        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        write_capture(vault.path(), "capture-rescan");
+        std::fs::write(
+            vault.path().join("time/2026-07-24.typ"),
+            time_note("2026-07-24", "daily"),
+        )
+        .expect("the new day is written");
+
+        feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="ember">1</span>"#), "{html}");
+        assert!(
+            html.contains(r#"<span class="rail-id">2026-07-24</span>"#),
+            "the rail caught the new day too: {html}"
+        );
+    }
+
+    #[test]
+    fn a_batch_the_index_cannot_absorb_becomes_the_notice() {
+        // an index that will not even open
+        let vault = temp_vault();
+        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_file(vault.path().join(".index/index.db"))
+            .expect("the database is there to remove");
+        std::fs::create_dir(vault.path().join(".index/index.db"))
+            .expect("a directory squats the database path");
+        feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
+        assert!(dioxus_ssr::render(&dom).contains("watching the vault"));
+    }
+
+    #[test]
+    fn a_change_that_cannot_be_read_becomes_the_notice() {
+        let vault = temp_vault();
+        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        // a directory where the watcher says a note is: not missing, which
+        // would be a deletion, but unreadable
+        std::fs::create_dir(vault.path().join("capture/impossible.typ"))
+            .expect("the fake note is created");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Capture,
+                path: PathBuf::from("capture/impossible.typ"),
+            }],
+        );
+        assert!(dioxus_ssr::render(&dom).contains("watching the vault"));
+    }
+
+    #[test]
+    fn a_reread_that_fails_after_the_change_lands_becomes_the_notice() {
+        let vault = temp_vault();
+        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE links")
+            .expect("the sabotage succeeds");
+        // an empty batch changes nothing, so the failure can only be the
+        // re-read the screen is refreshed from
+        feed_batch(&mut dom, &sender, vec![]);
+        assert!(dioxus_ssr::render(&dom).contains("watching the vault"));
+    }
+
+    #[test]
+    fn a_watcher_that_stops_ends_the_task_rather_than_spinning() {
+        let vault = temp_vault();
+        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        drop(sender);
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom).contains("rail-id"),
+            "the screen stands, it just stops hearing about the vault"
+        );
+    }
+
+    #[test]
+    fn an_app_with_no_feed_keeps_the_index_it_launched_with() {
+        // every other test mounts this way; the shell must simply not watch
+        let vault = temp_vault();
+        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
+        assert!(!dioxus_ssr::render(&dom).contains("watching the vault"));
+    }
+
+    #[test]
+    fn a_feed_already_taken_starts_no_second_watcher() {
+        let vault = temp_vault();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(Some(
+            vault.path().to_path_buf(),
+        ))));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        // the cell arrives empty, as it would on a second shell
+        dom.insert_any_root_context(Box::new(VaultFeed(Arc::new(
+            Mutex::new(None),
+        ))));
+        with_reactor(|| dom.rebuild_to_vec());
+        assert!(
+            dioxus_ssr::render(&dom).contains("rail-id"),
+            "it still renders"
+        );
     }
 
     // -- in-app capture: the clipboard becomes a note ------------------------
