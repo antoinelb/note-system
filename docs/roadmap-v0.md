@@ -5,7 +5,7 @@ The plan carries the *what* and *why*; this file carries the *order* and the *st
 Ordering rationale: `adr/2026-07-v0-walking-skeleton-order.md`.
 UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr/2026-07-two-screens-table-and-logs.md` — the table is v1, the logs are v0, and there is no note list in the finished app.
 
-**Next step → v1, the table (`plan.md` § Roadmap); or the polish backlog below.**
+**Next step → v1, the table (`roadmap-v1.md`); or the polish backlog below.**
 
 ## How we work
 
@@ -154,6 +154,7 @@ The phase-5 split view itself is not the fallback — it dies in phase 7, becaus
 
 ## Polish backlog (queued from daily-driving, no phase of its own)
 
+- [x] Ctrl+Q and Ctrl+T went dead whenever the caret was not in a block: an unmounting textarea drops focus on `<body>`, above the app root the chords are handled on, so they were never delivered. The pane now takes focus back whenever no block holds it. **→ ADR** (`adr/2026-08-the-pane-holds-focus.md`)
 - [ ] Logs screen: the time rail and the jump panel are collapsible, so the centre pane can take the whole width while writing (requested after the first phase-8 writing sessions).
   - [ ] Decide the mechanism (keystroke, click on the pane edge, or both) and whether the collapsed state persists across sessions. **→ ADR**
 - [ ] Replace the active block's textarea with a homemade widget that draws its own box caret (WebKitGTK has no `caret-shape`, so a native textarea caret stays a bar). This is the buffer-owned-cursor path `adr/2026-07-buffer-is-path-plus-string.md` sketched and v2's vim layer needs anyway — building it pulls that v2 groundwork forward and supersedes the textarea half of `adr/2026-07-hybrid-active-block-textarea.md`. The costs that ADR lists (hand-rolled selection, clipboard, key repeat, French dead-key composition) come with it; the `Editor`/`Buffer` layer underneath is untouched.
@@ -168,7 +169,7 @@ Goal: links are cheap to write and visible in both directions.
 - [x] Backlinks panel on the open note: a both-directions footer (`←` from the index, `→` parsed from the live buffer so it is fresh under edits), clickable only for time notes — the rest wait for v1's table. **→ ADR** (`adr/2026-08-links-footer-both-directions.md`)
 - [x] Dangling links visibly marked — `--ember`, in the footer's `→` row, appearing as the link is typed.
 - [x] Tests: autocomplete filtering, backlink query wiring.
-- [x] Extra functionnality: ctrl-enter on a link opens that note — over an active block, the `#l` under the caret is found by an offset-tracking `typst-syntax` walk (`links::link_at`), and time targets open through the same `select` a rail click uses; the rest stay inert. **→ ADR** (`adr/2026-08-ctrl-enter-opens-time-links.md`)
+- [x] Extra functionnality: ctrl-enter on a link opens that note — over an active block, the `#l` under the caret is found by an offset-tracking `typst-syntax` walk (`links::link_at`), and time targets open through the same `select` a rail click uses; the rest stay inert. Ctrl+click in the source follows the same path (the click has already moved the caret); a rendered block is an SVG with no source offsets, so it stays a plain activation. **→ ADR** (`adr/2026-08-ctrl-enter-opens-time-links.md`)
 
 Exit: you never type a full `#l("...")` by hand.
 
@@ -198,4 +199,4 @@ Exit: v0 checklist below is fully green.
 - [x] `make test` green with 100% coverage; every note compiles with vanilla typst (`make check-vault`)
 
 **v0 is complete.** What remains is the polish backlog above — queued from
-daily-driving, not blocking — and v1, the table (`plan.md` § Roadmap).
+daily-driving, not blocking — and v1, the table (`roadmap-v1.md`).

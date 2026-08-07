@@ -14,6 +14,12 @@ The keyboard already owns the rest of the writing loop, so the last step of
   in.** The chord already bubbles out of the textarea to the logs pane, where
   Ctrl+L lives, so it needs no new plumbing — it needs the editor, the caret
   probe and the note list, none of which the app root has.
+- **Ctrl+click in the source does the same thing**, through the same code
+  path: the click has already moved the caret, so the same probe answers
+  where it landed and one `follow_link` callback serves both. It applies to
+  the **active block only** — a rendered block is a compiled SVG with no
+  mapping back to source offsets, so there is nothing to ask about a click
+  in it. A plain click is unchanged: it just places the caret.
 - **The modifier is matched in the pattern**, `Key::Enter if
   event.modifiers().ctrl()`, so the arm always wins ahead of the plain-Enter
   create-the-selected-note arm below it. A chord that finds no link returns

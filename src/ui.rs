@@ -288,6 +288,67 @@ fn Shell(
         }
     });
 
+    // Where the logs pane is, so focus can be put back on it. A keydown
+    // only bubbles up from whatever has focus, and the window's chords
+    // (Ctrl+Q, Ctrl+T) are handled on the app root — so when the active
+    // block's textarea unmounts, the webview drops focus on `<body>`, which
+    // is *above* the app and outside every handler it has, and the chords
+    // go dead until something inside is clicked. A plain cell, like
+    // QuitFlush: nothing re-renders when the pane announces itself.
+    let pane = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
+    use_effect({
+        let pane = pane.clone();
+        move || {
+            // both are read every time, so the effect follows both
+            let editing = editor.read().active().is_some();
+            let listing = loops_open();
+            let handle = pane.borrow().clone();
+            if let Some(handle) = handle
+                && (!editing || listing)
+            {
+                // a headless refusal has no one to tell; the caret simply
+                // stays where it was
+                spawn(async move {
+                    let _ = handle.set_focus(true).await;
+                });
+            }
+        }
+    });
+
+    // one follow path for Ctrl+Enter and for a Ctrl+click in the source:
+    // both ask the widget where the caret is and go wherever it is standing
+    // (adr/2026-08-ctrl-enter-opens-time-links.md)
+    let follow_link = use_callback({
+        let probe = probe.clone();
+        move |()| {
+            let Some(probe) = probe.clone() else { return };
+            spawn(async move {
+                let Some(units) = (probe.0)().await else {
+                    return;
+                };
+                // the probe answers `null` unless a textarea has focus, so
+                // a note with no active block stops here
+                let target = {
+                    let editor = editor.peek();
+                    editor.active_source().and_then(|slice| {
+                        links::link_at(
+                            slice,
+                            blocks::byte_offset_of_utf16(slice, units),
+                        )
+                    })
+                };
+                // only time notes have somewhere to open; the rest wait for
+                // v1's table (adr/2026-07-permanent-notes-wait-for-table.md)
+                if let Some(target) = target
+                    && let Some(scale) =
+                        links::scale_of(&target, &notes.peek())
+                {
+                    select.call((scale, target));
+                }
+            });
+        }
+    });
+
     // one accept path for Enter and for a click on a row; the anchor comes
     // from the render that drew the row, so nothing here has to look it up
     let accept = use_callback({
@@ -428,32 +489,7 @@ fn Shell(
                 // never sees the chord — it would read it as "create the
                 // selected note" and write a file the user never asked for.
                 Key::Enter if event.modifiers().ctrl() => {
-                    let Some(probe) = probe.clone() else { return };
-                    spawn(async move {
-                        let Some(units) = (probe.0)().await else {
-                            return;
-                        };
-                        // the probe answers `null` unless a textarea has
-                        // focus, so a note with no active block stops here
-                        let target = {
-                            let editor = editor.peek();
-                            editor.active_source().and_then(|slice| {
-                                links::link_at(
-                                    slice,
-                                    blocks::byte_offset_of_utf16(slice, units),
-                                )
-                            })
-                        };
-                        // only time notes have somewhere to open; the rest
-                        // wait for v1's table
-                        // (adr/2026-07-permanent-notes-wait-for-table.md)
-                        if let Some(target) = target
-                            && let Some(scale) =
-                                links::scale_of(&target, &notes.peek())
-                        {
-                            select.call((scale, target));
-                        }
-                    });
+                    follow_link.call(());
                 }
                 // only enter writes the file — navigating never does
                 Key::Enter => {
@@ -497,9 +533,13 @@ fn Shell(
         div {
             class: "logs",
             // the enter-to-create keystroke lands here and the theme/quit
-            // chords bubble on up to the .app root
+            // chords bubble on up to the .app root — which is why the pane
+            // takes focus back whenever no block holds it
             tabindex: "0",
             autofocus: true,
+            onmounted: move |event: Event<MountedData>| {
+                pane.borrow_mut().replace(event.data());
+            },
             onkeydown: keyboard,
             nav { class: "rail",
                 for row in rows {
@@ -588,6 +628,15 @@ fn Shell(
                                                         initial_value: "{text}",
                                                         oninput: move |event| {
                                                             editor.write().edit(&event.value());
+                                                        },
+                                                        // Ctrl+click follows the link it lands
+                                                        // in, like Ctrl+Enter: the click has
+                                                        // already moved the caret, so the same
+                                                        // probe answers where
+                                                        onclick: move |event: MouseEvent| {
+                                                            if event.modifiers().ctrl() {
+                                                                follow_link.call(());
+                                                            }
                                                         },
                                                         onkeydown: {
                                                             let fragments = fragments.clone();
@@ -1330,6 +1379,55 @@ mod tests {
             Modifiers::CONTROL,
         );
         assert!(closed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn leaving_a_block_hands_focus_back_to_the_pane() {
+        // the window's chords only reach the app root by bubbling, so
+        // something inside the app must hold focus; a textarea that
+        // unmounts takes it out of the app entirely
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let clicks = listeners(&mutations, "click");
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[0],
+        );
+        let taken = focused.load(Ordering::SeqCst);
+
+        // editing: the block owns focus, the pane leaves it alone
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        block_on(settle(&mut dom));
+        assert_eq!(focused.load(Ordering::SeqCst), taken);
+
+        // and on the way out the pane takes it back
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        block_on(settle(&mut dom));
+        assert!(
+            focused.load(Ordering::SeqCst) > taken,
+            "the pane asked for focus once the block let go"
+        );
+    }
+
+    #[test]
+    fn the_open_loops_list_takes_focus_so_escape_can_close_it() {
+        let vault = debt_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let clicks = listeners(&mutations, "click");
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[0],
+        );
+        let taken = focused.load(Ordering::SeqCst);
+
+        click(&mut dom, clicks[EMBER]);
+        block_on(settle(&mut dom));
+        assert!(
+            focused.load(Ordering::SeqCst) > taken,
+            "clicking the ember leaves focus on the pane that owns escape"
+        );
     }
 
     #[test]
@@ -2703,6 +2801,46 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_clicking_a_link_in_the_source_opens_it_too() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_HEADING]);
+        let source = listeners(&mutations, "click")[0];
+
+        // the click that follows has already moved the caret into the link
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING + 3);
+        ctrl_click(&mut dom, source);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "the ctrl+click jumped to the linked day: {html}"
+        );
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+    }
+
+    #[test]
+    fn a_plain_click_in_the_source_only_moves_the_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_HEADING]);
+        let source = listeners(&mutations, "click")[0];
+
+        // the caret is in the link, but without the modifier nothing follows
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING + 3);
+        click(&mut dom, source);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
+            "the selection stayed put: {html}"
+        );
+        assert!(html.contains("block-active"), "still editing: {html}");
+    }
+
+    #[test]
     fn ctrl_enter_away_from_a_link_neither_jumps_nor_creates() {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
@@ -3196,6 +3334,35 @@ mod tests {
         click_for_mutations(dom, target);
     }
 
+    /// A click with Ctrl held — the chord that follows a link in the source.
+    fn ctrl_click(dom: &mut VirtualDom, target: ElementId) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedMouseData::new(
+                    Some(input_data::MouseButton::Primary),
+                    input_data::MouseButton::Primary.into(),
+                    {
+                        use dioxus::html::geometry::*;
+                        Coordinates::new(
+                            ScreenPoint::zero(),
+                            ClientPoint::zero(),
+                            ElementPoint::zero(),
+                            PagePoint::zero(),
+                        )
+                    },
+                    Modifiers::CONTROL,
+                ),
+            )));
+            dom.runtime().handle_event(
+                "click",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            let _ = dom.render_immediate_to_vec();
+        })
+    }
+
     /// Like `click`, but hands back the mutations it caused — how the
     /// listeners a click mounts (the active textarea's input and keydown)
     /// are harvested, since they are never in the initial table.
@@ -3525,12 +3692,49 @@ mod tests {
         }
     }
 
+    /// A backing that answers focus requests instead of refusing them, and
+    /// counts them — how the pane proves it took focus back.
+    struct FocusMount(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl RenderedElementBacking for FocusMount {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_focus(
+            &self,
+            _focus: bool,
+        ) -> Pin<Box<dyn Future<Output = dioxus::html::MountedResult<()>>>>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     /// Fires the mounted event the renderer would deliver for the freshly
     /// swapped-in textarea.
     fn mount(dom: &mut VirtualDom, target: ElementId) {
+        deliver_mount(dom, target, FakeMount);
+    }
+
+    /// Like `mount`, but the element answers focus requests and counts them.
+    fn mount_counting_focus(
+        dom: &mut VirtualDom,
+        target: ElementId,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let focused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        deliver_mount(dom, target, FocusMount(focused.clone()));
+        focused
+    }
+
+    fn deliver_mount<B: RenderedElementBacking + 'static>(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        backing: B,
+    ) {
         with_reactor(|| {
             let data: Rc<dyn Any> =
-                Rc::new(PlatformEventData::new(Box::new(FakeMount)));
+                Rc::new(PlatformEventData::new(Box::new(backing)));
             dom.runtime().handle_event(
                 "mounted",
                 Event::new(data, true),
@@ -3628,10 +3832,17 @@ mod tests {
             &self,
             event: &PlatformEventData,
         ) -> MountedData {
-            event
-                .downcast::<FakeMount>()
-                .map(|_| MountedData::from(FakeMount))
-                .expect("the tests only fire fake mount events")
+            // two backings: one that refuses focus the way a headless
+            // element does, one that grants and counts it
+            match event.downcast::<FocusMount>() {
+                Some(counter) => {
+                    MountedData::from(FocusMount(counter.0.clone()))
+                }
+                None => event
+                    .downcast::<FakeMount>()
+                    .map(|_| MountedData::from(FakeMount))
+                    .expect("the tests only fire fake mount events"),
+            }
         }
 
         fn convert_pointer_data(&self, _: &PlatformEventData) -> PointerData {
