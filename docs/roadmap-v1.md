@@ -52,17 +52,18 @@ Goal: the table icon stops being dim — permanent, capture and generated notes 
 Spec: wireframe state 6a. `Screen::Table` finally mounts (the "table mounts in v1" note in `ui.rs` ends here); the links-footer and Ctrl+Enter "wait for v1" branches end in phase 3, not here.
 The real vault is small at this point — the fixture vault carries density in tests; the deck's undrawn "titles zoom, dense (30 cards)" state arrives organically with use.
 
-- [ ] The canvas: void background, the faint star field, pan by dragging the void.
-- [ ] Cards at titles zoom: ~176px wide (mockup 170–180, normalized to ×4), uppercase mono type label over a sans title, absolutely positioned from phase 1; unplaced notes stack somewhere deterministic and visible — dumb and honest until phase 8.
-- [ ] Note kinds at a glance:
-  - [ ] permanent: filled card + 3px type bar — the six wireframe hues plus organisation and personal from the turn-1 reference, as new `theme.css` variables;
-  - [ ] **Known design gap**: the wireframes leave most light-mode table colours undrawn (the "—" cells in the palette table) — derive the light siblings in the same pass, both themes from the first rule as always. **→ ADR**
-  - [ ] capture: dimmer fill, grey bar, muted title, **age in the label** ("capture · 3 d") — the friction age surfaces here, per `plan.md` § Friction system;
-  - [ ] generated: dashed border all round, no hue. Canvas styling plus the existing model rules (linkable-from, disposable) is what "`generated` type defined" means; a `generated.typ` template is deliberately *not* written — nothing creates generated notes by hand, and the pipeline that will is v3.
-- [ ] Drag a card to move it; the position persists through phase 1's debounced write.
-- [ ] The index query: everything except time notes — time is the one category that never appears on the table (`plan.md` § Note model).
-- [ ] The watcher keeps the table live as it does the rail: notes created or edited outside the app appear and repaint without a relaunch.
-- [ ] Tests: query excludes time notes, kind → card treatment, drag reaches the store, unplaced fallback is deterministic.
+- [x] The canvas: void background, the faint star field, pan by dragging the void.
+- [x] Cards at titles zoom: ~176px wide (mockup 170–180, normalized to ×4), uppercase mono type label over a sans title, absolutely positioned from phase 1; unplaced notes stack somewhere deterministic and visible — dumb and honest until phase 8 (origin grid: `adr/2026-08-table-mounts-titles-zoom.md`).
+- [x] Note kinds at a glance:
+  - [x] permanent: filled card + 3px type bar — the six wireframe hues plus organisation and personal from the turn-1 reference, as new `theme.css` variables;
+  - [x] **Known design gap**: the wireframes leave most light-mode table colours undrawn (the "—" cells in the palette table) — derive the light siblings in the same pass, both themes from the first rule as always. **→ ADR** (`adr/2026-08-light-table-colours-derived.md`)
+  - [x] capture: dimmer fill, grey bar, muted title, **age in the label** ("capture · 3 d") — the friction age surfaces here, per `plan.md` § Friction system;
+  - [x] generated: dashed border all round, no hue. Canvas styling plus the existing model rules (linkable-from, disposable) is what "`generated` type defined" means; a `generated.typ` template is deliberately *not* written — nothing creates generated notes by hand, and the pipeline that will is v3.
+- [x] Drag a card to move it; the position persists through phase 1's debounced write.
+- [x] The index query: everything except time notes — time is the one category that never appears on the table (`plan.md` § Note model); id-less notes stay off it too, positions being keyed by id (`adr/2026-08-table-mounts-titles-zoom.md`).
+- [x] The watcher keeps the table live as it does the rail: notes created or edited outside the app appear and repaint without a relaunch.
+- [x] Screen switching, undrawn in the deck: chrome icons click, Ctrl+1/Ctrl+2, and "go to table" / "go to logs" in the palette. **→ ADR** (`adr/2026-08-screen-switch-gesture.md`)
+- [x] Tests: query excludes time notes, kind → card treatment, drag reaches the store, unplaced fallback is deterministic.
 
 Exit: captures and fixture-style permanent notes are on the table; drag a card, quit, relaunch — it stayed put.
 
@@ -144,12 +145,12 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 ## v1 exit criteria (from `plan.md` and `adr/2026-07-permanent-notes-wait-for-table.md`)
 
 - [x] Command palette: every command reachable by name via Ctrl+P (phase 0)
-- [ ] Canvas with persistent positions that survive index rebuilds (phases 1–2)
+- [x] Canvas with persistent positions that survive index rebuilds (phases 1–2)
 - [ ] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
 - [ ] Tethered writing sheet on card click, dimmed table behind it (phase 3)
 - [ ] Tag & type filters, type colours, jump-to-note (phases 2, 7)
 - [ ] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)
-- [ ] Capture/generated visual treatment; `generated` type defined (phase 2)
+- [x] Capture/generated visual treatment; `generated` type defined (phase 2)
 - [ ] Permanent-note CRUD in the app; the vault grows without leaving it (phases 3–4)
 - [ ] `make test` green with 100% coverage; every note compiles with vanilla typst (`make check-vault`)
 - [ ] The ceiling held: nothing shipped in v1 beyond this list (`plan.md` § Known risks 4)
