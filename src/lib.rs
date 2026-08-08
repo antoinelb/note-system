@@ -12,6 +12,7 @@ pub mod palette;
 pub mod parse;
 pub mod positions;
 pub mod render;
+pub mod table;
 pub mod template;
 pub mod time;
 pub mod ui;
