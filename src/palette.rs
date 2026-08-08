@@ -19,6 +19,8 @@ pub enum CommandId {
     NextMonth,
     OpenLoops,
     GoToToday,
+    GoToTable,
+    GoToLogs,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -30,9 +32,11 @@ pub struct Command {
     pub chord: Option<&'static str>,
 }
 
-/// The birth command list (`adr/2026-08-palette-birth-command-list.md`),
-/// in the order the palette shows it.
-pub const COMMANDS: [Command; 9] = [
+/// The birth command list (`adr/2026-08-palette-birth-command-list.md`)
+/// plus the v1 phase-2 screen commands
+/// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
+/// it.
+pub const COMMANDS: [Command; 11] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -78,14 +82,26 @@ pub const COMMANDS: [Command; 9] = [
         label: "go to today",
         chord: None,
     },
+    Command {
+        id: CommandId::GoToTable,
+        label: "go to table",
+        chord: Some("ctrl+1"),
+    },
+    Command {
+        id: CommandId::GoToLogs,
+        label: "go to logs",
+        chord: Some("ctrl+2"),
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
-/// all. One flag: the caret commands need a block to act on, and the caret
-/// itself is probed at run time, never to decide visibility.
+/// all. Two flags: the caret commands need a block to act on (the caret
+/// itself is probed at run time, never to decide visibility), and the
+/// screen commands hide where they already stand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Context {
     pub block_active: bool,
+    pub on_table: bool,
 }
 
 /// The rows a query leaves: the available commands whose label contains the
@@ -108,6 +124,9 @@ pub fn filter(query: &str, context: Context) -> Vec<&'static Command> {
 fn available(id: CommandId, context: Context) -> bool {
     match id {
         CommandId::InsertLink | CommandId::FollowLink => context.block_active,
+        // going where you stand is not a command
+        CommandId::GoToTable => !context.on_table,
+        CommandId::GoToLogs => context.on_table,
         _ => true,
     }
 }
@@ -117,9 +136,17 @@ fn available(id: CommandId, context: Context) -> bool {
 mod tests {
     use super::*;
 
-    const EDITING: Context = Context { block_active: true };
+    const EDITING: Context = Context {
+        block_active: true,
+        on_table: false,
+    };
     const READING: Context = Context {
         block_active: false,
+        on_table: false,
+    };
+    const AT_TABLE: Context = Context {
+        block_active: false,
+        on_table: true,
     };
 
     fn labels(rows: &[&Command]) -> Vec<&'static str> {
@@ -138,18 +165,33 @@ mod tests {
 
     #[test]
     fn an_empty_query_is_the_whole_registry_in_order() {
+        // the whole vocabulary minus the one place already stood in
         assert_eq!(
             labels(&filter("", EDITING)),
-            COMMANDS.iter().map(|c| c.label).collect::<Vec<_>>()
+            COMMANDS
+                .iter()
+                .map(|c| c.label)
+                .filter(|label| *label != "go to logs")
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 2);
+        assert_eq!(visible.len(), COMMANDS.len() - 3);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
+    }
+
+    #[test]
+    fn the_screen_commands_hide_where_they_stand() {
+        let on_logs = labels(&filter("", READING));
+        assert!(on_logs.contains(&"go to table"));
+        assert!(!on_logs.contains(&"go to logs"));
+        let on_table = labels(&filter("", AT_TABLE));
+        assert!(on_table.contains(&"go to logs"));
+        assert!(!on_table.contains(&"go to table"));
     }
 
     /// The completeness audit the roadmap demands: the registry against the
@@ -171,6 +213,8 @@ mod tests {
                 "ctrl+enter",
                 "←",
                 "→",
+                "ctrl+1",
+                "ctrl+2",
             ]
         );
         let chordless: Vec<&str> = COMMANDS

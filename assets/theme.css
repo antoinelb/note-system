@@ -100,6 +100,10 @@ body {
   color: var(--ink-muted);
 }
 
+.chrome svg {
+  cursor: pointer;
+}
+
 .chrome svg.lit {
   color: var(--ink-bright);
 }

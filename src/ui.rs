@@ -203,6 +203,8 @@ fn Shell(
     let mut loops = use_signal(|| loops);
     // the table's notes, third rider on the same survey the watcher refreshes
     let mut table_notes = use_signal(|| table);
+    // which screen is up; the logs remain the door the app opens on
+    let mut screen = use_signal(|| Screen::Logs);
     let mut loops_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
@@ -326,6 +328,23 @@ fn Shell(
     let go_today = use_callback(move |()| {
         select.call((NoteType::Daily, time::day_id(today)))
     });
+    // the screen switch, one seam for icon, chord and palette
+    // (adr/2026-08-screen-switch-gesture.md). Leaving the logs closes the
+    // active block and the picker the way Escape would: their textarea and
+    // input are about to unmount, and a hidden overlay waiting behind a
+    // screen would reopen unasked on the way back.
+    let go_table = use_callback({
+        let fragments = fragments.clone();
+        move |()| {
+            if editor.peek().active().is_some() {
+                editor.write().deactivate();
+                fragments.borrow_mut().sweep();
+            }
+            picker.set(None);
+            screen.set(Screen::Table);
+        }
+    });
+    let go_logs = use_callback(move |()| screen.set(Screen::Logs));
 
     // Where the logs pane is, so focus can be put back on it. A keydown
     // only bubbles up from whatever has focus, and the window's chords
@@ -495,6 +514,31 @@ fn Shell(
         }
     });
 
+    // the palette's opening half, shared by both screens' Ctrl+P: what is
+    // true now is frozen now — by dispatch time the palette's input owns the
+    // focus and the probe would answer null
+    // (adr/2026-08-command-palette-overlay-shape.md)
+    let summon_palette = use_callback({
+        let probe = probe.clone();
+        move |()| {
+            let probe = probe.clone();
+            spawn(async move {
+                let block_active = editor.peek().active().is_some();
+                let caret = match probe {
+                    Some(probe) if block_active => (probe.0)().await,
+                    _ => None,
+                };
+                palette_query.set(String::new());
+                palette_highlighted.set(0);
+                palette.set(Some(Palette {
+                    block_active,
+                    caret,
+                    on_table: *screen.peek() == Screen::Table,
+                }));
+            });
+        }
+    });
+
     // one run path for Enter and for a click on a row. Focus settles first,
     // then the command runs — except the two that must keep it: `insert
     // link`'s picker owns the focus it just took, and `follow link`
@@ -535,6 +579,8 @@ fn Shell(
                 palette::CommandId::NextMonth => page.call(true),
                 palette::CommandId::OpenLoops => toggle_loops.call(()),
                 palette::CommandId::GoToToday => go_today.call(()),
+                palette::CommandId::GoToTable => go_table.call(()),
+                palette::CommandId::GoToLogs => go_logs.call(()),
             }
         });
 
@@ -571,6 +617,7 @@ fn Shell(
             &palette_query.read(),
             palette::Context {
                 block_active: frozen.block_active,
+                on_table: frozen.on_table,
             },
         );
         (frozen, matches)
@@ -639,20 +686,19 @@ fn Shell(
                 {
                     // the webview answers a bare Ctrl+P with a print dialog
                     event.prevent_default();
-                    let probe = probe.clone();
-                    spawn(async move {
-                        let block_active = editor.peek().active().is_some();
-                        let caret = match probe {
-                            Some(probe) if block_active => (probe.0)().await,
-                            _ => None,
-                        };
-                        palette_query.set(String::new());
-                        palette_highlighted.set(0);
-                        palette.set(Some(Palette {
-                            block_active,
-                            caret,
-                        }));
-                    });
+                    summon_palette.call(());
+                }
+                // the screen chords (adr/2026-08-screen-switch-gesture.md);
+                // ordinals in chrome-icon order
+                Key::Character(ref character)
+                    if character == "1" && event.modifiers().ctrl() =>
+                {
+                    go_table.call(());
+                }
+                Key::Character(ref character)
+                    if character == "2" && event.modifiers().ctrl() =>
+                {
+                    go_logs.call(());
                 }
                 // months page by keystroke as well as by scrolling; arrows
                 // move the grid only, never the selection
@@ -700,503 +746,563 @@ fn Shell(
         }
     };
 
+    // the table pane's own chords: the palette and the screens; everything
+    // else bubbles to the app root
+    let table_keys = move |event: KeyboardEvent| match event.key() {
+        Key::Character(ref character)
+            if character == "p"
+                && event.modifiers().ctrl()
+                && palette.peek().is_none() =>
+        {
+            // the webview answers a bare Ctrl+P with a print dialog
+            event.prevent_default();
+            summon_palette.call(());
+        }
+        Key::Character(ref character)
+            if character == "1" && event.modifiers().ctrl() =>
+        {
+            go_table.call(());
+        }
+        Key::Character(ref character)
+            if character == "2" && event.modifiers().ctrl() =>
+        {
+            go_logs.call(());
+        }
+        _ => {}
+    };
+
     rsx! {
         Chrome {
-            screen: Screen::Logs,
+            screen: screen(),
             loops: loops.read().len(),
             on_ember: move |_| toggle_loops.call(()),
+            on_table: move |_| go_table.call(()),
+            on_logs: move |_| go_logs.call(()),
         }
-        div {
-            class: "logs",
-            // the enter-to-create keystroke lands here and the theme/quit
-            // chords bubble on up to the .app root — which is why the pane
-            // takes focus back whenever no block holds it
-            tabindex: "0",
-            autofocus: true,
-            onmounted: move |event: Event<MountedData>| {
-                pane.borrow_mut().replace(event.data());
-            },
-            onkeydown: keyboard,
-            nav { class: "rail",
-                for row in rows {
-                    div {
-                        key: "{row.id}",
-                        class: "rail-row rail-{row.scale.as_name()}",
-                        class: if row.id == id { "selected" },
-                        class: if !row.exists { "missing" },
-                        onclick: {
-                            let target = (row.scale.clone(), row.id.clone());
-                            move |_| select.call(target.clone())
-                        },
-                        span { class: "rail-id", "{row.id}" }
-                        if !logs::rail_tag(&row.scale).is_empty() {
-                            span { class: "rail-tag", "{logs::rail_tag(&row.scale)}" }
-                        }
-                    }
-                }
-            }
-            section { class: "centre",
-                // the palette floats (position: fixed), so it leads the
-                // pane in source without displacing anything on screen
-                {
-                    match open_palette {
-                        Some((frozen, matches)) => {
-                            let rows = matches.clone();
-                            rsx! {
-                            div { class: "command-palette",
-                                div { class: "palette-head type-label", "commands" }
-                                input {
-                                    class: "picker-query",
-                                    placeholder: "command…",
-                                    onmounted: move |event| async move {
-                                        let _ = event.set_focus(true).await;
-                                    },
-                                    oninput: move |event| {
-                                        palette_query.set(event.value());
-                                        palette_highlighted.set(0);
-                                    },
-                                    onkeydown: move |event: KeyboardEvent| {
-                                        let key = event.key();
-                                        let last = matches.len().saturating_sub(1);
-                                        match key {
-                                            Key::Escape => close_palette.call(true),
-                                            Key::Enter => {
-                                                // no matches: the keystroke does
-                                                // nothing rather than guessing
-                                                if let Some(command) = matches.get(palette_highlighted()) {
-                                                    run_command.call((frozen, command.id));
-                                                }
-                                            }
-                                            Key::ArrowDown => {
-                                                palette_highlighted.set((palette_highlighted() + 1).min(last));
-                                            }
-                                            Key::ArrowUp => {
-                                                palette_highlighted.set(palette_highlighted().saturating_sub(1));
-                                            }
-                                            _ => {}
-                                        }
-                                        // the palette owns every plain key while
-                                        // it is open; the ctrl chords still bubble
-                                        if !event.modifiers().ctrl() {
-                                            event.stop_propagation();
-                                        }
-                                    },
-                                }
-                                if rows.is_empty() {
-                                    div { class: "picker-empty", "no matching command" }
-                                }
-                                for (rank, command) in rows.into_iter().enumerate() {
-                                    div {
-                                        key: "{command.label}",
-                                        class: "palette-row",
-                                        class: if rank == palette_highlighted() { "selected" },
-                                        onclick: {
-                                            let id = command.id;
-                                            move |_| run_command.call((frozen, id))
-                                        },
-                                        span { class: "palette-label", "{command.label}" }
-                                        if let Some(chord) = command.chord {
-                                            span { class: "palette-chord", "{chord}" }
+        // the palette floats (position: fixed) over whichever screen is
+        // up, so it lives beside the panes rather than inside one
+        {
+            match open_palette {
+                Some((frozen, matches)) => {
+                    let rows = matches.clone();
+                    rsx! {
+                    div { class: "command-palette",
+                        div { class: "palette-head type-label", "commands" }
+                        input {
+                            class: "picker-query",
+                            placeholder: "command…",
+                            onmounted: move |event| async move {
+                                let _ = event.set_focus(true).await;
+                            },
+                            oninput: move |event| {
+                                palette_query.set(event.value());
+                                palette_highlighted.set(0);
+                            },
+                            onkeydown: move |event: KeyboardEvent| {
+                                let key = event.key();
+                                let last = matches.len().saturating_sub(1);
+                                match key {
+                                    Key::Escape => close_palette.call(true),
+                                    Key::Enter => {
+                                        // no matches: the keystroke does
+                                        // nothing rather than guessing
+                                        if let Some(command) = matches.get(palette_highlighted()) {
+                                            run_command.call((frozen, command.id));
                                         }
                                     }
-                                }
-                            }
-                            }
-                        }
-                        None => rsx! {},
-                    }
-                }
-                div { class: "crumbs",
-                    for crumb in crumbs {
-                        {
-                            match crumb.target {
-                                Some(target) => rsx! {
-                                    span {
-                                        class: "crumb crumb-link",
-                                        onclick: move |_| select.call(target.clone()),
-                                        "{crumb.label}"
+                                    Key::ArrowDown => {
+                                        palette_highlighted.set((palette_highlighted() + 1).min(last));
                                     }
+                                    Key::ArrowUp => {
+                                        palette_highlighted.set(palette_highlighted().saturating_sub(1));
+                                    }
+                                    _ => {}
+                                }
+                                // the palette owns every plain key while
+                                // it is open; the ctrl chords still bubble
+                                if !event.modifiers().ctrl() {
+                                    event.stop_propagation();
+                                }
+                            },
+                        }
+                        if rows.is_empty() {
+                            div { class: "picker-empty", "no matching command" }
+                        }
+                        for (rank, command) in rows.into_iter().enumerate() {
+                            div {
+                                key: "{command.label}",
+                                class: "palette-row",
+                                class: if rank == palette_highlighted() { "selected" },
+                                onclick: {
+                                    let id = command.id;
+                                    move |_| run_command.call((frozen, id))
                                 },
-                                None => rsx! {
-                                    span { class: "crumb", "{crumb.label}" }
-                                },
+                                span { class: "palette-label", "{command.label}" }
+                                if let Some(chord) = command.chord {
+                                    span { class: "palette-chord", "{chord}" }
+                                }
                             }
                         }
                     }
-                }
-                {
-                    match &notice {
-                        Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
-                        None => rsx! {},
                     }
                 }
-                {
-                    match panes {
-                        Some(panes) => rsx! {
-                            div { class: "note-blocks",
-                                for pane in panes {
-                                    {
-                                        match pane {
-                                            Pane::Source { start, text } => {
-                                                let rows = text.split('\n').count();
-                                                rsx! {
-                                                    textarea {
-                                                        // the epoch remounts it after a link is
-                                                        // spliced in, so the uncontrolled value is
-                                                        // rebuilt from the buffer
-                                                        key: "{start}-{epoch}",
-                                                        class: "block-active",
-                                                        rows: "{rows}",
-                                                        spellcheck: "false",
-                                                        // autofocus only applies at document load in
-                                                        // the webview: a swapped-in textarea asks for
-                                                        // its own focus, and a refusal has no one to
-                                                        // tell — the caret simply stays where it was
-                                                        onmounted: {
-                                                            let pending_caret = pending_caret.clone();
-                                                            let writer = writer.clone();
-                                                            move |event: Event<MountedData>| {
-                                                                let caret = pending_caret.take();
-                                                                let writer = writer.clone();
-                                                                async move {
-                                                                    let _ = event.set_focus(true).await;
-                                                                    // after an accepted completion, the
-                                                                    // caret belongs past the link, not at
-                                                                    // whatever the webview picks
-                                                                    if let Some(units) = caret
-                                                                        && let Some(writer) = writer
-                                                                    {
-                                                                        (writer.0)(units).await;
-                                                                    }
-                                                                }
-                                                            }
-                                                        },
-                                                        initial_value: "{text}",
-                                                        oninput: move |event| {
-                                                            editor.write().edit(&event.value());
-                                                        },
-                                                        // Ctrl+click follows the link it lands
-                                                        // in, like Ctrl+Enter: the click has
-                                                        // already moved the caret, so the same
-                                                        // probe answers where
-                                                        onclick: move |event: MouseEvent| {
-                                                            if event.modifiers().ctrl() {
-                                                                follow_link.call(());
-                                                            }
-                                                        },
-                                                        onkeydown: {
-                                                            let fragments = fragments.clone();
-                                                            let probe = probe.clone();
-                                                            move |event: KeyboardEvent| {
-                                                                let key = event.key();
-                                                                if key == Key::Escape {
-                                                                    editor.write().deactivate();
-                                                                    fragments.borrow_mut().sweep();
-                                                                } else if key == Key::ArrowUp
-                                                                    || key == Key::ArrowDown
-                                                                {
-                                                                    // a vertical arrow may leave the block:
-                                                                    // ask the webview where the caret is —
-                                                                    // the browser default on the edge lines
-                                                                    // is a no-op, so the async probe races
-                                                                    // nothing. It must still not page the
-                                                                    // month grid below.
-                                                                    event.stop_propagation();
-                                                                    if let Some(probe) = &probe {
-                                                                        let probe = probe.clone();
-                                                                        let fragments = fragments.clone();
-                                                                        let up = key == Key::ArrowUp;
-                                                                        spawn(async move {
-                                                                            if let Some(units) = (probe.0)().await {
-                                                                                editor.write().slide(units, up);
-                                                                                fragments.borrow_mut().sweep();
-                                                                            }
-                                                                        });
-                                                                    }
-                                                                } else if !event.modifiers().ctrl() {
-                                                                    // the rest belongs to the caret: keep
-                                                                    // enter off the create handler below;
-                                                                    // the ctrl chords still bubble to the
-                                                                    // app root
-                                                                    event.stop_propagation();
-                                                                }
-                                                            }
-                                                        },
-                                                    }
-                                                }
-                                            }
-                                            Pane::Fragment { start, rendered } => rsx! {
-                                                div {
-                                                    key: "{start}",
-                                                    class: "block",
-                                                    onclick: {
-                                                        let fragments = fragments.clone();
-                                                        move |_| {
-                                                            editor.write().activate(start);
-                                                            fragments.borrow_mut().sweep();
-                                                        }
-                                                    },
-                                                    {
-                                                        match rendered {
-                                                            Ok(svg) => rsx! {
-                                                                div { class: "note", dangerous_inner_html: "{svg}" }
-                                                            },
-                                                            Err(msg) => rsx! {
-                                                                p { class: "render-error", "{msg}" }
-                                                            },
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        // the note exists but would not open: the notice
-                        // above carries the error, the pane stays bare
-                        None if exists => rsx! {},
-                        // empty is honest: no ghost template, one line
-                        None => rsx! {
-                            p { class: "empty-note",
-                                "no note for {logs::selection_label(&scale, &id)} — press "
-                                kbd { "enter" }
-                                " to start one from the template"
-                            }
-                        },
-                    }
-                }
-                {
-                    match open_picker {
-                        Some((anchor, matches)) => {
-                            let rows = matches.clone();
-                            rsx! {
-                            div { class: "link-picker",
-                                input {
-                                    class: "picker-query",
-                                    placeholder: "link to…",
-                                    onmounted: move |event| async move {
-                                        let _ = event.set_focus(true).await;
-                                    },
-                                    oninput: move |event| {
-                                        query.set(event.value());
-                                        highlighted.set(0);
-                                    },
-                                    onkeydown: move |event: KeyboardEvent| {
-                                        let key = event.key();
-                                        let last = matches.len().saturating_sub(1);
-                                        match key {
-                                            Key::Escape => close_picker.call(anchor),
-                                            Key::Enter => {
-                                                // no matches: the keystroke does
-                                                // nothing rather than guessing
-                                                if let Some(entry) = matches.get(highlighted()) {
-                                                    accept.call((anchor, entry.id.clone()));
-                                                }
-                                            }
-                                            Key::ArrowDown => {
-                                                highlighted.set((highlighted() + 1).min(last));
-                                            }
-                                            Key::ArrowUp => {
-                                                highlighted.set(highlighted().saturating_sub(1));
-                                            }
-                                            _ => {}
-                                        }
-                                        // the picker owns every plain key while it
-                                        // is open; the ctrl chords still bubble
-                                        if !event.modifiers().ctrl() {
-                                            event.stop_propagation();
-                                        }
-                                    },
-                                }
-                                if rows.is_empty() {
-                                    div { class: "picker-empty", "no matching note" }
-                                }
-                                for (rank, entry) in rows.into_iter().enumerate() {
-                                    div {
-                                        key: "{entry.id}",
-                                        class: "picker-row",
-                                        class: if rank == highlighted() { "selected" },
-                                        onclick: {
-                                            let id = entry.id.clone();
-                                            move |_| accept.call((anchor, id.clone()))
-                                        },
-                                        span { class: "picker-id", "{entry.id}" }
-                                        if let Some(title) = entry.title {
-                                            span { class: "picker-title", "{title}" }
-                                        }
-                                    }
-                                }
-                            }
-                            }
-                        }
-                        None => rsx! {},
-                    }
-                }
-                // the ember's destination: what the count is made of, and
-                // nothing else — no ages, no grouping, no per-item actions
-                // (adr/2026-07-debt-counter-then-list.md)
-                if loops_open() && !loops.read().is_empty() {
-                    div { class: "loops-list",
-                        div { class: "loops-head type-label", "open loops" }
-                        for line in loops() {
-                            div { key: "{line}", class: "loops-line", "{line}" }
-                        }
-                    }
-                }
-                {
-                    match footer {
-                        Some(Ok((back, out))) if !back.is_empty() || !out.is_empty() => rsx! {
-                            div { class: "links-footer",
-                                for (arrow, entries) in [("←", back), ("→", out)] {
-                                    if !entries.is_empty() {
-                                        div { class: "links-row",
-                                            span { class: "links-arrow", "{arrow}" }
-                                            for link in entries {
-                                                {
-                                                    match link.scale {
-                                                        // only a time note has somewhere to
-                                                        // open in v0; the rest are visible
-                                                        // but inert until v1's table
-                                                        Some(scale) => {
-                                                            let target = (scale, link.label.clone());
-                                                            rsx! {
-                                                                span {
-                                                                    class: "link-entry link-jump",
-                                                                    onclick: move |_| select.call(target.clone()),
-                                                                    "{link.label}"
-                                                                }
-                                                            }
-                                                        }
-                                                        None => rsx! {
-                                                            span {
-                                                                class: "link-entry",
-                                                                class: if link.dangling { "link-dangling" },
-                                                                "{link.label}"
-                                                            }
-                                                        },
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
-                        _ => rsx! {},
-                    }
-                }
-                {
-                    match captured {
-                        Some(Ok(lines)) if !lines.is_empty() => rsx! {
-                            div { class: "captured",
-                                div { class: "captured-head type-label", "captured today" }
-                                for line in lines {
-                                    div { class: "captured-line", "{line}" }
-                                }
-                            }
-                        },
-                        Some(Err(msg)) => rsx! {
-                            p { class: "render-error", "{msg}" }
-                        },
-                        _ => rsx! {},
-                    }
-                }
+                None => rsx! {},
             }
-            aside {
-                class: "jump",
-                // months page by scrolling — no ‹ › buttons (design § logs)
-                onwheel: move |event| {
-                    let delta = event.delta().strip_units().y;
-                    if delta != 0.0 {
-                        page.call(delta > 0.0);
+        }
+        if screen() == Screen::Logs {
+            div {
+                class: "logs",
+                // the enter-to-create keystroke lands here and the theme/quit
+                // chords bubble on up to the .app root — which is why the pane
+                // takes focus back whenever no block holds it
+                tabindex: "0",
+                autofocus: true,
+                onmounted: {
+                    let pane = pane.clone();
+                    move |event: Event<MountedData>| {
+                        pane.borrow_mut().replace(event.data());
+                        // a return from the table must land focus here
+                        // itself: autofocus fired at document load only, and
+                        // the table pane just unmounted the focus with it
+                        let handle = event.data();
+                        async move {
+                            let _ = handle.set_focus(true).await;
+                        }
                     }
                 },
-                div { class: "cal-head",
-                    span { class: "cal-month type-label", "{logs::month_label(month())}" }
-                    // ‹ today › — the mockup's header controls
-                    // (adr/2026-07-month-paging-arrow-keys.md)
-                    span { class: "cal-nav",
-                        button {
-                            class: "cal-arrow",
-                            onclick: move |_| page.call(false),
-                            "‹"
-                        }
-                        button {
-                            class: "cal-today",
-                            onclick: move |_| go_today.call(()),
-                            "today"
-                        }
-                        button {
-                            class: "cal-arrow",
-                            onclick: move |_| page.call(true),
-                            "›"
-                        }
-                    }
-                }
-                div { class: "cal-grid",
-                    span { class: "cal-gutter" }
-                    for letter in ["m", "t", "w", "t", "f", "s", "s"] {
-                        span { class: "cal-weekday", "{letter}" }
-                    }
-                    for week in weeks {
-                        span {
-                            class: "cal-gutter cal-week",
-                            class: if week.week_id == id { "selected" },
+                onkeydown: keyboard,
+                nav { class: "rail",
+                    for row in rows {
+                        div {
+                            key: "{row.id}",
+                            class: "rail-row rail-{row.scale.as_name()}",
+                            class: if row.id == id { "selected" },
+                            class: if !row.exists { "missing" },
                             onclick: {
-                                let target = week.week_id.clone();
-                                move |_| select.call((NoteType::Weekly, target.clone()))
+                                let target = (row.scale.clone(), row.id.clone());
+                                move |_| select.call(target.clone())
                             },
-                            "{week.label}"
-                        }
-                        for cell in week.days {
-                            {
-                                match cell {
-                                    Some(day) => {
-                                        let cell_id = time::day_id(day);
-                                        let has_note = day_ids.contains(cell_id.as_str());
-                                        rsx! {
-                                            span {
-                                                class: "cal-day",
-                                                class: if has_note { "has-note" },
-                                                // selection ≠ existence: a
-                                                // selected empty day outlines
-                                                class: if cell_id == id { "selected" },
-                                                onclick: move |_| {
-                                                    select.call((
-                                                        NoteType::Daily,
-                                                        cell_id.clone(),
-                                                    ))
-                                                },
-                                                "{day.day()}"
-                                            }
-                                        }
-                                    }
-                                    None => rsx! { span { class: "cal-day blank" } },
-                                }
+                            span { class: "rail-id", "{row.id}" }
+                            if !logs::rail_tag(&row.scale).is_empty() {
+                                span { class: "rail-tag", "{logs::rail_tag(&row.scale)}" }
                             }
                         }
                     }
                 }
-                div { class: "cal-seasons",
-                    for (label, target) in seasons {
-                        span {
-                            class: "cal-season",
-                            class: if target.1 == time::season_id(today) { "lit" },
-                            class: if target.1 == id { "selected" },
-                            onclick: move |_| select.call(target.clone()),
-                            "{label}"
+                section { class: "centre",
+                    div { class: "crumbs",
+                        for crumb in crumbs {
+                            {
+                                match crumb.target {
+                                    Some(target) => rsx! {
+                                        span {
+                                            class: "crumb crumb-link",
+                                            onclick: move |_| select.call(target.clone()),
+                                            "{crumb.label}"
+                                        }
+                                    },
+                                    None => rsx! {
+                                        span { class: "crumb", "{crumb.label}" }
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    {
+                        match &notice {
+                            Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
+                            None => rsx! {},
+                        }
+                    }
+                    {
+                        match panes {
+                            Some(panes) => rsx! {
+                                div { class: "note-blocks",
+                                    for pane in panes {
+                                        {
+                                            match pane {
+                                                Pane::Source { start, text } => {
+                                                    let rows = text.split('\n').count();
+                                                    rsx! {
+                                                        textarea {
+                                                            // the epoch remounts it after a link is
+                                                            // spliced in, so the uncontrolled value is
+                                                            // rebuilt from the buffer
+                                                            key: "{start}-{epoch}",
+                                                            class: "block-active",
+                                                            rows: "{rows}",
+                                                            spellcheck: "false",
+                                                            // autofocus only applies at document load in
+                                                            // the webview: a swapped-in textarea asks for
+                                                            // its own focus, and a refusal has no one to
+                                                            // tell — the caret simply stays where it was
+                                                            onmounted: {
+                                                                let pending_caret = pending_caret.clone();
+                                                                let writer = writer.clone();
+                                                                move |event: Event<MountedData>| {
+                                                                    let caret = pending_caret.take();
+                                                                    let writer = writer.clone();
+                                                                    async move {
+                                                                        let _ = event.set_focus(true).await;
+                                                                        // after an accepted completion, the
+                                                                        // caret belongs past the link, not at
+                                                                        // whatever the webview picks
+                                                                        if let Some(units) = caret
+                                                                            && let Some(writer) = writer
+                                                                        {
+                                                                            (writer.0)(units).await;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            initial_value: "{text}",
+                                                            oninput: move |event| {
+                                                                editor.write().edit(&event.value());
+                                                            },
+                                                            // Ctrl+click follows the link it lands
+                                                            // in, like Ctrl+Enter: the click has
+                                                            // already moved the caret, so the same
+                                                            // probe answers where
+                                                            onclick: move |event: MouseEvent| {
+                                                                if event.modifiers().ctrl() {
+                                                                    follow_link.call(());
+                                                                }
+                                                            },
+                                                            onkeydown: {
+                                                                let fragments = fragments.clone();
+                                                                let probe = probe.clone();
+                                                                move |event: KeyboardEvent| {
+                                                                    let key = event.key();
+                                                                    if key == Key::Escape {
+                                                                        editor.write().deactivate();
+                                                                        fragments.borrow_mut().sweep();
+                                                                    } else if key == Key::ArrowUp
+                                                                        || key == Key::ArrowDown
+                                                                    {
+                                                                        // a vertical arrow may leave the block:
+                                                                        // ask the webview where the caret is —
+                                                                        // the browser default on the edge lines
+                                                                        // is a no-op, so the async probe races
+                                                                        // nothing. It must still not page the
+                                                                        // month grid below.
+                                                                        event.stop_propagation();
+                                                                        if let Some(probe) = &probe {
+                                                                            let probe = probe.clone();
+                                                                            let fragments = fragments.clone();
+                                                                            let up = key == Key::ArrowUp;
+                                                                            spawn(async move {
+                                                                                if let Some(units) = (probe.0)().await {
+                                                                                    editor.write().slide(units, up);
+                                                                                    fragments.borrow_mut().sweep();
+                                                                                }
+                                                                            });
+                                                                        }
+                                                                    } else if !event.modifiers().ctrl() {
+                                                                        // the rest belongs to the caret: keep
+                                                                        // enter off the create handler below;
+                                                                        // the ctrl chords still bubble to the
+                                                                        // app root
+                                                                        event.stop_propagation();
+                                                                    }
+                                                                }
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                                Pane::Fragment { start, rendered } => rsx! {
+                                                    div {
+                                                        key: "{start}",
+                                                        class: "block",
+                                                        onclick: {
+                                                            let fragments = fragments.clone();
+                                                            move |_| {
+                                                                editor.write().activate(start);
+                                                                fragments.borrow_mut().sweep();
+                                                            }
+                                                        },
+                                                        {
+                                                            match rendered {
+                                                                Ok(svg) => rsx! {
+                                                                    div { class: "note", dangerous_inner_html: "{svg}" }
+                                                                },
+                                                                Err(msg) => rsx! {
+                                                                    p { class: "render-error", "{msg}" }
+                                                                },
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            // the note exists but would not open: the notice
+                            // above carries the error, the pane stays bare
+                            None if exists => rsx! {},
+                            // empty is honest: no ghost template, one line
+                            None => rsx! {
+                                p { class: "empty-note",
+                                    "no note for {logs::selection_label(&scale, &id)} — press "
+                                    kbd { "enter" }
+                                    " to start one from the template"
+                                }
+                            },
+                        }
+                    }
+                    {
+                        match open_picker {
+                            Some((anchor, matches)) => {
+                                let rows = matches.clone();
+                                rsx! {
+                                div { class: "link-picker",
+                                    input {
+                                        class: "picker-query",
+                                        placeholder: "link to…",
+                                        onmounted: move |event| async move {
+                                            let _ = event.set_focus(true).await;
+                                        },
+                                        oninput: move |event| {
+                                            query.set(event.value());
+                                            highlighted.set(0);
+                                        },
+                                        onkeydown: move |event: KeyboardEvent| {
+                                            let key = event.key();
+                                            let last = matches.len().saturating_sub(1);
+                                            match key {
+                                                Key::Escape => close_picker.call(anchor),
+                                                Key::Enter => {
+                                                    // no matches: the keystroke does
+                                                    // nothing rather than guessing
+                                                    if let Some(entry) = matches.get(highlighted()) {
+                                                        accept.call((anchor, entry.id.clone()));
+                                                    }
+                                                }
+                                                Key::ArrowDown => {
+                                                    highlighted.set((highlighted() + 1).min(last));
+                                                }
+                                                Key::ArrowUp => {
+                                                    highlighted.set(highlighted().saturating_sub(1));
+                                                }
+                                                _ => {}
+                                            }
+                                            // the picker owns every plain key while it
+                                            // is open; the ctrl chords still bubble
+                                            if !event.modifiers().ctrl() {
+                                                event.stop_propagation();
+                                            }
+                                        },
+                                    }
+                                    if rows.is_empty() {
+                                        div { class: "picker-empty", "no matching note" }
+                                    }
+                                    for (rank, entry) in rows.into_iter().enumerate() {
+                                        div {
+                                            key: "{entry.id}",
+                                            class: "picker-row",
+                                            class: if rank == highlighted() { "selected" },
+                                            onclick: {
+                                                let id = entry.id.clone();
+                                                move |_| accept.call((anchor, id.clone()))
+                                            },
+                                            span { class: "picker-id", "{entry.id}" }
+                                            if let Some(title) = entry.title {
+                                                span { class: "picker-title", "{title}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                }
+                            }
+                            None => rsx! {},
+                        }
+                    }
+                    // the ember's destination: what the count is made of, and
+                    // nothing else — no ages, no grouping, no per-item actions
+                    // (adr/2026-07-debt-counter-then-list.md)
+                    if loops_open() && !loops.read().is_empty() {
+                        div { class: "loops-list",
+                            div { class: "loops-head type-label", "open loops" }
+                            for line in loops() {
+                                div { key: "{line}", class: "loops-line", "{line}" }
+                            }
+                        }
+                    }
+                    {
+                        match footer {
+                            Some(Ok((back, out))) if !back.is_empty() || !out.is_empty() => rsx! {
+                                div { class: "links-footer",
+                                    for (arrow, entries) in [("←", back), ("→", out)] {
+                                        if !entries.is_empty() {
+                                            div { class: "links-row",
+                                                span { class: "links-arrow", "{arrow}" }
+                                                for link in entries {
+                                                    {
+                                                        match link.scale {
+                                                            // only a time note has somewhere to
+                                                            // open in v0; the rest are visible
+                                                            // but inert until v1's table
+                                                            Some(scale) => {
+                                                                let target = (scale, link.label.clone());
+                                                                rsx! {
+                                                                    span {
+                                                                        class: "link-entry link-jump",
+                                                                        onclick: move |_| select.call(target.clone()),
+                                                                        "{link.label}"
+                                                                    }
+                                                                }
+                                                            }
+                                                            None => rsx! {
+                                                                span {
+                                                                    class: "link-entry",
+                                                                    class: if link.dangling { "link-dangling" },
+                                                                    "{link.label}"
+                                                                }
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
+                            _ => rsx! {},
+                        }
+                    }
+                    {
+                        match captured {
+                            Some(Ok(lines)) if !lines.is_empty() => rsx! {
+                                div { class: "captured",
+                                    div { class: "captured-head type-label", "captured today" }
+                                    for line in lines {
+                                        div { class: "captured-line", "{line}" }
+                                    }
+                                }
+                            },
+                            Some(Err(msg)) => rsx! {
+                                p { class: "render-error", "{msg}" }
+                            },
+                            _ => rsx! {},
                         }
                     }
                 }
+                aside {
+                    class: "jump",
+                    // months page by scrolling — no ‹ › buttons (design § logs)
+                    onwheel: move |event| {
+                        let delta = event.delta().strip_units().y;
+                        if delta != 0.0 {
+                            page.call(delta > 0.0);
+                        }
+                    },
+                    div { class: "cal-head",
+                        span { class: "cal-month type-label", "{logs::month_label(month())}" }
+                        // ‹ today › — the mockup's header controls
+                        // (adr/2026-07-month-paging-arrow-keys.md)
+                        span { class: "cal-nav",
+                            button {
+                                class: "cal-arrow",
+                                onclick: move |_| page.call(false),
+                                "‹"
+                            }
+                            button {
+                                class: "cal-today",
+                                onclick: move |_| go_today.call(()),
+                                "today"
+                            }
+                            button {
+                                class: "cal-arrow",
+                                onclick: move |_| page.call(true),
+                                "›"
+                            }
+                        }
+                    }
+                    div { class: "cal-grid",
+                        span { class: "cal-gutter" }
+                        for letter in ["m", "t", "w", "t", "f", "s", "s"] {
+                            span { class: "cal-weekday", "{letter}" }
+                        }
+                        for week in weeks {
+                            span {
+                                class: "cal-gutter cal-week",
+                                class: if week.week_id == id { "selected" },
+                                onclick: {
+                                    let target = week.week_id.clone();
+                                    move |_| select.call((NoteType::Weekly, target.clone()))
+                                },
+                                "{week.label}"
+                            }
+                            for cell in week.days {
+                                {
+                                    match cell {
+                                        Some(day) => {
+                                            let cell_id = time::day_id(day);
+                                            let has_note = day_ids.contains(cell_id.as_str());
+                                            rsx! {
+                                                span {
+                                                    class: "cal-day",
+                                                    class: if has_note { "has-note" },
+                                                    // selection ≠ existence: a
+                                                    // selected empty day outlines
+                                                    class: if cell_id == id { "selected" },
+                                                    onclick: move |_| {
+                                                        select.call((
+                                                            NoteType::Daily,
+                                                            cell_id.clone(),
+                                                        ))
+                                                    },
+                                                    "{day.day()}"
+                                                }
+                                            }
+                                        }
+                                        None => rsx! { span { class: "cal-day blank" } },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "cal-seasons",
+                        for (label, target) in seasons {
+                            span {
+                                class: "cal-season",
+                                class: if target.1 == time::season_id(today) { "lit" },
+                                class: if target.1 == id { "selected" },
+                                onclick: move |_| select.call(target.clone()),
+                                "{label}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if screen() == Screen::Table {
+            div {
+                class: "table",
+                // switching here unmounted the logs pane and the focus it
+                // held; the chords only arrive by bubbling from inside, so
+                // the pane must ask for focus itself — autofocus fires at
+                // document load only (the textarea's onmounted lesson)
+                tabindex: "0",
+                onmounted: {
+                    let pane = pane.clone();
+                    move |event: Event<MountedData>| {
+                        pane.borrow_mut().replace(event.data());
+                        let handle = event.data();
+                        async move {
+                            let _ = handle.set_focus(true).await;
+                        }
+                    }
+                },
+                onkeydown: table_keys,
             }
         }
     }
 }
 
-/// The table mounts in v1; until then its icon stays dim and neither icon
-/// navigates — the logs are the only screen.
+/// The app's two screens (adr/2026-07-two-screens-table-and-logs.md): the
+/// table mounts as of v1 phase 2.
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Table,
@@ -1204,14 +1310,18 @@ enum Screen {
 }
 
 /// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
-/// current screen's lit, and the open-loops ember. Zero loops renders
-/// nothing at all — absence, not a zero — so the ember is clickable exactly
-/// when there is a list to show (adr/2026-08-loops-list-overlay.md).
+/// current screen's lit and each a button to its screen
+/// (adr/2026-08-screen-switch-gesture.md), and the open-loops ember. Zero
+/// loops renders nothing at all — absence, not a zero — so the ember is
+/// clickable exactly when there is a list to show
+/// (adr/2026-08-loops-list-overlay.md).
 #[component]
 fn Chrome(
     screen: Screen,
     loops: usize,
     on_ember: EventHandler<()>,
+    on_table: EventHandler<()>,
+    on_logs: EventHandler<()>,
 ) -> Element {
     rsx! {
         header { class: "chrome",
@@ -1220,6 +1330,7 @@ fn Chrome(
                 width: "14",
                 height: "14",
                 view_box: "0 0 14 14",
+                onclick: move |_| on_table.call(()),
                 rect { x: "1", y: "2", width: "5", height: "4", fill: "none", stroke: "currentColor" }
                 rect { x: "8", y: "5", width: "5", height: "4", fill: "none", stroke: "currentColor" }
                 rect { x: "3", y: "9", width: "5", height: "4", fill: "none", stroke: "currentColor" }
@@ -1229,6 +1340,7 @@ fn Chrome(
                 width: "14",
                 height: "14",
                 view_box: "0 0 14 14",
+                onclick: move |_| on_logs.call(()),
                 rect { x: "1.5", y: "2.5", width: "11", height: "10", fill: "none", stroke: "currentColor" }
                 line { x1: "1.5", y1: "5.5", x2: "12.5", y2: "5.5", stroke: "currentColor" }
                 line { x1: "4.5", y1: "1", x2: "4.5", y2: "3.5", stroke: "currentColor" }
@@ -1412,6 +1524,9 @@ struct Picker {
 struct Palette {
     block_active: bool,
     caret: Option<usize>,
+    /// Which screen the palette opened over: the screen commands hide where
+    /// they already stand (adr/2026-08-screen-switch-gesture.md).
+    on_table: bool,
 }
 
 /// Everything the picker can offer, read at the moment it opens.
@@ -1527,37 +1642,42 @@ mod tests {
     const TODAY: &str = "2026-07-23";
 
     /// Initial click-listener layout, established empirically (see the
-    /// mounted-app doc): registration runs jump-panel first — the header's
-    /// ‹ today › buttons, the three seasons, then each grid row as gutter +
-    /// day cells — then the note's two link-footer entries, the centre's two
-    /// inactive blocks (today's preamble and heading), the two crumb jumps,
-    /// and finally the five rail rows top to bottom.
-    const CAL_BACK: usize = 0;
-    const CAL_TODAY: usize = 1;
-    const CAL_FORWARD: usize = 2;
-    const SEASON_AUTUMN: usize = 5;
-    const GUTTER_W31: usize = 36;
-    const FOOTER_BACKLINK: usize = 42;
-    const FOOTER_OUTGOING: usize = 43;
-    const BLOCK_PREAMBLE: usize = 44;
-    const BLOCK_HEADING: usize = 45;
-    const CRUMB_WEEK: usize = 46;
-    const RAIL_SUMMER: usize = 48;
-    const RAIL_W30: usize = 49;
-    const RAIL_DAY_23: usize = 50;
-    const RAIL_DAY_22: usize = 51;
-    const RAIL_DAY_21: usize = 52;
+    /// mounted-app doc): registration runs the chrome's two icons first,
+    /// then jump-panel — the header's ‹ today › buttons, the three seasons,
+    /// then each grid row as gutter + day cells — then the note's two
+    /// link-footer entries, the centre's two inactive blocks (today's
+    /// preamble and heading), the two crumb jumps, and finally the five
+    /// rail rows top to bottom.
+    const CHROME_TABLE: usize = 0;
+    const CHROME_LOGS: usize = 1;
+    const CAL_BACK: usize = 2;
+    const CAL_TODAY: usize = 3;
+    const CAL_FORWARD: usize = 4;
+    const SEASON_AUTUMN: usize = 7;
+    const GUTTER_W31: usize = 38;
+    const FOOTER_BACKLINK: usize = 44;
+    const FOOTER_OUTGOING: usize = 45;
+    const BLOCK_PREAMBLE: usize = 46;
+    const BLOCK_HEADING: usize = 47;
+    const CRUMB_WEEK: usize = 48;
+    const RAIL_SUMMER: usize = 50;
+    const RAIL_W30: usize = 51;
+    const RAIL_DAY_23: usize = 52;
+    const RAIL_DAY_22: usize = 53;
+    const RAIL_DAY_21: usize = 54;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
-    /// one gutter per started week row.
+    /// one gutter per started week row (and everything sits behind the two
+    /// chrome icons).
     const fn day_cell(day: usize) -> usize {
-        6 + (day + 1) / 7 + day
+        8 + (day + 1) / 7 + day
     }
     /// Which keydown listener is the logs pane's (the other is the root).
     const LOGS_KEYS: usize = 1;
-    /// The ember registers ahead of everything in the pane, so in a vault
-    /// with open loops it takes click listener 0 and every index above
-    /// shifts by one — which is why the base `temp_vault` has none.
-    const EMBER: usize = 0;
+    /// The ember registers with the chrome ahead of everything in the pane,
+    /// so in a vault with open loops it takes click listener 2 and every
+    /// pane index above shifts by one — which is why the base `temp_vault`
+    /// has none.
+    const EMBER: usize = 2;
 
     // -- the App component, driven headlessly through a VirtualDom ----------
 
@@ -1822,7 +1942,15 @@ mod tests {
     /// running dom, which is what this wrapper is for.
     #[component]
     fn BareChrome(screen: Screen) -> Element {
-        rsx! { Chrome { screen, loops: 0, on_ember: move |()| {} } }
+        rsx! {
+            Chrome {
+                screen,
+                loops: 0,
+                on_ember: move |()| {},
+                on_table: move |()| {},
+                on_logs: move |()| {},
+            }
+        }
     }
 
     #[test]
@@ -1858,6 +1986,143 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         // one loop of each kind, and the count is the list's own length
         assert!(html.contains(r#"class="ember">3</span>"#), "{html}");
+    }
+
+    // -- the two screens: icons, chords, palette entries ---------------------
+
+    #[test]
+    fn the_icons_swap_the_screen_and_back() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+        assert!(html.contains("icon-logs lit"), "{html}");
+
+        let mutations = click_for_mutations(&mut dom, clicks[CHROME_TABLE]);
+        // the pane asks for focus on mount, like the textarea it replaces
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "{html}");
+        assert!(html.contains("icon-table lit"), "{html}");
+        assert!(!html.contains(r#"class="logs""#), "{html}");
+
+        click(&mut dom, clicks[CHROME_LOGS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+        assert!(html.contains("icon-logs lit"), "{html}");
+        assert!(!html.contains(r#"class="table""#), "{html}");
+    }
+
+    #[test]
+    fn ctrl_1_and_ctrl_2_switch_screens() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // a bare 1 is just typing; only the chord travels — and Ctrl+2
+        // where the logs already stand goes nowhere
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("1".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="logs""#));
+        let mutations = press_for_mutations(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "{html}");
+
+        // the way back rides the table pane's own keydown; the chord for
+        // the screen already stood on stays where it is
+        let table_keys = listeners(&mutations, "keydown")[0];
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="table""#));
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+    }
+
+    #[test]
+    fn leaving_the_logs_closes_the_active_block() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        assert!(dioxus_ssr::render(&dom).contains("block-active"));
+
+        click(&mut dom, clicks[CHROME_TABLE]);
+        click(&mut dom, clicks[CHROME_LOGS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("block-active"),
+            "leaving closed the block, Escape's semantics: {html}"
+        );
+    }
+
+    #[test]
+    fn the_palette_switches_screens_by_name() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "table");
+        let mutations = press_for_mutations(
+            &mut dom,
+            palette_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "{html}");
+
+        // from the table the palette offers the way back and nothing the
+        // table cannot answer for — no block can be active here
+        let table_keys = listeners(&mutations, "keydown")[0];
+        let (input, palette_keys) = open_palette(&mut dom, table_keys);
+        // a second Ctrl+P while it is open changes nothing
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("p".into()),
+            Modifiers::CONTROL,
+        );
+        let labels = palette_labels(&dom);
+        assert!(labels.contains(&"go to logs".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"go to table".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"insert link".to_string()), "{labels:?}");
+
+        type_into(&mut dom, input, "logs");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
     }
 
     #[test]
@@ -1922,9 +2187,9 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            53,
-            "3 header + 3 seasons + 5 gutters + 31 days + 2 footer links \
-             + 2 blocks + 2 crumbs + 5 rail: {html}"
+            55,
+            "2 chrome icons + 3 header + 3 seasons + 5 gutters + 31 days \
+             + 2 footer links + 2 blocks + 2 crumbs + 5 rail: {html}"
         );
     }
 
@@ -3400,8 +3665,10 @@ mod tests {
                 "next month",
                 "open loops",
                 "go to today",
+                "go to table",
             ],
-            "no block active: the caret commands are hidden"
+            "no block active: the caret commands are hidden, and the \
+             screen already stood on is not offered"
         );
 
         type_into(&mut dom, input, "THEME");
@@ -3413,7 +3680,7 @@ mod tests {
     }
 
     #[test]
-    fn over_an_active_block_all_nine_commands_are_listed() {
+    fn over_an_active_block_all_but_the_stood_screen_are_listed() {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
@@ -3421,7 +3688,7 @@ mod tests {
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 9, "{labels:?}");
+        assert_eq!(labels.len(), 10, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -4213,11 +4480,14 @@ mod tests {
         clicks: &[ElementId],
     ) -> (ElementId, ElementId, ElementId) {
         // a click on a rail row re-renders without mounting a textarea, so
-        // the pane keydown target is still the one from the initial mount
+        // the pane keydown target is still the one from the initial mount;
+        // the fallback must be an element *inside* the pane — a keydown
+        // only reaches the pane handler by bubbling, and the chrome icons
+        // at the front of `clicks` sit outside it
         let mutations = click_for_mutations(dom, clicks[RAIL_DAY_23]);
         let keys = listeners(&mutations, "keydown");
-        let target = *keys.last().unwrap_or(&clicks[0]);
-        (clicks[0], target, target)
+        let target = *keys.last().unwrap_or(&clicks[CAL_BACK]);
+        (clicks[CAL_BACK], target, target)
     }
 
     /// Makes `Index::open` fail for every later read: the database path
