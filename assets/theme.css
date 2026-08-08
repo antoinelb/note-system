@@ -17,6 +17,25 @@
   --hairline: #1b1730;
   --hairline-strong: #332c52;
   --ember: #d9b06a;
+  /* the table (design § The table screen, § Palette): card fills, the eight
+     type hues — six drawn in the wireframes, organisation and personal
+     derived from turn 1's reference hues by the same mute
+     (adr/2026-08-light-table-colours-derived.md) */
+  --card-fill: #151226;
+  --card-capture-fill: rgba(16, 14, 30, 0.8);
+  --card-generated-edge: #443d6b;
+  --type-person: #a0765f;
+  --type-organisation: #9f8960;
+  --type-source: #83875e;
+  --type-concept: #7d78a0;
+  --type-claim: #6a94a0;
+  --type-idea: #6a76a8;
+  --type-personal: #896ea6;
+  --type-project: #9a7d95;
+  --bar-untyped: #4a4566;
+  --bar-generated: #6f6a8c;
+  --star-bright: #3d3660;
+  --star-dim: #332c52;
 }
 
 .app[data-theme="light"] {
@@ -30,6 +49,24 @@
   --hairline: #e5e2ee;
   --hairline-strong: #d0cdda;
   --ember: #b08a4a;
+  /* the light siblings the deck left undrawn, derived one rule for all:
+     hue kept, value inverted against the light ground; bars gain chroma
+     because 3px needs it on light (adr/2026-08-light-table-colours-derived.md) */
+  --card-fill: #eae9f2;
+  --card-capture-fill: rgba(241, 239, 247, 0.8);
+  --card-generated-edge: #aaa4cb;
+  --type-person: #a36b4d;
+  --type-organisation: #a3854d;
+  --type-source: #8e9550;
+  --type-concept: #5f5699;
+  --type-claim: #4e8797;
+  --type-idea: #4d5ea3;
+  --type-personal: #76549c;
+  --type-project: #97598c;
+  --bar-untyped: #a5a1b8;
+  --bar-generated: #8b87a0;
+  --star-bright: #c8c4de;
+  --star-dim: #d4d1e6;
 }
 
 body {
@@ -504,6 +541,109 @@ body {
   padding: 16px;
   font: 16px Lato, sans-serif;
   color: var(--ember);
+}
+
+/* -- the table screen: void, stars, cards (wireframes state 6a) ----------- */
+
+.table {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  /* a drag must never start a text selection */
+  user-select: none;
+  background-color: var(--bg);
+  /* the faint star field: six one-pixel dots, background rather than DOM —
+     distant stars excusably don't parallax with the pan */
+  background-image:
+    radial-gradient(circle 1px at 15% 25%, var(--star-bright), transparent),
+    radial-gradient(circle 1px at 70% 15%, var(--star-dim), transparent),
+    radial-gradient(circle 1px at 85% 60%, var(--star-bright), transparent),
+    radial-gradient(circle 1px at 35% 80%, var(--star-dim), transparent),
+    radial-gradient(circle 1px at 55% 45%, var(--star-dim), transparent),
+    radial-gradient(circle 1px at 25% 55%, var(--star-bright), transparent);
+}
+
+/* focusable only so the chords have somewhere to land */
+.table:focus {
+  outline: none;
+}
+
+/* the panned layer; its translate is set inline from the pan signal */
+.canvas {
+  position: absolute;
+  inset: 0;
+}
+
+/* mockup 170–180 wide, padding 9px 11px — normalized to ×4 */
+.card {
+  position: absolute;
+  box-sizing: border-box;
+  width: 176px;
+  padding: 8px 12px;
+  background: var(--card-fill);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--bar-untyped);
+  cursor: grab;
+}
+
+.card.bar-person {
+  border-left-color: var(--type-person);
+}
+
+.card.bar-organisation {
+  border-left-color: var(--type-organisation);
+}
+
+.card.bar-source {
+  border-left-color: var(--type-source);
+}
+
+.card.bar-concept {
+  border-left-color: var(--type-concept);
+}
+
+.card.bar-claim {
+  border-left-color: var(--type-claim);
+}
+
+.card.bar-idea {
+  border-left-color: var(--type-idea);
+}
+
+.card.bar-personal {
+  border-left-color: var(--type-personal);
+}
+
+.card.bar-project {
+  border-left-color: var(--type-project);
+}
+
+/* capture: dimmer fill, grey bar, muted title — second-class until promoted */
+.card-capture {
+  background: var(--card-capture-fill);
+}
+
+.card-capture .card-title {
+  color: var(--ink-muted);
+}
+
+/* generated: dashed all round, no hue — outline, disposable */
+.card-generated {
+  border: 1px dashed var(--card-generated-edge);
+  border-left: 3px dashed var(--bar-generated);
+}
+
+.card-label {
+  font: 600 12px ui-monospace, monospace;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.card-title {
+  font: 600 16px/1.3 Lato, sans-serif;
+  color: var(--ink-bright);
 }
 
 /* -- type scale: metadata labels (design § Typography) --------------------
