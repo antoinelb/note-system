@@ -71,6 +71,20 @@ pub struct Backlink {
     pub id: Option<String>,
 }
 
+/// One note as the table draws it: everything a card needs except its
+/// position, which lives in the plain-lines file the index can never touch
+/// (adr/2026-08-positions-plain-lines-file.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableNote {
+    pub id: String,
+    pub kind: NoteCategory,
+    pub note_type: Option<NoteType>,
+    pub title: Option<String>,
+    /// ISO `YYYY-MM-DD` as the column stores it; parsed only where a
+    /// capture's age is drawn.
+    pub created: Option<String>,
+}
+
 pub struct Index {
     connection: Connection,
 }
@@ -326,6 +340,46 @@ impl Index {
                 (crate::domain::stem_of(path), category)
             })
             .collect())
+    }
+
+    /// Every note the table can show, ordered by id: time is the one
+    /// category that never appears on the canvas (plan.md § Note model),
+    /// and an id-less note cannot sit on it — positions are keyed by id,
+    /// so it stays open-loops debt instead. Duplicate ids are returned
+    /// as-is: a collision is an error to see, not to hide
+    /// (adr/2026-07-id-collision-is-an-error.md). The category is derived
+    /// from the path's leading directory for `captured_on`'s reason: the
+    /// WHERE clause already constrains the column, and re-reading it would
+    /// only add an untestable decode branch.
+    pub fn table_notes(&self) -> Result<Vec<TableNote>, IndexError> {
+        query_rows(
+            &self.connection,
+            concat!(
+                "SELECT id, path, type, title, created FROM notes ",
+                "WHERE category != 'time' AND id IS NOT NULL ",
+                "ORDER BY id"
+            ),
+            [],
+            |row| {
+                let path = PathBuf::from(row.get::<_, String>(1)?);
+                let kind = if path.starts_with("capture") {
+                    NoteCategory::Capture
+                } else if path.starts_with("generated") {
+                    NoteCategory::Generated
+                } else {
+                    NoteCategory::Permanent
+                };
+                Ok(TableNote {
+                    id: row.get::<_, String>(0)?,
+                    kind,
+                    note_type: row
+                        .get::<_, Option<String>>(2)?
+                        .map(|name| NoteType::from_name(&name)),
+                    title: row.get::<_, Option<String>>(3)?,
+                    created: row.get::<_, Option<String>>(4)?,
+                })
+            },
+        )
     }
 
     pub fn dangling_links(&self) -> Result<Vec<DanglingLink>, IndexError> {
@@ -831,6 +885,82 @@ mod tests {
             index.captured_on("2026-07-23"),
             Err(IndexError::Sqlite(_))
         ));
+    }
+
+    #[test]
+    fn table_notes_lists_everything_except_time_and_the_id_less() {
+        let (_dir, mut index) = temp_index();
+        let notes = scan_vault(&fixture_vault()).expect("scan fixture");
+        index.rebuild(&notes).expect("rebuild");
+
+        let rows = index.table_notes().expect("query");
+        // the fixture's 13 non-time notes minus missing-meta.typ, whose
+        // absent id keeps it off the table and in the loops list
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "atomic-notes",
+                "capture-articles-zettel",
+                "capture-idea-canvas",
+                "digest-smart-notes",
+                "duplicate-meta",
+                "link-traps",
+                "luhmann",
+                "missing-type",
+                "note-system",
+                "plain-files",
+                "smart-notes",
+                "zettelkasten",
+            ]
+        );
+        let kind_of = |id: &str| {
+            rows.iter().find(|row| row.id == id).map(|row| row.kind)
+        };
+        assert_eq!(kind_of("zettelkasten"), Some(NoteCategory::Permanent));
+        assert_eq!(
+            kind_of("capture-idea-canvas"),
+            Some(NoteCategory::Capture)
+        );
+        assert_eq!(
+            kind_of("digest-smart-notes"),
+            Some(NoteCategory::Generated)
+        );
+        let missing_type = rows
+            .iter()
+            .find(|row| row.id == "missing-type")
+            .expect("missing-type row");
+        assert_eq!(missing_type.note_type, None);
+        assert_eq!(missing_type.title.as_deref(), Some("Note without a type"));
+        assert_eq!(missing_type.created.as_deref(), Some("2026-07-23"));
+        let zettelkasten = rows
+            .iter()
+            .find(|row| row.id == "zettelkasten")
+            .expect("zettelkasten row");
+        assert_eq!(zettelkasten.note_type, Some(NoteType::Concept));
+    }
+
+    #[test]
+    fn table_notes_reports_rows_that_will_not_decode() {
+        // one blob per column read, so each `?` in the closure fires
+        for plant in [
+            "INSERT INTO notes (path, category, id)
+             VALUES (x'00', 'permanent', 'ok');",
+            "INSERT INTO notes (path, category, id)
+             VALUES ('permanent/blob-id.typ', 'permanent', x'00');",
+            "INSERT INTO notes (path, category, id, type)
+             VALUES ('permanent/blob-type.typ', 'permanent', 'ok', x'00');",
+            "INSERT INTO notes (path, category, id, title)
+             VALUES ('permanent/blob-title.typ', 'permanent', 'ok', x'00');",
+            "INSERT INTO notes (path, category, id, created)
+             VALUES ('permanent/blob-created.typ', 'permanent', 'ok', x'00');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(index.table_notes(), Err(IndexError::Sqlite(_))));
+        }
     }
 
     #[test]
