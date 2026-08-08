@@ -207,12 +207,16 @@ fn Shell(
     let mut table_notes = use_signal(|| table);
     // canvas positions, read once here and touched by nothing but the user's
     // drag (adr/2026-07-positions-separate-file.md)
-    let positions = use_signal({
+    let mut positions = use_signal({
         let root = root.clone();
         move || Positions::load(&root.join(".index/positions"))
     });
     // which screen is up; the logs remain the door the app opens on
     let mut screen = use_signal(|| Screen::Logs);
+    // the table's viewport offset, session state only — the void pans, the
+    // cards keep their canvas coordinates
+    let mut pan = use_signal(|| (0.0f64, 0.0f64));
+    let mut grab = use_signal(|| None::<Grab>);
     let mut loops_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
@@ -253,9 +257,20 @@ fn Shell(
     // QuitFlush, because only the mount handler ever reads it
     let pending_caret = use_hook(|| Rc::new(std::cell::Cell::new(None)));
 
-    // the Ctrl+Q flush: reports whether the open note reached disk, so a
-    // failed save can hold the app open instead of losing the buffer
-    let quit_flush = use_callback(move |()| editor.write().flush());
+    // the Ctrl+Q flush: reports whether the open note and the canvas
+    // positions reached disk, so a failed save can hold the app open
+    // instead of losing either
+    let quit_flush = use_callback(move |()| {
+        let note_saved = editor.write().flush();
+        let placed_saved = match positions.peek().save() {
+            Ok(()) => true,
+            Err(error) => {
+                editor.write().set_notice(format!("positions: {error}"));
+                false
+            }
+        };
+        note_saved && placed_saved
+    });
     let register = use_context::<QuitFlush>();
     // once is enough: the Callback's identity is stable across re-renders,
     // only its captured closure is refreshed
@@ -305,6 +320,29 @@ fn Shell(
                 && editor.peek().notice() != Some(error.as_str())
             {
                 editor.write().set_notice(error);
+            }
+        }
+    });
+
+    // the drag's idle timer, the autosave's twin: every store write restarts
+    // the sleep, and the file is written once the mouse rests — the restart
+    // *is* the debounce (adr/2026-08-positions-plain-lines-file.md). The
+    // first run after mount rewrites the just-loaded file byte-identically,
+    // the autosave's same benign first tick.
+    let _positions_save = use_resource(move || {
+        // reading the store is what subscribes this resource to every drag
+        let _ = positions.read();
+        async move {
+            tokio::time::sleep(QUIET).await;
+            let failed = positions.peek().save().err();
+            // value-gated like the autosave's: an unguarded write to the
+            // subscribed editor signal would be fine, but the same message
+            // re-set forever would repaint for nothing
+            if let Some(error) = failed {
+                let message = format!("positions: {error}");
+                if editor.peek().notice() != Some(message.as_str()) {
+                    editor.write().set_notice(message);
+                }
             }
         }
     });
@@ -1307,12 +1345,57 @@ fn Shell(
                     }
                 },
                 onkeydown: table_keys,
-                div { class: "canvas",
+                // a mousedown that no card stopped is the void: pan
+                onmousedown: move |event: MouseEvent| {
+                    grab.set(Some(Grab::Void { last: point(&event) }));
+                },
+                // one total handler moves whatever is held; `.peek()`
+                // everywhere, so tracking the mouse subscribes nothing
+                onmousemove: move |event: MouseEvent| {
+                    // cloned out first: the peek guard must drop before the
+                    // arms write the signal back
+                    let held = grab.peek().clone();
+                    match held {
+                        None => {}
+                        Some(Grab::Void { last }) => {
+                            let now = point(&event);
+                            let (x, y) = *pan.peek();
+                            pan.set((x + now.0 - last.0, y + now.1 - last.1));
+                            grab.set(Some(Grab::Void { last: now }));
+                        }
+                        Some(Grab::Card { id, x, y, last }) => {
+                            let now = point(&event);
+                            let (x, y) = (x + now.0 - last.0, y + now.1 - last.1);
+                            // the live repaint and the debounce restart are
+                            // the same write
+                            positions.write().set(&id, x, y);
+                            grab.set(Some(Grab::Card { id, x, y, last: now }));
+                        }
+                    }
+                },
+                onmouseup: move |_| grab.set(None),
+                div {
+                    class: "canvas",
+                    style: "transform: translate({pan().0}px, {pan().1}px)",
                     for card in placed {
                         div {
                             key: "{card.id}",
                             class: "card card-{card.kind.as_dir()} {card.bar}",
                             style: "left: {card.x}px; top: {card.y}px",
+                            onmousedown: {
+                                let seed = (card.id.clone(), card.x, card.y);
+                                move |event: MouseEvent| {
+                                    // a card grab must not also start a pan —
+                                    // this stop is the whole disambiguation
+                                    event.stop_propagation();
+                                    grab.set(Some(Grab::Card {
+                                        id: seed.0.clone(),
+                                        x: seed.1,
+                                        y: seed.2,
+                                        last: point(&event),
+                                    }));
+                                }
+                            },
                             div { class: "card-label", "{card.label}" }
                             div { class: "card-title", "{card.title}" }
                         }
@@ -1329,6 +1412,32 @@ fn Shell(
 enum Screen {
     Table,
     Logs,
+}
+
+/// What the mouse holds on the table: the void (panning) or a card (moving
+/// it). `last` is the previous mousemove in client coordinates; the card's
+/// `x, y` are its canvas coordinates, authoritative while the drag lasts —
+/// seeded from the render, so a click that never moves writes nothing.
+#[derive(Clone, PartialEq)]
+enum Grab {
+    Void {
+        last: (f64, f64),
+    },
+    Card {
+        id: String,
+        x: f64,
+        y: f64,
+        last: (f64, f64),
+    },
+}
+
+/// Client coordinates, the one space every table delta is measured in: the
+/// canvas is translated, never scaled, so a client delta *is* a canvas
+/// delta at titles zoom — phase 6's body zoom must divide by its scale
+/// here, and nowhere else.
+fn point(event: &MouseEvent) -> (f64, f64) {
+    let coordinates = event.client_coordinates();
+    (coordinates.x, coordinates.y)
 }
 
 /// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
@@ -2226,6 +2335,147 @@ mod tests {
         assert!(
             !dioxus_ssr::render(&dom).contains("beta"),
             "and leaves when the file does"
+        );
+    }
+
+    // -- drag, pan, and the debounced write to the positions file ------------
+
+    #[test]
+    fn dragging_a_card_moves_it_and_the_debounce_writes_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        // alpha is the first card in id order, on the grid at (32, 32)
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (140.0, 88.0));
+        mouse(&mut dom, "mousemove", pane, (150.0, 90.0));
+        mouse(&mut dom, "mouseup", pane, (150.0, 90.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("left: 82px; top: 22px"),
+            "the card followed both moves: {html}"
+        );
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(saved.trim(), "alpha 82 22");
+    }
+
+    #[test]
+    fn a_click_that_never_moves_writes_no_position() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the idle tick still writes the empty store");
+        assert!(!saved.contains("alpha"), "no movement, no entry: {saved}");
+    }
+
+    #[test]
+    fn panning_moves_the_canvas_and_writes_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, _) = table_targets(&mut dom, &clicks);
+
+        // a stray move with nothing held moves nothing
+        mouse(&mut dom, "mousemove", pane, (10.0, 10.0));
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains("transform: translate(0px, 0px)")
+        );
+
+        mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
+        mouse(&mut dom, "mousemove", pane, (180.0, 230.0));
+        mouse(&mut dom, "mouseup", pane, (180.0, 230.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("transform: translate(-20px, 30px)"),
+            "the void panned: {html}"
+        );
+        assert!(
+            html.contains("left: 32px; top: 32px"),
+            "the cards kept their canvas coordinates: {html}"
+        );
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the idle tick still writes the empty store");
+        assert_eq!(saved.trim(), "", "panning is not placement: {saved}");
+    }
+
+    #[test]
+    fn a_dragged_position_survives_the_quit_and_the_relaunch() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        mouse(&mut dom, "mousedown", cards[0], (0.0, 0.0));
+        mouse(&mut dom, "mousemove", pane, (300.0, 250.0));
+        mouse(&mut dom, "mouseup", pane, (300.0, 250.0));
+
+        // quit inside the quiet window: only the flush can save it
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(closed.load(Ordering::SeqCst), "the flush let the quit by");
+
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("left: 332px; top: 282px"),
+            "drag, quit, relaunch — it stayed put: {html}"
+        );
+    }
+
+    #[test]
+    fn an_unwritable_positions_file_surfaces_and_holds_the_quit() {
+        let vault = temp_vault();
+        // the store's path is a directory: the load degrades to "nothing
+        // placed", and every save fails
+        std::fs::create_dir_all(vault.path().join(".index/positions"))
+            .expect("the sabotage directory is created");
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+
+        // the first idle tick already fails; the notice shows in the logs
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("positions:"), "{html}");
+
+        // a drag re-fails without re-setting the identical notice
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        mouse(&mut dom, "mousedown", cards[0], (0.0, 0.0));
+        mouse(&mut dom, "mousemove", pane, (40.0, 40.0));
+        mouse(&mut dom, "mouseup", pane, (40.0, 40.0));
+        block_on(settle(&mut dom));
+
+        // and the flush failure cancels the quit instead of losing the drag
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "an unsaved store holds the app open"
         );
     }
 
@@ -4458,6 +4708,51 @@ mod tests {
             dom.process_events();
             let _ = dom.render_immediate_to_vec();
         })
+    }
+
+    /// Fires one mouse event of the given kind at the target, carrying real
+    /// client coordinates — the space the table's pan and drag math reads.
+    fn mouse(
+        dom: &mut VirtualDom,
+        kind: &'static str,
+        target: ElementId,
+        at: (f64, f64),
+    ) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedMouseData::new(
+                    Some(input_data::MouseButton::Primary),
+                    input_data::MouseButton::Primary.into(),
+                    {
+                        use dioxus::html::geometry::*;
+                        Coordinates::new(
+                            ScreenPoint::zero(),
+                            ClientPoint::new(at.0, at.1),
+                            ElementPoint::zero(),
+                            PagePoint::zero(),
+                        )
+                    },
+                    Modifiers::empty(),
+                ),
+            )));
+            dom.runtime()
+                .handle_event(kind, Event::new(data, true), target);
+            dom.process_events();
+            let _ = dom.render_immediate_to_vec();
+        });
+    }
+
+    /// Switches to the table and hands back its mousedown targets: the pane
+    /// itself (the void — also the mousemove/mouseup target), then each
+    /// card's, in card order. Established empirically like the click
+    /// constants: the pane registers ahead of its cards.
+    fn table_targets(
+        dom: &mut VirtualDom,
+        clicks: &[ElementId],
+    ) -> (ElementId, Vec<ElementId>) {
+        let mutations = click_for_mutations(dom, clicks[CHROME_TABLE]);
+        let downs = listeners(&mutations, "mousedown");
+        (downs[0], downs[1..].to_vec())
     }
 
     /// Like `click`, but hands back the mutations it caused — how the
