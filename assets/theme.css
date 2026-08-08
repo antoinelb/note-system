@@ -555,8 +555,10 @@ body {
   overflow: hidden;
   /* the void stays plain so the grab cursor marks exactly what drags: cards */
   cursor: default;
-  /* a drag must never start a text selection */
+  /* a drag must never start a text selection; WebKitGTK still wants the
+     prefixed property, without which the bare one is ignored */
   user-select: none;
+  -webkit-user-select: none;
   background-color: var(--bg);
   /* the faint star field: six one-pixel dots, background rather than DOM —
      distant stars excusably don't parallax with the pan */
