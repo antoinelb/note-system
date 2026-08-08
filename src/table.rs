@@ -3,6 +3,8 @@
 //! phase 8 places it. Everything decidable without a VirtualDom lives here,
 //! so the component stays wiring (adr/2026-07-ui-covered-at-100.md).
 
+use std::collections::HashMap;
+
 use jiff::civil::Date;
 
 use crate::domain::{NoteCategory, NoteType};
@@ -29,27 +31,47 @@ pub struct Card {
     pub y: f64,
 }
 
-/// Resolve every table note against the store. Unplaced notes take the
-/// deterministic fallback grid; input order (the query's ORDER BY id) is the
-/// grid order, so the stack cannot shuffle between renders — dumb and honest
-/// until phase 8 places them (roadmap-v1.md § Phase 2).
+/// Where the unplaced stand this session: an id keeps the first slot it was
+/// given until a real position exists for it, so placing one card never
+/// shuffles the rest mid-session. The store stays untouched — a missing
+/// entry still means "not yet placed", and phase 8 still gets to decide
+/// (adr/2026-08-table-mounts-titles-zoom.md).
+#[derive(Default)]
+pub struct Fallback {
+    slots: HashMap<String, (f64, f64)>,
+    next: usize,
+}
+
+impl Fallback {
+    /// The remembered slot, or the next one near the origin for a new note.
+    /// Slots are never reclaimed within a session: reuse would put a fresh
+    /// card exactly where a just-placed one appeared to leave from.
+    fn slot_for(&mut self, id: &str) -> (f64, f64) {
+        if let Some(slot) = self.slots.get(id) {
+            return *slot;
+        }
+        let slot = fallback_slot(self.next);
+        self.next += 1;
+        self.slots.insert(id.to_string(), slot);
+        slot
+    }
+}
+
+/// Resolve every table note against the store. Unplaced notes take a
+/// session-stable slot near the origin — dumb and honest until phase 8
+/// places them (roadmap-v1.md § Phase 2).
 pub fn cards(
     notes: &[TableNote],
     positions: &Positions,
+    fallback: &mut Fallback,
     today: Date,
 ) -> Vec<Card> {
-    let mut unplaced = 0usize;
     notes
         .iter()
         .map(|note| {
-            let (x, y) = match positions.get(&note.id) {
-                Some(placed) => placed,
-                None => {
-                    let slot = fallback_slot(unplaced);
-                    unplaced += 1;
-                    slot
-                }
-            };
+            let (x, y) = positions
+                .get(&note.id)
+                .unwrap_or_else(|| fallback.slot_for(&note.id));
             Card {
                 id: note.id.clone(),
                 title: note.title.clone().unwrap_or_else(|| note.id.clone()),
@@ -68,9 +90,9 @@ const GRID_ORIGIN: f64 = 32.0;
 const GRID_GAP: f64 = 16.0;
 const GRID_ROW_HEIGHT: f64 = 96.0;
 
-/// The unplaced stack: a 4-wide grid at the canvas origin, visible where the
-/// viewport starts. Rank counts only unplaced notes, so placing one by drag
-/// closes the grid up on the next load rather than leaving holes.
+/// The slot generator: a 4-wide grid at the canvas origin, visible where
+/// the viewport starts. The grid is only a spacing scheme — what matters is
+/// that new cards land near the origin without covering each other.
 fn fallback_slot(rank: usize) -> (f64, f64) {
     let column = (rank % GRID_COLUMNS) as f64;
     let row = (rank / GRID_COLUMNS) as f64;
@@ -174,8 +196,12 @@ mod tests {
         ];
         for (note_type, expected) in cases {
             let name = note_type.as_name().to_string();
-            let drawn =
-                cards(&[typed("a", note_type)], &empty_positions(), TODAY);
+            let drawn = cards(
+                &[typed("a", note_type)],
+                &empty_positions(),
+                &mut Fallback::default(),
+                TODAY,
+            );
             assert_eq!(drawn[0].bar, expected, "for type {name}");
             assert_eq!(drawn[0].label, name);
         }
@@ -186,8 +212,12 @@ mod tests {
         let untyped = note("a", NoteCategory::Permanent);
         let unknown = typed("b", NoteType::Unknown("concpet".to_string()));
         let time_scale = typed("c", NoteType::Daily);
-        let drawn =
-            cards(&[untyped, unknown, time_scale], &empty_positions(), TODAY);
+        let drawn = cards(
+            &[untyped, unknown, time_scale],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
         assert_eq!(drawn[0].bar, "bar-untyped");
         assert_eq!(drawn[0].label, "untyped");
         // the unknown name is shown verbatim — honest debt — but mints no class
@@ -203,7 +233,12 @@ mod tests {
         fresh.created = Some("2026-07-23".to_string());
         let mut old = note("b", NoteCategory::Capture);
         old.created = Some("2026-07-20".to_string());
-        let drawn = cards(&[fresh, old], &empty_positions(), TODAY);
+        let drawn = cards(
+            &[fresh, old],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
         assert_eq!(drawn[0].label, "capture · 0 d");
         assert_eq!(drawn[0].bar, "bar-untyped");
         assert_eq!(drawn[1].label, "capture · 3 d");
@@ -214,7 +249,12 @@ mod tests {
         let dateless = note("a", NoteCategory::Capture);
         let mut garbled = note("b", NoteCategory::Capture);
         garbled.created = Some("not-a-date".to_string());
-        let drawn = cards(&[dateless, garbled], &empty_positions(), TODAY);
+        let drawn = cards(
+            &[dateless, garbled],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
         assert_eq!(drawn[0].label, "capture");
         assert_eq!(drawn[1].label, "capture");
     }
@@ -223,7 +263,12 @@ mod tests {
     fn a_future_dated_capture_reads_as_today_not_negative() {
         let mut tomorrow = note("a", NoteCategory::Capture);
         tomorrow.created = Some("2026-07-24".to_string());
-        let drawn = cards(&[tomorrow], &empty_positions(), TODAY);
+        let drawn = cards(
+            &[tomorrow],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
         assert_eq!(drawn[0].label, "capture · 0 d");
     }
 
@@ -232,6 +277,7 @@ mod tests {
         let drawn = cards(
             &[note("a", NoteCategory::Generated)],
             &empty_positions(),
+            &mut Fallback::default(),
             TODAY,
         );
         assert_eq!(drawn[0].label, "generated");
@@ -244,7 +290,12 @@ mod tests {
         let mut titled = note("titled", NoteCategory::Permanent);
         titled.title = Some("A real title".to_string());
         let bare = note("bare", NoteCategory::Permanent);
-        let drawn = cards(&[titled, bare], &empty_positions(), TODAY);
+        let drawn = cards(
+            &[titled, bare],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
         assert_eq!(drawn[0].title, "A real title");
         assert_eq!(drawn[1].title, "bare");
     }
@@ -255,8 +306,12 @@ mod tests {
         let path = dir.path().join("positions");
         let mut positions = Positions::load(&path);
         positions.set("a", 340.0, -120.5);
-        let drawn =
-            cards(&[note("a", NoteCategory::Permanent)], &positions, TODAY);
+        let drawn = cards(
+            &[note("a", NoteCategory::Permanent)],
+            &positions,
+            &mut Fallback::default(),
+            TODAY,
+        );
         assert_eq!((drawn[0].x, drawn[0].y), (340.0, -120.5));
     }
 
@@ -266,7 +321,8 @@ mod tests {
             .iter()
             .map(|id| note(id, NoteCategory::Permanent))
             .collect();
-        let drawn = cards(&notes, &empty_positions(), TODAY);
+        let drawn =
+            cards(&notes, &empty_positions(), &mut Fallback::default(), TODAY);
         let slots: Vec<(f64, f64)> =
             drawn.iter().map(|card| (card.x, card.y)).collect();
         assert_eq!(
@@ -281,7 +337,33 @@ mod tests {
             ]
         );
         // deterministic: the same input stacks identically again
-        assert_eq!(drawn, cards(&notes, &empty_positions(), TODAY));
+        assert_eq!(
+            drawn,
+            cards(&notes, &empty_positions(), &mut Fallback::default(), TODAY)
+        );
+    }
+
+    #[test]
+    fn placing_one_card_leaves_the_others_standing() {
+        let mut fallback = Fallback::default();
+        let notes = [
+            note("a", NoteCategory::Permanent),
+            note("b", NoteCategory::Permanent),
+        ];
+        let before = cards(&notes, &empty_positions(), &mut fallback, TODAY);
+        assert_eq!((before[1].x, before[1].y), (224.0, 32.0));
+
+        // a gets dragged somewhere real; b must not compact into its slot
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut positions = Positions::load(&dir.path().join("positions"));
+        positions.set("a", 900.0, 900.0);
+        let after = cards(&notes, &positions, &mut fallback, TODAY);
+        assert_eq!((after[0].x, after[0].y), (900.0, 900.0));
+        assert_eq!(
+            (after[1].x, after[1].y),
+            (224.0, 32.0),
+            "the untouched card kept the slot it was first given"
+        );
     }
 
     #[test]
@@ -294,7 +376,7 @@ mod tests {
             note("a", NoteCategory::Permanent),
             note("b", NoteCategory::Permanent),
         ];
-        let drawn = cards(&notes, &positions, TODAY);
+        let drawn = cards(&notes, &positions, &mut Fallback::default(), TODAY);
         // b is the first unplaced note, so it takes the grid's first slot
         assert_eq!((drawn[1].x, drawn[1].y), (32.0, 32.0));
     }

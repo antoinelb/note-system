@@ -217,6 +217,10 @@ fn Shell(
     // cards keep their canvas coordinates
     let mut pan = use_signal(|| (0.0f64, 0.0f64));
     let mut grab = use_signal(|| None::<Grab>);
+    // the unplaced notes' session slots: a memo store like the fragment
+    // cache, not UI state — nothing re-renders when a slot is remembered
+    let fallback =
+        use_hook(|| Rc::new(RefCell::new(table::Fallback::default())));
     let mut loops_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
@@ -672,7 +676,12 @@ fn Shell(
         .then(|| captured_lines(&root, &id));
     // reading both signals here is what repaints the table on a drag write
     // and on a watcher batch alike
-    let placed = table::cards(&table_notes.read(), &positions.read(), today);
+    let placed = table::cards(
+        &table_notes.read(),
+        &positions.read(),
+        &mut fallback.borrow_mut(),
+        today,
+    );
     let day_ids: HashSet<&str> =
         note_list.iter().map(|(note, _)| note.as_str()).collect();
     let weeks = logs::month_grid(month());
@@ -2357,6 +2366,10 @@ mod tests {
             html.contains("left: 82px; top: 22px"),
             "the card followed both moves: {html}"
         );
+        // the other unplaced cards kept the slots they were first given —
+        // placing one never shuffles the rest
+        assert!(html.contains("left: 224px; top: 32px"), "{html}");
+        assert!(html.contains("left: 416px; top: 32px"), "{html}");
 
         block_on(settle(&mut dom));
         let saved =

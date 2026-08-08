@@ -553,7 +553,8 @@ body {
   flex: 1;
   position: relative;
   overflow: hidden;
-  cursor: grab;
+  /* the void stays plain so the grab cursor marks exactly what drags: cards */
+  cursor: default;
   /* a drag must never start a text selection */
   user-select: none;
   background-color: var(--bg);
