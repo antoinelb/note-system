@@ -19,7 +19,9 @@ use crate::links;
 use crate::logs::{self, Selection};
 use crate::loops;
 use crate::palette;
+use crate::positions::Positions;
 use crate::render::{FragmentCache, RenderTheme};
+use crate::table;
 use crate::time;
 use crate::watch;
 
@@ -203,6 +205,12 @@ fn Shell(
     let mut loops = use_signal(|| loops);
     // the table's notes, third rider on the same survey the watcher refreshes
     let mut table_notes = use_signal(|| table);
+    // canvas positions, read once here and touched by nothing but the user's
+    // drag (adr/2026-07-positions-separate-file.md)
+    let positions = use_signal({
+        let root = root.clone();
+        move || Positions::load(&root.join(".index/positions"))
+    });
     // which screen is up; the logs remain the door the app opens on
     let mut screen = use_signal(|| Screen::Logs);
     let mut loops_open = use_signal(|| false);
@@ -624,6 +632,9 @@ fn Shell(
     });
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
+    // reading both signals here is what repaints the table on a drag write
+    // and on a watcher batch alike
+    let placed = table::cards(&table_notes.read(), &positions.read(), today);
     let day_ids: HashSet<&str> =
         note_list.iter().map(|(note, _)| note.as_str()).collect();
     let weeks = logs::month_grid(month());
@@ -1296,6 +1307,17 @@ fn Shell(
                     }
                 },
                 onkeydown: table_keys,
+                div { class: "canvas",
+                    for card in placed {
+                        div {
+                            key: "{card.id}",
+                            class: "card card-{card.kind.as_dir()} {card.bar}",
+                            style: "left: {card.x}px; top: {card.y}px",
+                            div { class: "card-label", "{card.label}" }
+                            div { class: "card-title", "{card.title}" }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2125,6 +2147,88 @@ mod tests {
         assert!(html.contains(r#"class="logs""#), "{html}");
     }
 
+    // -- the table at rest: cards, kinds, liveness (wireframe state 6a) ------
+
+    #[test]
+    fn every_kind_wears_its_treatment_on_the_table() {
+        let vault = debt_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let html = dioxus_ssr::render(&dom);
+
+        // permanent: filled card, its type's bar, the type as label
+        assert!(html.contains("card card-permanent bar-concept"), "{html}");
+        assert!(html.contains(">concept</div>"), "{html}");
+        assert!(html.contains(">alpha</div>"), "the title shows: {html}");
+        // typeless permanent: the grey bar of visible debt
+        assert!(html.contains("card card-permanent bar-untyped"), "{html}");
+        assert!(html.contains(">untyped</div>"), "{html}");
+        // capture: dimmer treatment and the friction age in the label
+        assert!(html.contains("card card-capture bar-untyped"), "{html}");
+        assert!(html.contains(">capture · 0 d</div>"), "{html}");
+        // generated: dashed all round, its own label, no hue
+        assert!(html.contains("card card-generated bar-generated"), "{html}");
+        assert!(html.contains(">generated</div>"), "{html}");
+        // and the one category that never appears
+        assert!(!html.contains("2026-07-23"), "no time notes: {html}");
+    }
+
+    #[test]
+    fn unplaced_cards_stack_on_the_origin_grid_the_same_way_twice() {
+        let vault = temp_vault();
+        let render_table = || {
+            let (mut dom, clicks, _, _) =
+                rendered_app(Some(vault.path().to_path_buf()));
+            click(&mut dom, clicks[CHROME_TABLE]);
+            dioxus_ssr::render(&dom)
+        };
+        let first = render_table();
+        // nothing is placed yet: ids fill the grid in order, ×4 spacing
+        assert!(first.contains("left: 32px; top: 32px"), "{first}");
+        assert!(first.contains("left: 224px; top: 32px"), "{first}");
+        assert!(first.contains("left: 416px; top: 32px"), "{first}");
+        assert_eq!(first, render_table(), "the fallback cannot shuffle");
+    }
+
+    #[test]
+    fn notes_written_outside_keep_the_table_live() {
+        let vault = temp_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        assert!(!dioxus_ssr::render(&dom).contains("beta"));
+
+        let path = vault.path().join("permanent/beta.typ");
+        std::fs::write(&path, note("beta")).expect("the note is written");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Permanent,
+                path: PathBuf::from("permanent/beta.typ"),
+            }],
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(">beta</div>"),
+            "the new card appears without a relaunch: {html}"
+        );
+
+        std::fs::remove_file(&path).expect("the note is deleted");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Removed(PathBuf::from(
+                "permanent/beta.typ",
+            ))],
+        );
+        assert!(
+            !dioxus_ssr::render(&dom).contains("beta"),
+            "and leaves when the file does"
+        );
+    }
+
     #[test]
     fn the_ember_opens_the_flat_list_and_closes_it_again() {
         let vault = debt_vault();
@@ -2819,6 +2923,7 @@ mod tests {
         root: Option<PathBuf>,
     ) -> (
         VirtualDom,
+        Vec<ElementId>,
         tokio::sync::mpsc::UnboundedSender<Vec<watch::VaultChange>>,
     ) {
         set_event_converter(Box::new(TestEvents));
@@ -2831,8 +2936,9 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultFeed(Arc::new(
             Mutex::new(Some(receiver)),
         ))));
-        with_reactor(|| dom.rebuild_to_vec());
-        (dom, sender)
+        let mutations = with_reactor(|| dom.rebuild_to_vec());
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, sender)
     }
 
     /// Sends one batch and lets the shell's task run to its next await.
@@ -2865,7 +2971,8 @@ mod tests {
     #[test]
     fn a_capture_written_from_outside_reaches_the_ember_and_the_day() {
         let vault = temp_vault();
-        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
         assert!(
             !dioxus_ssr::render(&dom).contains("ember"),
             "the vault opens with no loops"
@@ -2900,7 +3007,8 @@ mod tests {
     #[test]
     fn a_rescan_batch_rebuilds_the_whole_index() {
         let vault = temp_vault();
-        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
         write_capture(vault.path(), "capture-rescan");
         std::fs::write(
             vault.path().join("time/2026-07-24.typ"),
@@ -2921,7 +3029,8 @@ mod tests {
     fn a_batch_the_index_cannot_absorb_becomes_the_notice() {
         // an index that will not even open
         let vault = temp_vault();
-        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
         std::fs::remove_file(vault.path().join(".index/index.db"))
             .expect("the database is there to remove");
         std::fs::create_dir(vault.path().join(".index/index.db"))
@@ -2933,7 +3042,8 @@ mod tests {
     #[test]
     fn a_change_that_cannot_be_read_becomes_the_notice() {
         let vault = temp_vault();
-        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
         // a directory where the watcher says a note is: not missing, which
         // would be a deletion, but unreadable
         std::fs::create_dir(vault.path().join("capture/impossible.typ"))
@@ -2952,7 +3062,8 @@ mod tests {
     #[test]
     fn a_reread_that_fails_after_the_change_lands_becomes_the_notice() {
         let vault = temp_vault();
-        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
         let saboteur =
             rusqlite::Connection::open(vault.path().join(".index/index.db"))
                 .expect("a second connection opens");
@@ -2968,7 +3079,8 @@ mod tests {
     #[test]
     fn a_watcher_that_stops_ends_the_task_rather_than_spinning() {
         let vault = temp_vault();
-        let (mut dom, sender) = watched_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
         drop(sender);
         block_on(settle(&mut dom));
         assert!(
