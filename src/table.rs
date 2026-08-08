@@ -131,6 +131,55 @@ fn age_days(created: Option<&str>, today: Date) -> Option<i32> {
     Some((today - date).get_days().max(0))
 }
 
+/// The sheet's fixed frame (wireframe state 6b: the panel from x=440; width
+/// is the deck's `sheetW` knob at its default), in viewport coordinates —
+/// the sheet never pans, the tether bridges the two spaces.
+pub const SHEET_LEFT: f64 = 440.0;
+pub const SHEET_WIDTH: f64 = 620.0;
+/// Where the tether meets the card: its mid-height at titles zoom.
+pub const TETHER_DROP: f64 = 28.0;
+/// How far a press may wander and still read as a click (max-norm, px).
+pub const CLICK_SLOP: f64 = 4.0;
+
+/// The tether's box: a horizontal line at the card's mid-height, from the
+/// card's nearest edge to the sheet's, in viewport coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tether {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+}
+
+/// Where the tether runs for a card at canvas (x, y) under the current pan.
+/// A card left of the sheet tethers from its right edge; right of it, from
+/// the sheet's right edge; a card overlapping the sheet collapses to zero
+/// width — drawn as nothing rather than branched around.
+pub fn tether(card_x: f64, card_y: f64, pan: (f64, f64)) -> Tether {
+    let left_edge = card_x + pan.0;
+    let right_edge = left_edge + CARD_WIDTH;
+    let top = card_y + pan.1 + TETHER_DROP;
+    if right_edge <= SHEET_LEFT {
+        Tether {
+            left: right_edge,
+            top,
+            width: SHEET_LEFT - right_edge,
+        }
+    } else {
+        let sheet_right = SHEET_LEFT + SHEET_WIDTH;
+        Tether {
+            left: sheet_right,
+            top,
+            width: (left_edge - sheet_right).max(0.0),
+        }
+    }
+}
+
+/// A press that never wandered past the slop is a click, not a drag —
+/// decided at mouseup, so a real drag can still end anywhere it likes.
+pub fn is_click(down: (f64, f64), up: (f64, f64)) -> bool {
+    (up.0 - down.0).abs() <= CLICK_SLOP && (up.1 - down.1).abs() <= CLICK_SLOP
+}
+
 /// The 3px bar: eight permanent hues; everything else — captures, unknown
 /// or time-scale types, no type at all — is the grey of visible debt, and
 /// generated notes keep their own dashed bar.
@@ -364,6 +413,56 @@ mod tests {
             (224.0, 32.0),
             "the untouched card kept the slot it was first given"
         );
+    }
+
+    #[test]
+    fn a_card_left_of_the_sheet_tethers_from_its_right_edge() {
+        let drawn = tether(100.0, 200.0, (0.0, 0.0));
+        assert_eq!(
+            drawn,
+            Tether {
+                left: 100.0 + CARD_WIDTH,
+                top: 200.0 + TETHER_DROP,
+                width: SHEET_LEFT - (100.0 + CARD_WIDTH),
+            }
+        );
+    }
+
+    #[test]
+    fn the_pan_moves_the_tether_with_the_card() {
+        let still = tether(100.0, 200.0, (0.0, 0.0));
+        let panned = tether(100.0, 200.0, (40.0, -16.0));
+        assert_eq!(panned.left, still.left + 40.0);
+        assert_eq!(panned.top, still.top - 16.0);
+        // the sheet stands still while the card slides toward it
+        assert_eq!(panned.width, still.width - 40.0);
+    }
+
+    #[test]
+    fn a_card_right_of_the_sheet_tethers_from_the_sheets_edge() {
+        let drawn = tether(1200.0, 60.0, (0.0, 0.0));
+        assert_eq!(drawn.left, SHEET_LEFT + SHEET_WIDTH);
+        assert_eq!(drawn.width, 1200.0 - (SHEET_LEFT + SHEET_WIDTH));
+        assert_eq!(drawn.top, 60.0 + TETHER_DROP);
+    }
+
+    #[test]
+    fn a_card_overlapping_the_sheet_draws_no_tether() {
+        // straddling the sheet's left edge
+        let straddling =
+            tether(SHEET_LEFT - CARD_WIDTH / 2.0, 0.0, (0.0, 0.0));
+        assert_eq!(straddling.width, 0.0);
+        // and fully under it
+        let under = tether(SHEET_LEFT + 40.0, 0.0, (0.0, 0.0));
+        assert_eq!(under.width, 0.0);
+    }
+
+    #[test]
+    fn a_press_inside_the_slop_is_a_click_and_beyond_it_a_drag() {
+        assert!(is_click((10.0, 10.0), (10.0, 10.0)));
+        assert!(is_click((10.0, 10.0), (14.0, 6.0)));
+        assert!(!is_click((10.0, 10.0), (14.1, 10.0)));
+        assert!(!is_click((10.0, 10.0), (10.0, 15.0)));
     }
 
     #[test]

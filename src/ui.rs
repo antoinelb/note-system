@@ -217,6 +217,10 @@ fn Shell(
     // cards keep their canvas coordinates
     let mut pan = use_signal(|| (0.0f64, 0.0f64));
     let mut grab = use_signal(|| None::<Grab>);
+    // the open sheet's card id — the frozen half; where the card stands
+    // re-derives from `placed` every render, which is what keeps the tether
+    // on it through drags (adr/2026-08-sheet-stacking-dom-order.md)
+    let mut sheet = use_signal(|| None::<String>);
     // the unplaced notes' session slots: a memo store like the fragment
     // cache, not UI state — nothing re-renders when a slot is remembered
     let fallback =
@@ -369,6 +373,49 @@ fn Shell(
         }
     });
 
+    // a card becomes its sheet: the note loads into the one editor
+    // (adr/2026-08-sheet-reuses-the-one-editor.md), so autosave, flush and
+    // the notice line keep holding untouched. The buffer reaches disk
+    // before it is replaced — a failed save keeps the current note open
+    // with its error rather than dropping the text.
+    let open_sheet = use_callback({
+        let root = root.clone();
+        let fragments = fragments.clone();
+        move |id: String| {
+            if sheet.peek().as_deref() == Some(id.as_str()) {
+                return;
+            }
+            if !editor.write().flush() {
+                return;
+            }
+            picker.set(None);
+            editor.set(open_sheet_note(&root, &id));
+            fragments.borrow_mut().sweep();
+            screen.set(Screen::Table);
+            sheet.set(Some(id));
+        }
+    });
+
+    // escape's landing half and the screen switch's hygiene: put the card
+    // back and give the one editor back to the logs' selection — the same
+    // flush guard, so an unsavable sheet stays open over losing its text
+    let close_sheet = use_callback({
+        let root = root.clone();
+        let fragments = fragments.clone();
+        move |()| {
+            if !editor.write().flush() {
+                return;
+            }
+            picker.set(None);
+            sheet.set(None);
+            let id = selected.peek().1.clone();
+            let exists =
+                notes.peek().iter().any(|(existing, _)| existing == &id);
+            editor.set(open_selected(&root, exists, &id));
+            fragments.borrow_mut().sweep();
+        }
+    });
+
     // the small movements, lifted so chord, button, wheel and palette all
     // run one path (adr/2026-08-palette-birth-command-list.md)
     let page = use_callback(move |forward: bool| {
@@ -394,7 +441,14 @@ fn Shell(
             screen.set(Screen::Table);
         }
     });
-    let go_logs = use_callback(move |()| screen.set(Screen::Logs));
+    let go_logs = use_callback(move |()| {
+        // the mirror hygiene: a sheet left open behind the logs would hold
+        // the one editor away from the day the centre pane is showing
+        if sheet.peek().is_some() {
+            close_sheet.call(());
+        }
+        screen.set(Screen::Logs);
+    });
 
     // Where the logs pane is, so focus can be put back on it. A keydown
     // only bubbles up from whatever has focus, and the window's chords
@@ -441,12 +495,20 @@ fn Shell(
                 )
             })
         };
-        // only time notes have somewhere to open; the rest wait for
-        // v1's table (adr/2026-07-permanent-notes-wait-for-table.md)
-        if let Some(target) = target
-            && let Some(scale) = links::scale_of(&target, &notes.peek())
-        {
+        let Some(target) = target else { return };
+        if let Some(scale) = links::scale_of(&target, &notes.peek()) {
+            // a time link followed from a sheet lands on the logs: the
+            // sheet closes so the one editor is free to hold the day
+            if sheet.peek().is_some() {
+                close_sheet.call(());
+                screen.set(Screen::Logs);
+            }
             select.call((scale, target));
+        } else if table_notes.peek().iter().any(|note| note.id == target) {
+            // everything else the vault knows lives on the table: the link
+            // opens its card's sheet — the v0 "wait for v1's table" branch
+            // ends here (adr/2026-08-permanent-links-open-sheets.md)
+            open_sheet.call(target);
         }
     });
 
@@ -646,20 +708,235 @@ fn Shell(
     } else {
         RenderTheme::Dark
     };
-    let panes =
-        block_panes(&editor.read(), &root, theme, &mut fragments.borrow_mut());
     let notice = editor.read().notice().map(str::to_string);
-    let footer = link_footer(&root, &editor.read(), &id, &note_list);
-    // the matches are cloned out of the picker so rsx borrows nothing from
-    // the signal it also writes
-    let open_picker = picker.read().as_ref().map(|open| {
-        let matches: Vec<links::Completion> =
-            links::filter(&open.entries, &query.read())
-                .into_iter()
-                .cloned()
-                .collect();
-        (open.anchor, matches)
-    });
+    // the footer belongs to the logs' selected note; over the table the
+    // editor holds the sheet's, whose backlinks the sheet counts itself
+    let footer = (screen() == Screen::Logs)
+        .then(|| link_footer(&root, &editor.read(), &id, &note_list))
+        .flatten();
+
+    // the block panes, one closure both screens mount: the logs centre pane
+    // and the writing sheet show the one editor through the one widget
+    // (adr/2026-08-sheet-reuses-the-one-editor.md)
+    let blocks_view = {
+        let root = root.clone();
+        let fragments = fragments.clone();
+        let pending_caret = pending_caret.clone();
+        let writer = writer.clone();
+        let probe = probe.clone();
+        move || -> Option<Element> {
+            let panes = block_panes(
+                &editor.read(),
+                &root,
+                theme,
+                &mut fragments.borrow_mut(),
+            )?;
+            Some(rsx! {
+                div { class: "note-blocks",
+                    for pane in panes {
+                        {
+                            match pane {
+                                Pane::Source { start, text } => {
+                                    let rows = text.split('\n').count();
+                                    rsx! {
+                                        textarea {
+                                            // the epoch remounts it after a link is
+                                            // spliced in, so the uncontrolled value is
+                                            // rebuilt from the buffer
+                                            key: "{start}-{epoch}",
+                                            class: "block-active",
+                                            rows: "{rows}",
+                                            spellcheck: "false",
+                                            // autofocus only applies at document load in
+                                            // the webview: a swapped-in textarea asks for
+                                            // its own focus, and a refusal has no one to
+                                            // tell — the caret simply stays where it was
+                                            onmounted: {
+                                                let pending_caret = pending_caret.clone();
+                                                let writer = writer.clone();
+                                                move |event: Event<MountedData>| {
+                                                    let caret = pending_caret.take();
+                                                    let writer = writer.clone();
+                                                    async move {
+                                                        let _ = event.set_focus(true).await;
+                                                        // after an accepted completion, the
+                                                        // caret belongs past the link, not at
+                                                        // whatever the webview picks
+                                                        if let Some(units) = caret
+                                                            && let Some(writer) = writer
+                                                        {
+                                                            (writer.0)(units).await;
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            initial_value: "{text}",
+                                            oninput: move |event| {
+                                                editor.write().edit(&event.value());
+                                            },
+                                            // Ctrl+click follows the link it lands
+                                            // in, like Ctrl+Enter: the click has
+                                            // already moved the caret, so the same
+                                            // probe answers where
+                                            onclick: move |event: MouseEvent| {
+                                                if event.modifiers().ctrl() {
+                                                    follow_link.call(());
+                                                }
+                                            },
+                                            onkeydown: {
+                                                let fragments = fragments.clone();
+                                                let probe = probe.clone();
+                                                move |event: KeyboardEvent| {
+                                                    let key = event.key();
+                                                    if key == Key::Escape {
+                                                        editor.write().deactivate();
+                                                        fragments.borrow_mut().sweep();
+                                                        // the block swallows its own escape:
+                                                        // over the sheet the pane's arm would
+                                                        // otherwise also close the sheet on
+                                                        // the same keystroke
+                                                        event.stop_propagation();
+                                                    } else if key == Key::ArrowUp
+                                                        || key == Key::ArrowDown
+                                                    {
+                                                        // a vertical arrow may leave the block:
+                                                        // ask the webview where the caret is —
+                                                        // the browser default on the edge lines
+                                                        // is a no-op, so the async probe races
+                                                        // nothing. It must still not page the
+                                                        // month grid below.
+                                                        event.stop_propagation();
+                                                        if let Some(probe) = &probe {
+                                                            let probe = probe.clone();
+                                                            let fragments = fragments.clone();
+                                                            let up = key == Key::ArrowUp;
+                                                            spawn(async move {
+                                                                if let Some(units) = (probe.0)().await {
+                                                                    editor.write().slide(units, up);
+                                                                    fragments.borrow_mut().sweep();
+                                                                }
+                                                            });
+                                                        }
+                                                    } else if !event.modifiers().ctrl() {
+                                                        // the rest belongs to the caret: keep
+                                                        // enter off the create handler below;
+                                                        // the ctrl chords still bubble to the
+                                                        // app root
+                                                        event.stop_propagation();
+                                                    }
+                                                }
+                                            },
+                                        }
+                                    }
+                                }
+                                Pane::Fragment { start, rendered } => rsx! {
+                                    div {
+                                        key: "{start}",
+                                        class: "block",
+                                        onclick: {
+                                            let fragments = fragments.clone();
+                                            move |_| {
+                                                editor.write().activate(start);
+                                                fragments.borrow_mut().sweep();
+                                            }
+                                        },
+                                        {
+                                            match rendered {
+                                                Ok(svg) => rsx! {
+                                                    div { class: "note", dangerous_inner_html: "{svg}" }
+                                                },
+                                                Err(msg) => rsx! {
+                                                    p { class: "render-error", "{msg}" }
+                                                },
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    }
+                }
+            })
+        }
+    };
+
+    // the link picker, cloned out so rsx borrows nothing from the signal it
+    // also writes; one closure, because Ctrl+L answers in the sheet too
+    let picker_view = move || -> Element {
+        let open = picker.read().as_ref().map(|open| {
+            let matches: Vec<links::Completion> =
+                links::filter(&open.entries, &query.read())
+                    .into_iter()
+                    .cloned()
+                    .collect();
+            (open.anchor, matches)
+        });
+        match open {
+            Some((anchor, matches)) => {
+                let rows = matches.clone();
+                rsx! {
+                div { class: "link-picker",
+                    input {
+                        class: "picker-query",
+                        placeholder: "link to…",
+                        onmounted: move |event| async move {
+                            let _ = event.set_focus(true).await;
+                        },
+                        oninput: move |event| {
+                            query.set(event.value());
+                            highlighted.set(0);
+                        },
+                        onkeydown: move |event: KeyboardEvent| {
+                            let key = event.key();
+                            let last = matches.len().saturating_sub(1);
+                            match key {
+                                Key::Escape => close_picker.call(anchor),
+                                Key::Enter => {
+                                    // no matches: the keystroke does
+                                    // nothing rather than guessing
+                                    if let Some(entry) = matches.get(highlighted()) {
+                                        accept.call((anchor, entry.id.clone()));
+                                    }
+                                }
+                                Key::ArrowDown => {
+                                    highlighted.set((highlighted() + 1).min(last));
+                                }
+                                Key::ArrowUp => {
+                                    highlighted.set(highlighted().saturating_sub(1));
+                                }
+                                _ => {}
+                            }
+                            // the picker owns every plain key while it
+                            // is open; the ctrl chords still bubble
+                            if !event.modifiers().ctrl() {
+                                event.stop_propagation();
+                            }
+                        },
+                    }
+                    if rows.is_empty() {
+                        div { class: "picker-empty", "no matching note" }
+                    }
+                    for (rank, entry) in rows.into_iter().enumerate() {
+                        div {
+                            key: "{entry.id}",
+                            class: "picker-row",
+                            class: if rank == highlighted() { "selected" },
+                            onclick: {
+                                let id = entry.id.clone();
+                                move |_| accept.call((anchor, id.clone()))
+                            },
+                            span { class: "picker-id", "{entry.id}" }
+                            if let Some(title) = entry.title {
+                                span { class: "picker-title", "{title}" }
+                            }
+                        }
+                    }
+                }
+                }
+            }
+            None => rsx! {},
+        }
+    };
     // the palette's rows, cloned out the same way; which commands exist at
     // all was decided at open (adr/2026-08-palette-birth-command-list.md)
     let open_palette = palette().map(|frozen| {
@@ -686,6 +963,57 @@ fn Shell(
         note_list.iter().map(|(note, _)| note.as_str()).collect();
     let weeks = logs::month_grid(month());
     let seasons = logs::season_row(month());
+
+    // the open sheet's derived pieces. One seeding closure serves a canvas
+    // card and its raised copy — the same grab either way, so the raised
+    // card still drags and the tether, re-derived from `placed` every
+    // render, follows (adr/2026-08-sheet-stacking-dom-order.md). The card
+    // markup itself stays inline in the canvas loop: its key must sit
+    // directly on the loop's node for the keyed diff to hold.
+    let sheet_open = sheet();
+    let mut seed_grab =
+        move |event: MouseEvent, id: String, x: f64, y: f64| {
+            // a card grab must not also start a pan — this stop is the whole
+            // card-vs-void disambiguation
+            event.stop_propagation();
+            let at = point(&event);
+            grab.set(Some(Grab::Card {
+                id,
+                x,
+                y,
+                last: at,
+                down: at,
+            }));
+        };
+    let raised_layer = sheet_open
+        .as_deref()
+        .and_then(|open| placed.iter().find(|card| card.id == open))
+        .map(|card| {
+            let line = table::tether(card.x, card.y, pan());
+            let seed = (card.id.clone(), card.x, card.y);
+            // the raised copy is a `.table` child outside the panned
+            // canvas, so its inline position carries the pan itself
+            let (left, top) = (card.x + pan().0, card.y + pan().1);
+            rsx! {
+                div {
+                    class: "card card-{card.kind.as_dir()} {card.bar} raised",
+                    style: "left: {left}px; top: {top}px",
+                    onmousedown: move |event: MouseEvent| {
+                        seed_grab(event, seed.0.clone(), seed.1, seed.2);
+                    },
+                    div { class: "card-label", "{card.label}" }
+                    div { class: "card-title", "{card.title}" }
+                }
+                // the lit edge back to where the card stands; zero width
+                // when the card sits under the sheet — drawn as nothing
+                div {
+                    class: "tether",
+                    style: "left: {line.left}px; top: {line.top}px; width: {line.width}px",
+                }
+            }
+        });
+    let sheet_footer =
+        sheet_open.as_deref().map(|own| sheet_backlinks(&root, own));
 
     let keyboard = {
         let root = root.clone();
@@ -804,29 +1132,58 @@ fn Shell(
         }
     };
 
-    // the table pane's own chords: the palette and the screens; everything
-    // else bubbles to the app root
-    let table_keys = move |event: KeyboardEvent| match event.key() {
-        Key::Character(ref character)
-            if character == "p"
-                && event.modifiers().ctrl()
-                && palette.peek().is_none() =>
-        {
-            // the webview answers a bare Ctrl+P with a print dialog
-            event.prevent_default();
-            summon_palette.call(());
+    // the table pane's own chords: the palette, the screens, and — now that
+    // the sheet holds the editor here — the editor chords the logs pane has;
+    // everything else bubbles to the app root
+    let table_keys = {
+        let probe = probe.clone();
+        move |event: KeyboardEvent| match event.key() {
+            // escape reaches here only when no block or overlay owns it:
+            // the sheet closes and the card goes back (wireframe 6b)
+            Key::Escape if sheet.peek().is_some() => close_sheet.call(()),
+            // the link picker over the sheet's active block — the logs
+            // pane's arm, guard for guard (adr/2026-08-ctrl-l-link-picker.md)
+            Key::Character(ref character)
+                if character == "l"
+                    && event.modifiers().ctrl()
+                    && picker.peek().is_none()
+                    && editor.peek().active().is_some() =>
+            {
+                let Some(probe) = probe.clone() else { return };
+                spawn(async move {
+                    let Some(anchor) = (probe.0)().await else {
+                        return;
+                    };
+                    open_picker_at.call(anchor);
+                });
+            }
+            Key::Character(ref character)
+                if character == "p"
+                    && event.modifiers().ctrl()
+                    && palette.peek().is_none()
+                    && picker.peek().is_none() =>
+            {
+                // the webview answers a bare Ctrl+P with a print dialog
+                event.prevent_default();
+                summon_palette.call(());
+            }
+            Key::Character(ref character)
+                if character == "1" && event.modifiers().ctrl() =>
+            {
+                go_table.call(());
+            }
+            Key::Character(ref character)
+                if character == "2" && event.modifiers().ctrl() =>
+            {
+                go_logs.call(());
+            }
+            // Ctrl+Enter follows the link under the caret, sheet to sheet
+            // or sheet to logs (adr/2026-08-permanent-links-open-sheets.md)
+            Key::Enter if event.modifiers().ctrl() => {
+                follow_link.call(());
+            }
+            _ => {}
         }
-        Key::Character(ref character)
-            if character == "1" && event.modifiers().ctrl() =>
-        {
-            go_table.call(());
-        }
-        Key::Character(ref character)
-            if character == "2" && event.modifiers().ctrl() =>
-        {
-            go_logs.call(());
-        }
-        _ => {}
     };
 
     rsx! {
@@ -973,128 +1330,8 @@ fn Shell(
                         }
                     }
                     {
-                        match panes {
-                            Some(panes) => rsx! {
-                                div { class: "note-blocks",
-                                    for pane in panes {
-                                        {
-                                            match pane {
-                                                Pane::Source { start, text } => {
-                                                    let rows = text.split('\n').count();
-                                                    rsx! {
-                                                        textarea {
-                                                            // the epoch remounts it after a link is
-                                                            // spliced in, so the uncontrolled value is
-                                                            // rebuilt from the buffer
-                                                            key: "{start}-{epoch}",
-                                                            class: "block-active",
-                                                            rows: "{rows}",
-                                                            spellcheck: "false",
-                                                            // autofocus only applies at document load in
-                                                            // the webview: a swapped-in textarea asks for
-                                                            // its own focus, and a refusal has no one to
-                                                            // tell — the caret simply stays where it was
-                                                            onmounted: {
-                                                                let pending_caret = pending_caret.clone();
-                                                                let writer = writer.clone();
-                                                                move |event: Event<MountedData>| {
-                                                                    let caret = pending_caret.take();
-                                                                    let writer = writer.clone();
-                                                                    async move {
-                                                                        let _ = event.set_focus(true).await;
-                                                                        // after an accepted completion, the
-                                                                        // caret belongs past the link, not at
-                                                                        // whatever the webview picks
-                                                                        if let Some(units) = caret
-                                                                            && let Some(writer) = writer
-                                                                        {
-                                                                            (writer.0)(units).await;
-                                                                        }
-                                                                    }
-                                                                }
-                                                            },
-                                                            initial_value: "{text}",
-                                                            oninput: move |event| {
-                                                                editor.write().edit(&event.value());
-                                                            },
-                                                            // Ctrl+click follows the link it lands
-                                                            // in, like Ctrl+Enter: the click has
-                                                            // already moved the caret, so the same
-                                                            // probe answers where
-                                                            onclick: move |event: MouseEvent| {
-                                                                if event.modifiers().ctrl() {
-                                                                    follow_link.call(());
-                                                                }
-                                                            },
-                                                            onkeydown: {
-                                                                let fragments = fragments.clone();
-                                                                let probe = probe.clone();
-                                                                move |event: KeyboardEvent| {
-                                                                    let key = event.key();
-                                                                    if key == Key::Escape {
-                                                                        editor.write().deactivate();
-                                                                        fragments.borrow_mut().sweep();
-                                                                    } else if key == Key::ArrowUp
-                                                                        || key == Key::ArrowDown
-                                                                    {
-                                                                        // a vertical arrow may leave the block:
-                                                                        // ask the webview where the caret is —
-                                                                        // the browser default on the edge lines
-                                                                        // is a no-op, so the async probe races
-                                                                        // nothing. It must still not page the
-                                                                        // month grid below.
-                                                                        event.stop_propagation();
-                                                                        if let Some(probe) = &probe {
-                                                                            let probe = probe.clone();
-                                                                            let fragments = fragments.clone();
-                                                                            let up = key == Key::ArrowUp;
-                                                                            spawn(async move {
-                                                                                if let Some(units) = (probe.0)().await {
-                                                                                    editor.write().slide(units, up);
-                                                                                    fragments.borrow_mut().sweep();
-                                                                                }
-                                                                            });
-                                                                        }
-                                                                    } else if !event.modifiers().ctrl() {
-                                                                        // the rest belongs to the caret: keep
-                                                                        // enter off the create handler below;
-                                                                        // the ctrl chords still bubble to the
-                                                                        // app root
-                                                                        event.stop_propagation();
-                                                                    }
-                                                                }
-                                                            },
-                                                        }
-                                                    }
-                                                }
-                                                Pane::Fragment { start, rendered } => rsx! {
-                                                    div {
-                                                        key: "{start}",
-                                                        class: "block",
-                                                        onclick: {
-                                                            let fragments = fragments.clone();
-                                                            move |_| {
-                                                                editor.write().activate(start);
-                                                                fragments.borrow_mut().sweep();
-                                                            }
-                                                        },
-                                                        {
-                                                            match rendered {
-                                                                Ok(svg) => rsx! {
-                                                                    div { class: "note", dangerous_inner_html: "{svg}" }
-                                                                },
-                                                                Err(msg) => rsx! {
-                                                                    p { class: "render-error", "{msg}" }
-                                                                },
-                                                            }
-                                                        }
-                                                    }
-                                                },
-                                            }
-                                        }
-                                    }
-                                }
-                            },
+                        match blocks_view() {
+                            Some(view) => view,
                             // the note exists but would not open: the notice
                             // above carries the error, the pane stays bare
                             None if exists => rsx! {},
@@ -1108,73 +1345,7 @@ fn Shell(
                             },
                         }
                     }
-                    {
-                        match open_picker {
-                            Some((anchor, matches)) => {
-                                let rows = matches.clone();
-                                rsx! {
-                                div { class: "link-picker",
-                                    input {
-                                        class: "picker-query",
-                                        placeholder: "link to…",
-                                        onmounted: move |event| async move {
-                                            let _ = event.set_focus(true).await;
-                                        },
-                                        oninput: move |event| {
-                                            query.set(event.value());
-                                            highlighted.set(0);
-                                        },
-                                        onkeydown: move |event: KeyboardEvent| {
-                                            let key = event.key();
-                                            let last = matches.len().saturating_sub(1);
-                                            match key {
-                                                Key::Escape => close_picker.call(anchor),
-                                                Key::Enter => {
-                                                    // no matches: the keystroke does
-                                                    // nothing rather than guessing
-                                                    if let Some(entry) = matches.get(highlighted()) {
-                                                        accept.call((anchor, entry.id.clone()));
-                                                    }
-                                                }
-                                                Key::ArrowDown => {
-                                                    highlighted.set((highlighted() + 1).min(last));
-                                                }
-                                                Key::ArrowUp => {
-                                                    highlighted.set(highlighted().saturating_sub(1));
-                                                }
-                                                _ => {}
-                                            }
-                                            // the picker owns every plain key while it
-                                            // is open; the ctrl chords still bubble
-                                            if !event.modifiers().ctrl() {
-                                                event.stop_propagation();
-                                            }
-                                        },
-                                    }
-                                    if rows.is_empty() {
-                                        div { class: "picker-empty", "no matching note" }
-                                    }
-                                    for (rank, entry) in rows.into_iter().enumerate() {
-                                        div {
-                                            key: "{entry.id}",
-                                            class: "picker-row",
-                                            class: if rank == highlighted() { "selected" },
-                                            onclick: {
-                                                let id = entry.id.clone();
-                                                move |_| accept.call((anchor, id.clone()))
-                                            },
-                                            span { class: "picker-id", "{entry.id}" }
-                                            if let Some(title) = entry.title {
-                                                span { class: "picker-title", "{title}" }
-                                            }
-                                        }
-                                    }
-                                }
-                                }
-                            }
-                            None => rsx! {},
-                        }
-                    }
+                    {picker_view()}
                     // the ember's destination: what the count is made of, and
                     // nothing else — no ages, no grouping, no per-item actions
                     // (adr/2026-07-debt-counter-then-list.md)
@@ -1197,9 +1368,8 @@ fn Shell(
                                                 for link in entries {
                                                     {
                                                         match link.scale {
-                                                            // only a time note has somewhere to
-                                                            // open in v0; the rest are visible
-                                                            // but inert until v1's table
+                                                            // a time note opens in the
+                                                            // centre pane it stands over
                                                             Some(scale) => {
                                                                 let target = (scale, link.label.clone());
                                                                 rsx! {
@@ -1210,13 +1380,35 @@ fn Shell(
                                                                     }
                                                                 }
                                                             }
-                                                            None => rsx! {
-                                                                span {
-                                                                    class: "link-entry",
-                                                                    class: if link.dangling { "link-dangling" },
-                                                                    "{link.label}"
+                                                            // the rest opens its card's sheet
+                                                            // (adr/2026-08-permanent-links-open-sheets.md);
+                                                            // dangling — or labelled by a stem
+                                                            // the table cannot host — stays inert
+                                                            None => {
+                                                                let on_table = !link.dangling
+                                                                    && table_notes
+                                                                        .read()
+                                                                        .iter()
+                                                                        .any(|note| note.id == link.label);
+                                                                if on_table {
+                                                                    let target = link.label.clone();
+                                                                    rsx! {
+                                                                        span {
+                                                                            class: "link-entry link-jump",
+                                                                            onclick: move |_| open_sheet.call(target.clone()),
+                                                                            "{link.label}"
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    rsx! {
+                                                                        span {
+                                                                            class: "link-entry",
+                                                                            class: if link.dangling { "link-dangling" },
+                                                                            "{link.label}"
+                                                                        }
+                                                                    }
                                                                 }
-                                                            },
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1372,21 +1564,38 @@ fn Shell(
                             pan.set((x + now.0 - last.0, y + now.1 - last.1));
                             grab.set(Some(Grab::Void { last: now }));
                         }
-                        Some(Grab::Card { id, x, y, last }) => {
+                        Some(Grab::Card { id, x, y, last, down }) => {
                             let now = point(&event);
                             let (x, y) = (x + now.0 - last.0, y + now.1 - last.1);
                             // the live repaint and the debounce restart are
                             // the same write
                             positions.write().set(&id, x, y);
-                            grab.set(Some(Grab::Card { id, x, y, last: now }));
+                            grab.set(Some(Grab::Card { id, x, y, last: now, down }));
                         }
                     }
                 },
-                onmouseup: move |_| grab.set(None),
+                // the whole travel decides at release: within the slop the
+                // press was a click and the card opens its sheet — a
+                // sub-slop wobble still wrote its honest pixel or two
+                // (adr/2026-08-click-opens-drag-moves.md)
+                onmouseup: move |event: MouseEvent| {
+                    let held = grab.peek().clone();
+                    grab.set(None);
+                    if let Some(Grab::Card { id, down, .. }) = held
+                        && table::is_click(down, point(&event))
+                    {
+                        open_sheet.call(id);
+                    }
+                },
                 div {
                     class: "canvas",
                     style: "transform: translate({pan().0}px, {pan().1}px)",
-                    for card in placed {
+                    // the origin card leaves the canvas while its sheet is
+                    // open — it re-renders raised above the dim instead
+                    for card in placed
+                        .iter()
+                        .filter(|card| sheet_open.as_deref() != Some(card.id.as_str()))
+                    {
                         div {
                             key: "{card.id}",
                             class: "card card-{card.kind.as_dir()} {card.bar}",
@@ -1394,19 +1603,47 @@ fn Shell(
                             onmousedown: {
                                 let seed = (card.id.clone(), card.x, card.y);
                                 move |event: MouseEvent| {
-                                    // a card grab must not also start a pan —
-                                    // this stop is the whole disambiguation
-                                    event.stop_propagation();
-                                    grab.set(Some(Grab::Card {
-                                        id: seed.0.clone(),
-                                        x: seed.1,
-                                        y: seed.2,
-                                        last: point(&event),
-                                    }));
+                                    seed_grab(event, seed.0.clone(), seed.1, seed.2);
                                 }
                             },
                             div { class: "card-label", "{card.label}" }
                             div { class: "card-title", "{card.title}" }
+                        }
+                    }
+                }
+                if sheet_open.is_some() {
+                    // wireframe state 6b, painted in DOM order rather than
+                    // z-index: dim over the canvas, the origin card and its
+                    // tether over the dim, the sheet over everything
+                    // (adr/2026-08-sheet-stacking-dom-order.md). The dim has
+                    // no handlers — its presses fall through to the pane, so
+                    // the table still pans under the sheet.
+                    div { class: "dim" }
+                    {raised_layer.unwrap_or_else(|| rsx! {})}
+                    aside {
+                        class: "sheet",
+                        style: "left: {table::SHEET_LEFT}px; width: {table::SHEET_WIDTH}px",
+                        // a press inside the sheet is the sheet's own (text
+                        // selection, block clicks) — never the void's pan
+                        onmousedown: move |event: MouseEvent| event.stop_propagation(),
+                        {
+                            match &notice {
+                                Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
+                                None => rsx! {},
+                            }
+                        }
+                        {blocks_view().unwrap_or_else(|| rsx! {})}
+                        {picker_view()}
+                        {
+                            // backlinks only, as a count ("← 2") — absent at
+                            // zero, the ember's idiom (design § Chrome)
+                            match sheet_footer {
+                                Some(Ok(count)) if count > 0 => rsx! {
+                                    div { class: "sheet-footer", "← {count}" }
+                                },
+                                Some(Err(msg)) => rsx! { p { class: "render-error", "{msg}" } },
+                                _ => rsx! {},
+                            }
                         }
                     }
                 }
@@ -1427,6 +1664,9 @@ enum Screen {
 /// it). `last` is the previous mousemove in client coordinates; the card's
 /// `x, y` are its canvas coordinates, authoritative while the drag lasts —
 /// seeded from the render, so a click that never moves writes nothing.
+/// `down` is where the press landed, never mutated: mouseup measures the
+/// whole travel against it to tell a click from a drag
+/// (adr/2026-08-click-opens-drag-moves.md).
 #[derive(Clone, PartialEq)]
 enum Grab {
     Void {
@@ -1437,6 +1677,7 @@ enum Grab {
         x: f64,
         y: f64,
         last: (f64, f64),
+        down: (f64, f64),
     },
 }
 
@@ -1588,6 +1829,46 @@ fn open_selected(root: &Path, exists: bool, id: &str) -> Editor {
 fn time_note_path(root: &Path, id: &str) -> PathBuf {
     root.join(NoteCategory::Time.as_dir())
         .join(format!("{id}.typ"))
+}
+
+/// The sheet's editor: the card knows its id, not its file, so the path is
+/// looked up per event — the `completions` pattern. A lookup that fails
+/// still opens the sheet: a closed editor carrying the error puts the
+/// message where the user is looking, and Escape closes it.
+fn open_sheet_note(root: &Path, id: &str) -> Editor {
+    let looked_up = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("sheet: {err:?}"))
+        .and_then(|index| {
+            index
+                .path_for_id(&crate::domain::NoteId(id.to_string()))
+                .map_err(|err| format!("sheet: {err:?}"))
+        });
+    match looked_up {
+        Ok(Some(path)) => Editor::open(root.join(path)),
+        Ok(None) => closed_with(format!("sheet: no note has the id {id}")),
+        Err(message) => closed_with(message),
+    }
+}
+
+/// A closed editor already carrying its notice — the sheet's error state.
+fn closed_with(message: String) -> Editor {
+    let mut editor = Editor::closed();
+    editor.set_notice(message);
+    editor
+}
+
+/// The sheet's footer: how many notes link here — a count ("← 2"), the
+/// card vocabulary, where the logs footer lists ids
+/// (adr/2026-08-links-footer-both-directions.md rejected the count there,
+/// which is exactly why it holds here). Scales don't matter to a count, so
+/// the classifier gets no time notes.
+fn sheet_backlinks(root: &Path, own: &str) -> Result<usize, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("backlinks: {err:?}"))?;
+    let sources = index
+        .backlinks(&crate::domain::NoteId(own.to_string()))
+        .map_err(|err| format!("backlinks: {err:?}"))?;
+    Ok(links::backlinks(&sources, own, &[]).len())
 }
 
 /// One centre-pane slot: the active block as raw source for the textarea,
@@ -2490,6 +2771,673 @@ mod tests {
             !closed.load(Ordering::SeqCst),
             "an unsaved store holds the app open"
         );
+    }
+
+    // -- the writing sheet: click to open, escape to close (wireframe 6b) ----
+
+    #[test]
+    fn a_click_on_a_card_opens_its_sheet_dimmed_and_tethered() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="dim""#), "{html}");
+        assert!(html.contains("raised"), "{html}");
+        // alpha at (32, 32): its right edge to the sheet's left edge
+        assert!(
+            html.contains(
+                r#"class="tether" style="left: 208px; top: 60px; width: 232px""#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"style="left: 440px; width: 620px""#),
+            "{html}"
+        );
+        // the origin card left the canvas for its raised copy — one alpha
+        assert_eq!(html.matches(">alpha</div>").count(), 1, "{html}");
+        // the note renders in the sheet, and with no backlinks the footer
+        // is absent — the ember's idiom
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+        assert!(!html.contains("sheet-footer"), "{html}");
+    }
+
+    #[test]
+    fn every_kind_opens_a_sheet() {
+        let vault = temp_vault();
+        // alpha (permanent), capture-idea (capture), digest (generated) —
+        // a fresh mount each: closing remounts cards under new element
+        // ids, so a second open cannot reuse the first harvest
+        for rank in 0..3 {
+            let (mut dom, clicks, _, _) =
+                rendered_app(Some(vault.path().to_path_buf()));
+            let (pane, cards) = table_targets(&mut dom, &clicks);
+            open_sheet_on(&mut dom, pane, cards[rank]);
+            let html = dioxus_ssr::render(&dom);
+            assert!(
+                html.contains(r#"class="sheet""#),
+                "card {rank} opened no sheet: {html}"
+            );
+            assert!(html.contains(RENDERED_NOTE), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_drag_beyond_the_slop_opens_no_sheet() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (150.0, 90.0));
+        mouse(&mut dom, "mouseup", pane, (150.0, 90.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+    }
+
+    #[test]
+    fn a_jittered_click_inside_the_slop_opens_and_still_writes() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        // three pixels of wobble: a click by the slop, and an honest move
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (103.0, 98.0));
+        mouse(&mut dom, "mouseup", pane, (103.0, 98.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(saved.trim(), "alpha 35 30", "the wobble wrote: {saved}");
+    }
+
+    #[test]
+    fn escape_closes_the_sheet_and_restores_the_day() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+        assert!(!html.contains(r#"class="dim""#), "{html}");
+        assert!(!html.contains("raised"), "{html}");
+        // the card went back to its slot in the canvas
+        assert!(html.contains("left: 32px; top: 32px"), "{html}");
+        // a second escape with nothing open lands on no arm
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+
+        // the one editor holds the day again: the logs render it
+        press(
+            &mut dom,
+            keys,
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+    }
+
+    #[test]
+    fn escape_in_a_sheet_block_closes_the_block_then_the_sheet() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let blocks = listeners(&opened, "click");
+
+        // the heading fragment becomes the textarea
+        let (_, block_keys) = activate_block(&mut dom, blocks[1]);
+        assert!(dioxus_ssr::render(&dom).contains("block-active"));
+
+        // first escape: the block deactivates and swallows the keystroke —
+        // the sheet stays up
+        press(&mut dom, block_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("block-active"), "{html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+
+        // second escape, now on the pane: the sheet closes
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+    }
+
+    #[test]
+    fn the_tether_tracks_the_card_through_drag_and_pan() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        // document order above the dim: the raised card, then the aside
+        let raised = listeners(&opened, "mousedown")[0];
+
+        // dragging the raised card drags the tether's card end
+        mouse(&mut dom, "mousedown", raised, (0.0, 0.0));
+        mouse(&mut dom, "mousemove", pane, (10.0, 20.0));
+        mouse(&mut dom, "mouseup", pane, (10.0, 20.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("left: 218px; top: 80px; width: 222px"),
+            "the tether followed the drag: {html}"
+        );
+
+        // panning under the sheet moves card and tether together
+        mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
+        mouse(&mut dom, "mousemove", pane, (190.0, 180.0));
+        mouse(&mut dom, "mouseup", pane, (190.0, 180.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("left: 208px; top: 60px; width: 232px"),
+            "the tether followed the pan: {html}"
+        );
+        assert!(
+            html.contains(r#"style="left: 440px; width: 620px""#),
+            "the sheet stood still: {html}"
+        );
+    }
+
+    #[test]
+    fn clicking_the_raised_card_reopens_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let raised = listeners(&opened, "mousedown")[0];
+
+        let before = dioxus_ssr::render(&dom);
+        mouse(&mut dom, "mousedown", raised, (50.0, 50.0));
+        mouse(&mut dom, "mouseup", pane, (50.0, 50.0));
+        assert_eq!(
+            dioxus_ssr::render(&dom),
+            before,
+            "the open sheet is already this card's"
+        );
+    }
+
+    #[test]
+    fn go_logs_with_a_sheet_open_closes_it_first() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        press(
+            &mut dom,
+            keys,
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="logs""#));
+
+        // back on the table — by the chrome icon, whose element outlives
+        // the pane the chord listener left with — no sheet waits behind
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "{html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+    }
+
+    #[test]
+    fn the_sheet_survives_its_card_vanishing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
+            .expect("the note is deleted");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Removed(PathBuf::from(
+                "permanent/alpha.typ",
+            ))],
+        );
+        let html = dioxus_ssr::render(&dom);
+        // no card, no tether — but the sheet and its buffer hold: the
+        // watcher never reloads the open note
+        assert!(!html.contains("raised"), "{html}");
+        assert!(!html.contains("tether"), "{html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+    }
+
+    #[test]
+    fn a_cardless_id_opens_the_sheet_with_a_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        // the card is drawn from a signal the sabotage cannot reach; the
+        // click's lookup is what meets the missing row
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute("DELETE FROM notes WHERE id = 'alpha'", [])
+            .expect("the sabotage succeeds");
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains("sheet: no note has the id alpha"), "{html}");
+    }
+
+    #[test]
+    fn an_unopenable_index_surfaces_in_the_sheet() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        replace_database_with_a_directory(vault.path());
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        // both per-event reads say so: the note lookup and the footer count
+        assert!(html.contains("sheet: "), "{html}");
+        assert!(html.contains("backlinks: "), "{html}");
+    }
+
+    #[test]
+    fn a_sheet_over_a_missing_notes_table_reports_the_lookup_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        // the index opens but cannot answer: the lookup's own error arm
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE notes")
+            .expect("the sabotage succeeds");
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("sheet: "), "{html}");
+    }
+
+    #[test]
+    fn a_sheet_over_a_missing_links_table_reports_the_footer_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        // the notes table still answers, so the sheet opens — only the
+        // backlink count has nothing to read
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE links")
+            .expect("the sabotage succeeds");
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(RENDERED_NOTE), "the note renders: {html}");
+        assert!(html.contains("backlinks: "), "{html}");
+    }
+
+    #[test]
+    fn an_unsavable_sheet_holds_open_rather_than_losing_text() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        let file = vault.path().join("permanent/alpha.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="sheet""#),
+            "an unsaved buffer holds the sheet open: {html}"
+        );
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("alpha.typ"), "{html}");
+    }
+
+    #[test]
+    fn a_sheet_refuses_to_open_over_an_unsavable_buffer() {
+        let vault = temp_vault();
+        // alpha links today, so today's footer carries a clickable backlink
+        std::fs::write(
+            vault.path().join("permanent/alpha.typ"),
+            linking(note("alpha"), "2026-07-23"),
+        )
+        .expect("alpha is rewritten");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is made read-only");
+
+        // the flush guard refuses: the day's buffer cannot reach disk, so
+        // the logs stay up with the error rather than dropping the buffer
+        click(&mut dom, clicks[FOOTER_BACKLINK]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains("render-error"), "{html}");
+    }
+
+    #[test]
+    fn editing_in_the_sheet_saves_through_the_autosave_watcher_and_index() {
+        let vault = temp_vault();
+        // beta links alpha, so alpha's sheet opens with one backlink
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("beta is written");
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"sheet-footer">← 1"#),
+            "{}",
+            dioxus_ssr::render(&dom)
+        );
+
+        let blocks = listeners(&opened, "click");
+        let (input, _) = activate_block(&mut dom, blocks[1]);
+        type_and_settle(&mut dom, input, "= alpha renommé\n");
+        let saved =
+            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
+                .expect("the note is readable");
+        assert!(saved.contains("alpha renommé"), "{saved}");
+
+        // the watcher's re-index repaints the card while the buffer holds
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Permanent,
+                path: PathBuf::from("permanent/alpha.typ"),
+            }],
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">alpha renommé</div>"), "{html}");
+        assert!(html.contains("block-active"), "still editing: {html}");
+    }
+
+    #[test]
+    fn ctrl_q_with_a_sheet_open_flushes_the_buffer() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keydown, closed) =
+            quit_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let blocks = listeners(&opened, "click");
+        let (input, _) = activate_block(&mut dom, blocks[1]);
+        // typed but inside the quiet window: only the flush can save it
+        type_into(&mut dom, input, "= presque perdu\n");
+
+        press(
+            &mut dom,
+            keydown,
+            Key::Character("q".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(closed.load(Ordering::SeqCst));
+        let saved =
+            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
+                .expect("the note is readable");
+        assert!(saved.contains("presque perdu"), "{saved}");
+    }
+
+    #[test]
+    fn ctrl_l_in_the_sheet_opens_the_picker_and_accepts() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let blocks = listeners(&opened, "click");
+        let (_, keys) = activate_block(&mut dom, blocks[1]);
+
+        // the caret sits at the end of "= alpha"
+        let anchor = "= alpha".len();
+        *caret.lock().expect("the probe cell never poisons") = Some(anchor);
+        let (input, picker_keys) = open_picker(&mut dom, keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("link-picker"), "{html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+
+        type_into(&mut dom, input, "digest");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("link-picker"), "accepting closes it: {html}");
+        assert!(
+            source_of(&dom).contains(r#"#l("digest")"#),
+            "spliced at the caret: {}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn a_press_inside_the_sheet_never_pans_the_table() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        // document order above the dim: the raised card, then the aside
+        let aside = listeners(&opened, "mousedown")[1];
+
+        // the press stops at the sheet, so the move that follows holds
+        // nothing — a text selection inside must not drag the table
+        mouse(&mut dom, "mousedown", aside, (500.0, 300.0));
+        mouse(&mut dom, "mousemove", pane, (520.0, 320.0));
+        mouse(&mut dom, "mouseup", pane, (520.0, 320.0));
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains("transform: translate(0px, 0px)"),
+            "{}",
+            dioxus_ssr::render(&dom)
+        );
+    }
+
+    #[test]
+    fn ctrl_l_in_the_sheet_needs_a_probe_that_answers() {
+        let vault = temp_vault();
+        // no probe injected: the chord stops before spawning
+        {
+            let (mut dom, clicks, _, _) =
+                rendered_app(Some(vault.path().to_path_buf()));
+            let (pane, cards) = table_targets(&mut dom, &clicks);
+            let opened = open_sheet_on(&mut dom, pane, cards[0]);
+            let blocks = listeners(&opened, "click");
+            let (_, keys) = activate_block(&mut dom, blocks[1]);
+            press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+            assert!(!dioxus_ssr::render(&dom).contains("link-picker"));
+        }
+
+        // a probe that answers nothing: the spawn stops at the anchor
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let blocks = listeners(&opened, "click");
+        let (_, keys) = activate_block(&mut dom, blocks[1]);
+        *caret.lock().expect("the probe cell never poisons") = None;
+        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        block_on(settle(&mut dom));
+        assert!(!dioxus_ssr::render(&dom).contains("link-picker"));
+    }
+
+    #[test]
+    fn ctrl_enter_on_a_permanent_link_opens_the_sheet() {
+        let vault = temp_vault();
+        // today's heading links alpha instead of yesterday
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            linking(time_note("2026-07-23", "daily"), "alpha"),
+        )
+        .expect("the day is rewritten");
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+
+        *caret.lock().expect("the probe cell never poisons") =
+            Some(LINK_IN_HEADING + 3);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="table""#),
+            "the chord crossed screens: {html}"
+        );
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains("raised"), "{html}");
+    }
+
+    /// Beta's heading is `= beta\n#l("alpha")#l("2026-07-22")` — one link
+    /// of each reach, for the follows that start inside a sheet.
+    fn beta_with_both_links(vault: &Path) {
+        std::fs::write(
+            vault.join("permanent/beta.typ"),
+            format!("{}#l(\"alpha\")#l(\"2026-07-22\")\n", note("beta")),
+        )
+        .expect("beta is written");
+    }
+
+    #[test]
+    fn ctrl_enter_in_the_sheet_opens_the_linked_sheet() {
+        let vault = temp_vault();
+        beta_with_both_links(vault.path());
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        // beta sits second in id order
+        let opened = open_sheet_on(&mut dom, pane, cards[1]);
+        let blocks = listeners(&opened, "click");
+        let (_, keys) = activate_block(&mut dom, blocks[1]);
+
+        // inside `#l("alpha")`, just past "= beta\n"
+        *caret.lock().expect("the probe cell never poisons") = Some(10);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        // the raised card is now alpha's, on alpha's slot; beta went back
+        assert!(
+            html.contains(r#"raised" style="left: 32px; top: 32px""#),
+            "the sheets swapped: {html}"
+        );
+        assert!(html.contains(">beta</div>"), "{html}");
+    }
+
+    #[test]
+    fn a_time_link_in_the_sheet_lands_on_the_logs() {
+        let vault = temp_vault();
+        beta_with_both_links(vault.path());
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[1]);
+        let blocks = listeners(&opened, "click");
+        let (_, keys) = activate_block(&mut dom, blocks[1]);
+
+        // inside `#l("2026-07-22")`
+        *caret.lock().expect("the probe cell never poisons") = Some(22);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "the linked day is selected: {html}"
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_on_a_dangling_link_goes_nowhere() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/gamma.typ"),
+            format!("{}#l(\"fantome\")\n", note("gamma")),
+        )
+        .expect("gamma is written");
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        // gamma sits last in id order
+        let opened = open_sheet_on(&mut dom, pane, cards[3]);
+        let blocks = listeners(&opened, "click");
+        let (_, keys) = activate_block(&mut dom, blocks[1]);
+
+        // inside `#l("fantome")`, just past "= gamma\n"
+        *caret.lock().expect("the probe cell never poisons") = Some(11);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"raised" style="left: 608px; top: 32px""#),
+            "gamma's sheet stayed put: {html}"
+        );
+    }
+
+    #[test]
+    fn the_palette_over_a_sheet_offers_the_editor_commands_and_leaves() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let blocks = listeners(&opened, "click");
+        activate_block(&mut dom, blocks[1]);
+
+        // no new command was registered for phase 3 — the editor commands
+        // simply become available where the editor now is
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        let labels = palette_labels(&dom);
+        for expected in ["insert link", "follow link", "go to logs"] {
+            assert!(
+                labels.iter().any(|label| label == expected),
+                "{labels:?}"
+            );
+        }
+        assert!(
+            !labels.iter().any(|label| label == "go to table"),
+            "going where you stand is not a command: {labels:?}"
+        );
+
+        type_into(&mut dom, input, "go to logs");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="logs""#));
+
+        // and the screen switch closed the sheet on its way out
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
     }
 
     #[test]
@@ -3927,17 +4875,45 @@ mod tests {
     }
 
     #[test]
-    fn a_backlink_from_a_permanent_note_is_visible_but_inert() {
+    fn a_permanent_backlink_opens_its_sheet_from_the_logs() {
         let vault = temp_vault();
         std::fs::write(
             vault.path().join("permanent/alpha.typ"),
             linking(note("alpha"), "2026-07-23"),
         )
         .expect("alpha is rewritten");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="link-entry link-jump">alpha"#),
+            "the v0 inert entry is now a jump: {html}"
+        );
+
+        // backlinks order by path, so alpha's entry registers first
+        click(&mut dom, clicks[FOOTER_BACKLINK]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "{html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains("raised"), "the origin card is lit: {html}");
+    }
+
+    #[test]
+    fn an_id_less_backlink_stays_inert() {
+        let vault = temp_vault();
+        // a note with no id links today: its backlink is labelled by its
+        // stem, which no card can host — visible, never clickable
+        std::fs::write(
+            vault.path().join("permanent/anonyme.typ"),
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             \n= anonyme\n#l(\"2026-07-23\")\n",
+        )
+        .expect("the id-less note is written");
         let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(r#"<span class="link-entry ">alpha</span>"#),
+            html.contains(r#"<span class="link-entry ">anonyme</span>"#),
             "no jump, no dangling mark: {html}"
         );
     }
@@ -4731,6 +5707,17 @@ mod tests {
         target: ElementId,
         at: (f64, f64),
     ) {
+        mouse_for_mutations(dom, kind, target, at);
+    }
+
+    /// Like `mouse`, but hands back the mutations it caused — how the
+    /// listeners the sheet mounts on its opening mouseup are harvested.
+    fn mouse_for_mutations(
+        dom: &mut VirtualDom,
+        kind: &'static str,
+        target: ElementId,
+        at: (f64, f64),
+    ) -> Mutations {
         with_reactor(|| {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedMouseData::new(
@@ -4751,8 +5738,8 @@ mod tests {
             dom.runtime()
                 .handle_event(kind, Event::new(data, true), target);
             dom.process_events();
-            let _ = dom.render_immediate_to_vec();
-        });
+            dom.render_immediate_to_vec()
+        })
     }
 
     /// Switches to the table and hands back its mousedown targets: the pane
@@ -4763,9 +5750,32 @@ mod tests {
         dom: &mut VirtualDom,
         clicks: &[ElementId],
     ) -> (ElementId, Vec<ElementId>) {
+        let (pane, cards, _) = table_targets_with_keys(dom, clicks);
+        (pane, cards)
+    }
+
+    /// Like `table_targets`, but also hands back the table pane's keydown
+    /// target — where the sheet's escape and the editor chords land.
+    fn table_targets_with_keys(
+        dom: &mut VirtualDom,
+        clicks: &[ElementId],
+    ) -> (ElementId, Vec<ElementId>, ElementId) {
         let mutations = click_for_mutations(dom, clicks[CHROME_TABLE]);
         let downs = listeners(&mutations, "mousedown");
-        (downs[0], downs[1..].to_vec())
+        let keys = listeners(&mutations, "keydown")[0];
+        (downs[0], downs[1..].to_vec(), keys)
+    }
+
+    /// Clicks a card open: a press and release on the same point, handing
+    /// back the mutations of the mouseup that mounted the sheet — its
+    /// fragment clicks, and the raised card's and aside's mousedowns.
+    fn open_sheet_on(
+        dom: &mut VirtualDom,
+        pane: ElementId,
+        card: ElementId,
+    ) -> Mutations {
+        mouse(dom, "mousedown", card, (100.0, 100.0));
+        mouse_for_mutations(dom, "mouseup", pane, (100.0, 100.0))
     }
 
     /// Like `click`, but hands back the mutations it caused — how the

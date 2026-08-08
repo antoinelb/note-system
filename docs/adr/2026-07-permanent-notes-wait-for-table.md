@@ -15,6 +15,10 @@ the app; the index keeps indexing them (backlinks, dangling links and the
 open-loops count still see them), and phase 9's link autocomplete reads ids
 from the index, not from any list.
 
+Ended at v1 phase 3: the table's writing sheet is that surface
+(`adr/2026-08-sheet-reuses-the-one-editor.md`,
+`adr/2026-08-permanent-links-open-sheets.md`).
+
 ## Rejected
 
 - **A minimal off-design affordance** (keystroke-summoned open/create

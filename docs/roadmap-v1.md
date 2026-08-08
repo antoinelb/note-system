@@ -73,12 +73,12 @@ Goal: click a card, write at the size of a page — permanent notes become edita
 
 Spec: wireframe state 6b. The editor itself is done (v0 phase 8) — this phase is the surface around it.
 
-- [ ] The sheet: a tall panel beside its card with the sheet fill, border and soft glow; the table dims under an overlay; the origin card keeps a brighter border and a lit tether edge runs card → sheet — the tether keeps place legible.
-  - [ ] `sheetW` and `dimOpacity` are the deck's open knobs — pick by feel once it runs, then freeze. **→ ADR**
-- [ ] Sheet content, top to bottom: the note's rendered meta line, the hybrid block editor (the same `Editor`/blocks machinery the logs centre pane mounts), the backlinks-only footer ("← 2").
-- [ ] The links footer and Ctrl+Enter stop being inert for permanent targets: a backlink or an `#l` under the caret opens that card's sheet (the "wait for v1's table" branches from v0 phase 9 end here; extends `adr/2026-08-ctrl-enter-opens-time-links.md`).
-- [ ] Escape closes the sheet and puts the card back; autosave and the Ctrl+Q flush already live below the widget and must simply keep holding.
-- [ ] Tests: open/close state, tether endpoints track the card, editor wiring through autosave → watcher → index, permanent-target links open sheets.
+- [x] The sheet: a tall panel beside its card with the sheet fill, border and soft glow; the table dims under an overlay; the origin card keeps a brighter border and a lit tether edge runs card → sheet — the tether keeps place legible (`adr/2026-08-sheet-stacking-dom-order.md`; every card kind opens one, `adr/2026-08-every-card-opens-the-sheet.md`; click vs drag, `adr/2026-08-click-opens-drag-moves.md`).
+  - [ ] `sheetW` and `dimOpacity` are the deck's open knobs — pick by feel once it runs, then freeze. **→ ADR** (running at the deck defaults: sheet 440+620 wide, dim 0.4 — the feel pass and the freeze remain)
+- [x] Sheet content, top to bottom: the note's rendered meta line, the hybrid block editor (the same `Editor`/blocks machinery the logs centre pane mounts — literally the same signal, `adr/2026-08-sheet-reuses-the-one-editor.md`), the backlinks-only footer ("← 2").
+- [x] The links footer and Ctrl+Enter stop being inert for permanent targets: a backlink or an `#l` under the caret opens that card's sheet (the "wait for v1's table" branches from v0 phase 9 end here; extends `adr/2026-08-ctrl-enter-opens-time-links.md` via `adr/2026-08-permanent-links-open-sheets.md`).
+- [x] Escape closes the sheet and puts the card back; autosave and the Ctrl+Q flush already live below the widget and must simply keep holding.
+- [x] Tests: open/close state, tether endpoints track the card, editor wiring through autosave → watcher → index, permanent-target links open sheets.
 
 Exit: a permanent note is opened, edited and closed entirely in the sheet — reading and writing knowledge no longer leaves the app.
 
@@ -147,7 +147,7 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 - [x] Command palette: every command reachable by name via Ctrl+P (phase 0)
 - [x] Canvas with persistent positions that survive index rebuilds (phases 1–2)
 - [ ] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
-- [ ] Tethered writing sheet on card click, dimmed table behind it (phase 3)
+- [x] Tethered writing sheet on card click, dimmed table behind it (phase 3)
 - [ ] Tag & type filters, type colours, jump-to-note (phases 2, 7)
 - [ ] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)
 - [x] Capture/generated visual treatment; `generated` type defined (phase 2)

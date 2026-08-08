@@ -36,6 +36,14 @@
   --bar-generated: #6f6a8c;
   --star-bright: #3d3660;
   --star-dim: #332c52;
+  /* the writing sheet (design § The table screen, state 6b): fill, glow,
+     the selection border the raised card and the tether share — one
+     wireframe role ("edge node dots / selection border"), one variable */
+  --sheet-fill: #171331;
+  --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.18);
+  --selection: #5c538a;
+  /* multiplies var(--bg), which already swaps per theme */
+  --dim-opacity: 0.4;
 }
 
 .app[data-theme="light"] {
@@ -67,6 +75,13 @@
   --bar-generated: #8b87a0;
   --star-bright: #c8c4de;
   --star-dim: #d4d1e6;
+  /* the sheet's light siblings, same derivation: hue kept, value inverted
+     against the light ground; the glow deepens a touch because a pale
+     shadow vanishes on a pale ground */
+  --sheet-fill: #edebf5;
+  --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.25);
+  --selection: #6f64ab;
+  --dim-opacity: 0.4;
 }
 
 body {
@@ -651,6 +666,60 @@ body {
 .card-title {
   font: 600 16px/1.3 Lato, sans-serif;
   color: var(--ink-bright);
+}
+
+/* -- the writing sheet (wireframes state 6b): dim, raised card, tether,
+      sheet — siblings painted in DOM order after .canvas, because the
+      canvas's transform is a stacking context no child can climb out of
+      (adr/2026-08-sheet-stacking-dom-order.md) ---------------------------- */
+
+/* no handlers: a mousedown falls through to the pane, so the table still
+   pans under the sheet and the tether stays honest about where the card is */
+.dim {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: var(--dim-opacity);
+}
+
+/* the origin card, re-rendered above the dim with the selection border */
+.card.raised {
+  border-color: var(--selection);
+}
+
+/* mockup: a 1.2px stroke at the card's mid-height — 1px, the hairline the
+   card borders already speak */
+.tether {
+  position: absolute;
+  height: 1px;
+  background: var(--selection);
+}
+
+/* left and width arrive inline from the table's geometry consts */
+.sheet {
+  position: absolute;
+  top: 44px;
+  bottom: 44px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 24px 32px;
+  background: var(--sheet-fill);
+  border: 1px solid var(--border);
+  box-shadow: var(--sheet-glow);
+  /* the table suppressed selection so drags stay drags; the sheet is a
+     writing surface and takes it back (both prefixes, like the table) */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: default;
+}
+
+/* the links-footer idiom, backlinks only ("← 2") */
+.sheet-footer {
+  margin-top: 16px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 8px;
+  font: 16px Lato, sans-serif;
+  color: var(--ink-muted);
 }
 
 /* -- type scale: metadata labels (design § Typography) --------------------

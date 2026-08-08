@@ -56,10 +56,11 @@ pub fn format_link(id: &str) -> String {
 
 /// One footer entry, either direction.
 ///
-/// `scale: Some` = a time note the logs centre pane can open, so the entry is
-/// clickable; `None` = permanent, capture or generated — visible but inert
-/// until v1's table has somewhere to show it
-/// (`adr/2026-07-permanent-notes-wait-for-table.md`).
+/// `scale: Some` = a time note the logs centre pane can open; `None` =
+/// permanent, capture or generated, which open their card's writing sheet
+/// on the table (`adr/2026-08-permanent-links-open-sheets.md`). Only a
+/// dangling link — or a backlink labelled by the stem of an id-less note,
+/// which no card can host — stays inert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FooterLink {
     pub label: String,
