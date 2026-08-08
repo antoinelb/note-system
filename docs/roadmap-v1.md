@@ -36,12 +36,12 @@ Exit: every chord the app answers is also reachable by name through Ctrl+P.
 
 Goal: positions have a home an index rebuild cannot touch — `adr/2026-07-positions-separate-file.md` becomes code before any card exists to sit on it.
 
-- [ ] The file lives under `.index/`, beside the database, never inside it.
-  - [ ] Format and filename (suggestion: something human-readable — this is user data and should be debuggable at 3 AM). **→ ADR**
-- [ ] Semantics: id → (x, y); a missing entry means "not yet placed" — never an error, phase 8's auto-placement decides later.
-  - [ ] What happens to the position of a deleted note: tombstone vs drop (recreating an id is possible). **→ ADR**
-- [ ] Read once when the table loads; written on move, debounced (the v0 phase-5 idle-timer pattern).
-- [ ] Tests: roundtrip, unknown ids tolerated on load, a malformed file degrades to "nothing placed" rather than a crash, and the invariant test — rebuild the index database from scratch, every position intact.
+- [x] The file lives under `.index/`, beside the database, never inside it.
+  - [x] Format and filename (suggestion: something human-readable — this is user data and should be debuggable at 3 AM). **→ ADR** (`adr/2026-08-positions-plain-lines-file.md`)
+- [x] Semantics: id → (x, y); a missing entry means "not yet placed" — never an error, phase 8's auto-placement decides later.
+  - [x] What happens to the position of a deleted note: tombstone vs drop (recreating an id is possible). **→ ADR** (`adr/2026-08-position-dropped-on-delete.md`)
+- [x] Read once when the table loads; written on move, debounced (the v0 phase-5 idle-timer pattern) — the store is synchronous like `Editor::save`; phase 2's drag handler owns the timer and the Ctrl+Q flush.
+- [x] Tests: roundtrip, unknown ids tolerated on load, a malformed file degrades to "nothing placed" rather than a crash, and the invariant test — rebuild the index database from scratch, every position intact.
 
 Exit: positions survive a full index rebuild, enforced by a test — the invariant is structural, not remembered.
 
