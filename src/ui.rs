@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::blocks;
 use crate::domain::{NoteCategory, NoteType};
 use crate::editor::Editor;
-use crate::index::{Index, IndexError};
+use crate::index::{Index, IndexError, TableNote};
 use crate::links;
 use crate::logs::{self, Selection};
 use crate::loops;
@@ -168,8 +168,8 @@ pub fn App() -> Element {
             },
             {
                 match loaded {
-                    Ok((root, notes, loops)) => {
-                        rsx! { Shell { root, notes, loops, today: today.0 } }
+                    Ok((root, notes, loops, table)) => {
+                        rsx! { Shell { root, notes, loops, table, today: today.0 } }
                     }
                     Err(msg) => rsx! { div { class: "vault-error", "{msg}" } },
                 }
@@ -186,6 +186,7 @@ fn Shell(
     root: PathBuf,
     notes: Vec<(String, NoteType)>,
     loops: Vec<String>,
+    table: Vec<TableNote>,
     today: Date,
 ) -> Element {
     // the editor opens today's note before the signal takes the notes list;
@@ -200,6 +201,8 @@ fn Shell(
     // the open loops themselves; the ember shows how many there are and the
     // overlay shows which (adr/2026-08-loops-list-overlay.md)
     let mut loops = use_signal(|| loops);
+    // the table's notes, third rider on the same survey the watcher refreshes
+    let mut table_notes = use_signal(|| table);
     let mut loops_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
@@ -266,9 +269,10 @@ fn Shell(
                         break;
                     };
                     match refresh(&root, &batch) {
-                        Ok((time_notes, open)) => {
+                        Ok((time_notes, open, table)) => {
                             notes.set(time_notes);
                             loops.set(open);
+                            table_notes.set(table);
                         }
                         Err(message) => editor.write().set_notice(message),
                     }
@@ -1241,17 +1245,22 @@ fn Chrome(
     }
 }
 
-/// What one look at the index yields: the rail's time notes, and the open
-/// loops themselves rather than a count of them.
-type Survey = (Vec<(String, NoteType)>, Vec<String>);
+/// What one look at the index yields: the rail's time notes, the open loops
+/// themselves rather than a count of them, and the table's cards-to-be.
+type Survey = (Vec<(String, NoteType)>, Vec<String>, Vec<TableNote>);
 
 /// What the shell mounts with: the vault root and that survey.
-type Loaded = (PathBuf, Vec<(String, NoteType)>, Vec<String>);
+type Loaded = (
+    PathBuf,
+    Vec<(String, NoteType)>,
+    Vec<String>,
+    Vec<TableNote>,
+);
 
 fn load(root: Option<PathBuf>) -> Result<Loaded, String> {
     match root {
         Some(root) => match load_notes(&root) {
-            Ok((notes, loops)) => Ok((root, notes, loops)),
+            Ok((notes, loops, table)) => Ok((root, notes, loops, table)),
             Err(err) => Err(format!("the index could not be built: {err:?}")),
         },
         None => Err("no vault: define NOTE_VAULT or HOME".to_string()),
@@ -1272,7 +1281,11 @@ fn load_notes(root: &Path) -> Result<Survey, IndexError> {
 /// reachable — after a successful rebuild they only fire on a sabotaged
 /// database.
 fn survey(index: &Index) -> Result<Survey, IndexError> {
-    Ok((index.time_notes()?, open_loops(index)?))
+    Ok((
+        index.time_notes()?,
+        open_loops(index)?,
+        index.table_notes()?,
+    ))
 }
 
 /// One watcher batch applied: the index catches up with the files, then the
@@ -2475,6 +2488,21 @@ mod tests {
         // reaches the links table and fails
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE links");
+        let error = survey(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_missing_created_column_fails_only_the_table_notes() {
+        // the one sabotage the earlier survey legs survive: time notes and
+        // every loops query still answer, only the table's created is gone
+        let vault = temp_vault();
+        let index = sabotaged_index(
+            vault.path(),
+            "ALTER TABLE notes DROP COLUMN created",
+        );
+        assert!(index.time_notes().is_ok());
+        assert!(open_loops(&index).is_ok());
         let error = survey(&index).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
