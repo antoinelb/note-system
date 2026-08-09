@@ -20,7 +20,7 @@ use crate::logs::{self, Selection};
 use crate::loops;
 use crate::palette;
 use crate::positions::Positions;
-use crate::render::{FragmentCache, RenderTheme};
+use crate::render::{BodyCache, FragmentCache, RenderTheme};
 use crate::table;
 use crate::time;
 use crate::watch;
@@ -232,6 +232,11 @@ fn Shell(
     // re-derives from `placed` every render, which is what keeps the tether
     // on it through drags (adr/2026-08-sheet-stacking-dom-order.md)
     let mut sheet = use_signal(|| None::<String>);
+    // the semantic zoom level and the observed pane size — session state
+    // like the pan (adr/2026-08-body-zoom-scale-and-metrics.md,
+    // adr/2026-08-viewport-culling-onresize.md)
+    let mut zoom = use_signal(|| table::Zoom::Titles);
+    let mut viewport = use_signal(|| table::DEFAULT_VIEWPORT);
     // the unplaced notes' session slots: a memo store like the fragment
     // cache, not UI state — nothing re-renders when a slot is remembered
     let fallback =
@@ -243,6 +248,9 @@ fn Shell(
     // re-render when it fills, so a plain hook value rather than a signal
     let fragments =
         use_hook(|| Rc::new(RefCell::new(FragmentCache::default())));
+    // the body cache, its table-side sibling: per-note SVGs living until
+    // the watcher invalidates them (adr/2026-08-body-cache-per-note-svg.md)
+    let bodies = use_hook(|| Rc::new(RefCell::new(BodyCache::default())));
     // absent in headless tests that don't inject a fake: arrows then stay
     // ordinary caret movement
     let probe = try_consume_context::<CaretProbe>();
@@ -311,6 +319,7 @@ fn Shell(
     // out of its cell once; a second render finds `None` and starts nothing.
     use_hook({
         let root = root.clone();
+        let bodies = bodies.clone();
         move || {
             let Some(feed) = try_consume_context::<VaultFeed>() else {
                 return;
@@ -322,6 +331,20 @@ fn Shell(
                     let Some(batch) = changes.recv().await else {
                         break;
                     };
+                    // the body cache hears about every change first, so the
+                    // repaint the survey triggers re-renders fresh bodies
+                    // (adr/2026-08-body-cache-per-note-svg.md)
+                    for change in &batch {
+                        match change {
+                            watch::VaultChange::Touched { path, .. }
+                            | watch::VaultChange::Removed(path) => {
+                                bodies.borrow_mut().invalidate(path);
+                            }
+                            watch::VaultChange::Rescan => {
+                                bodies.borrow_mut().clear();
+                            }
+                        }
+                    }
                     match refresh(&root, &batch) {
                         Ok((time_notes, open, table, links)) => {
                             notes.set(time_notes);
@@ -395,6 +418,20 @@ fn Shell(
         }
     });
 
+    // the zoom change, one seam for chord and palette: the canvas point
+    // under the viewport centre stays put
+    // (adr/2026-08-body-zoom-scale-and-metrics.md)
+    let zoom_to = use_callback(move |target: table::Zoom| {
+        let current = *zoom.peek();
+        if current == target {
+            return;
+        }
+        let landed =
+            table::rezoom(*pan.peek(), current, target, *viewport.peek());
+        pan.set(landed);
+        zoom.set(target);
+    });
+
     // a card becomes its sheet: the note loads into the one editor
     // (adr/2026-08-sheet-reuses-the-one-editor.md), so autosave, flush and
     // the notice line keep holding untouched. The buffer reaches disk
@@ -409,6 +446,10 @@ fn Shell(
             if !editor.write().flush() {
                 return;
             }
+            // the sheet, tether and raised card are titles-zoom constructs:
+            // opening one zooms out first, one legible gesture
+            // (adr/2026-08-body-zoom-scale-and-metrics.md)
+            zoom_to.call(table::Zoom::Titles);
             picker.set(None);
             editor.set(opened);
             fragments.borrow_mut().sweep();
@@ -541,6 +582,10 @@ fn Shell(
                     table_notes.with_mut(|list| {
                         list.push(TableNote {
                             id: id.clone(),
+                            path: PathBuf::from(format!(
+                                "{}/{id}.typ",
+                                NoteCategory::Permanent.as_dir()
+                            )),
                             kind: NoteCategory::Permanent,
                             note_type: Some(picked),
                             title: Some(title.clone()),
@@ -789,6 +834,7 @@ fn Shell(
                     caret,
                     on_table: *screen.peek() == Screen::Table,
                     sheet_open: sheet.peek().is_some(),
+                    at_bodies: *zoom.peek() == table::Zoom::Bodies,
                 }));
             });
         }
@@ -843,6 +889,12 @@ fn Shell(
                 palette::CommandId::GoToLogs => go_logs.call(()),
                 palette::CommandId::NewNote => open_creator.call(()),
                 palette::CommandId::DeleteNote => delete_note.call(()),
+                palette::CommandId::ZoomToBodies => {
+                    zoom_to.call(table::Zoom::Bodies);
+                }
+                palette::CommandId::ZoomToTitles => {
+                    zoom_to.call(table::Zoom::Titles);
+                }
             }
         });
 
@@ -1096,6 +1148,7 @@ fn Shell(
                 block_active: frozen.block_active,
                 on_table: frozen.on_table,
                 sheet_open: frozen.sheet_open,
+                at_bodies: frozen.at_bodies,
             },
         );
         (frozen, matches)
@@ -1133,7 +1186,7 @@ fn Shell(
             // a card grab must not also start a pan — this stop is the whole
             // card-vs-void disambiguation
             event.stop_propagation();
-            let at = point(&event);
+            let at = point(&event, zoom.peek().scale());
             grab.set(Some(Grab::Card {
                 id,
                 x,
@@ -1367,6 +1420,21 @@ fn Shell(
             // or sheet to logs (adr/2026-08-permanent-links-open-sheets.md)
             Key::Enter if event.modifiers().ctrl() => {
                 follow_link.call(());
+            }
+            // the semantic zoom pair, table-only
+            // (adr/2026-08-body-zoom-scale-and-metrics.md)
+            Key::Character(ref character)
+                if character == "=" && event.modifiers().ctrl() =>
+            {
+                // the webview owns Ctrl+= as page zoom
+                event.prevent_default();
+                zoom_to.call(table::Zoom::Bodies);
+            }
+            Key::Character(ref character)
+                if character == "-" && event.modifiers().ctrl() =>
+            {
+                event.prevent_default();
+                zoom_to.call(table::Zoom::Titles);
             }
             _ => {}
         }
@@ -1850,9 +1918,20 @@ fn Shell(
                     }
                 },
                 onkeydown: table_keys,
+                // the pane's observed size feeds the culling; the observer
+                // fires immediately on mount and on every resize — a
+                // refusal keeps the deterministic default
+                // (adr/2026-08-viewport-culling-onresize.md)
+                onresize: move |event: Event<ResizeData>| {
+                    if let Ok(size) = event.get_border_box_size() {
+                        viewport.set((size.width, size.height));
+                    }
+                },
                 // a mousedown that no card stopped is the void: pan
                 onmousedown: move |event: MouseEvent| {
-                    grab.set(Some(Grab::Void { last: point(&event) }));
+                    grab.set(Some(Grab::Void {
+                        last: point(&event, zoom.peek().scale()),
+                    }));
                 },
                 // one total handler moves whatever is held; `.peek()`
                 // everywhere, so tracking the mouse subscribes nothing
@@ -1863,13 +1942,13 @@ fn Shell(
                     match held {
                         None => {}
                         Some(Grab::Void { last }) => {
-                            let now = point(&event);
+                            let now = point(&event, zoom.peek().scale());
                             let (x, y) = *pan.peek();
                             pan.set((x + now.0 - last.0, y + now.1 - last.1));
                             grab.set(Some(Grab::Void { last: now }));
                         }
                         Some(Grab::Card { id, x, y, last, down }) => {
-                            let now = point(&event);
+                            let now = point(&event, zoom.peek().scale());
                             let (x, y) = (x + now.0 - last.0, y + now.1 - last.1);
                             // the live repaint and the debounce restart are
                             // the same write
@@ -1886,14 +1965,20 @@ fn Shell(
                     let held = grab.peek().clone();
                     grab.set(None);
                     if let Some(Grab::Card { id, down, .. }) = held
-                        && table::is_click(down, point(&event))
+                        && table::is_click(
+                            down,
+                            point(&event, zoom.peek().scale()),
+                        )
                     {
                         open_sheet.call(id);
                     }
                 },
                 div {
                     class: "canvas",
-                    style: "transform: translate({pan().0}px, {pan().1}px)",
+                    // scale outermost: the pan stays in canvas units, and
+                    // point() divides once
+                    // (adr/2026-08-body-zoom-scale-and-metrics.md)
+                    style: "transform: scale({zoom().scale()}) translate({pan().0}px, {pan().1}px)",
                     // the constellation: first child, so DOM order paints
                     // every edge under every card; inside the translated
                     // canvas, so pan and drags carry it for free
@@ -1914,14 +1999,18 @@ fn Shell(
                         }
                     }
                     // the origin card leaves the canvas while its sheet is
-                    // open — it re-renders raised above the dim instead
+                    // open — it re-renders raised above the dim instead;
+                    // off-viewport cards render nothing at all — the "low
+                    // thousands" answer (adr/2026-08-viewport-culling-onresize.md)
                     for card in placed
                         .iter()
                         .filter(|card| sheet_open.as_deref() != Some(card.id.as_str()))
+                        .filter(|card| table::in_view(card, zoom(), pan(), viewport()))
                     {
                         div {
                             key: "{card.id}",
                             class: "card card-{card.kind.as_dir()} {card.bar}",
+                            class: if zoom() == table::Zoom::Bodies { "bodies" },
                             style: "left: {card.x}px; top: {card.y}px",
                             onmousedown: {
                                 let seed = (card.id.clone(), card.x, card.y);
@@ -1931,6 +2020,23 @@ fn Shell(
                             },
                             div { class: "card-label", "{card.label}" }
                             div { class: "card-title", "{card.title}" }
+                            // the note's own rendered body, clipped — the
+                            // template's typography, never restyled
+                            // (adr/2026-08-body-cache-per-note-svg.md)
+                            if zoom() == table::Zoom::Bodies {
+                                div { class: "card-body",
+                                    {
+                                        match bodies.borrow_mut().render(&root, &card.path, theme) {
+                                            Ok(svg) => rsx! {
+                                                div { class: "note", dangerous_inner_html: "{svg}" }
+                                            },
+                                            Err(msg) => rsx! {
+                                                p { class: "render-error", "{msg}" }
+                                            },
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2004,13 +2110,14 @@ enum Grab {
     },
 }
 
-/// Client coordinates, the one space every table delta is measured in: the
-/// canvas is translated, never scaled, so a client delta *is* a canvas
-/// delta at titles zoom — phase 6's body zoom must divide by its scale
-/// here, and nowhere else.
-fn point(event: &MouseEvent) -> (f64, f64) {
+/// Canvas-unit coordinates: client divided by the zoom's scale — the
+/// division phase 2 promised would land here and nowhere else. The scale
+/// sits outside the translate, so pan and drag deltas both live in canvas
+/// units and move 1:1 on screen
+/// (adr/2026-08-body-zoom-scale-and-metrics.md).
+fn point(event: &MouseEvent, scale: f64) -> (f64, f64) {
     let coordinates = event.client_coordinates();
-    (coordinates.x, coordinates.y)
+    (coordinates.x / scale, coordinates.y / scale)
 }
 
 /// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
@@ -2284,6 +2391,9 @@ struct Palette {
     /// Whether a sheet was open: delete exists only over one
     /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
     sheet_open: bool,
+    /// Whether the table stood at body zoom: each zoom command hides at its
+    /// own level (adr/2026-08-body-zoom-scale-and-metrics.md).
+    at_bodies: bool,
 }
 
 /// The open create overlay's fixed half — the `Palette` idiom with one more
@@ -3033,7 +3143,7 @@ mod tests {
         mouse(&mut dom, "mousemove", pane, (10.0, 10.0));
         assert!(
             dioxus_ssr::render(&dom)
-                .contains("transform: translate(0px, 0px)")
+                .contains("transform: scale(1) translate(0px, 0px)")
         );
 
         mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
@@ -3041,7 +3151,7 @@ mod tests {
         mouse(&mut dom, "mouseup", pane, (180.0, 230.0));
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains("transform: translate(-20px, 30px)"),
+            html.contains("transform: scale(1) translate(-20px, 30px)"),
             "the void panned: {html}"
         );
         assert!(
@@ -3610,7 +3720,7 @@ mod tests {
         mouse(&mut dom, "mouseup", pane, (520.0, 320.0));
         assert!(
             dioxus_ssr::render(&dom)
-                .contains("transform: translate(0px, 0px)"),
+                .contains("transform: scale(1) translate(0px, 0px)"),
             "{}",
             dioxus_ssr::render(&dom)
         );
@@ -5774,6 +5884,187 @@ mod tests {
         assert!(html.contains("link-picker"), "{html}");
     }
 
+    // -- semantic zoom: titles ⇄ bodies ---------------------------------------
+
+    /// The zoom chords, spelled once.
+    fn ctrl_equals() -> Key {
+        Key::Character("=".into())
+    }
+    fn ctrl_minus() -> Key {
+        Key::Character("-".into())
+    }
+
+    /// Pans the void so alpha's card (fallback slot 32, 32) sits at the
+    /// default viewport's centre — where a zoom keeps it in view.
+    fn centre_alpha(dom: &mut VirtualDom, pane: ElementId) {
+        mouse(dom, "mousedown", pane, (0.0, 0.0));
+        mouse(dom, "mousemove", pane, (520.0, 340.0));
+        mouse(dom, "mouseup", pane, (520.0, 340.0));
+    }
+
+    #[test]
+    fn ctrl_equals_zooms_to_bodies_and_ctrl_minus_back() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        centre_alpha(&mut dom, pane);
+
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("scale(3)"), "{html}");
+        assert!(html.contains("card-body"), "bodies render: {html}");
+        assert!(html.contains(RENDERED_NOTE), "the note's own svg: {html}");
+        assert!(
+            !html.contains(">digest</div>"),
+            "the card the zoom pushed out is culled: {html}"
+        );
+        // the same chord again changes nothing — the level already stands
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        assert_eq!(dioxus_ssr::render(&dom), html);
+
+        press(&mut dom, keys, ctrl_minus(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("scale(1)"), "{html}");
+        assert!(!html.contains("card-body"), "titles again: {html}");
+        // the round trip landed the pan back where it stood
+        assert!(
+            html.contains("translate(520px, 340px)"),
+            "the centre held: {html}"
+        );
+    }
+
+    #[test]
+    fn a_drag_at_body_zoom_moves_in_canvas_units() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        centre_alpha(&mut dom, pane);
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+
+        // 24 client pixels are 8 canvas units at scale 3
+        mouse(&mut dom, "mousedown", cards[0], (300.0, 300.0));
+        mouse(&mut dom, "mousemove", pane, (324.0, 300.0));
+        mouse(&mut dom, "mouseup", pane, (324.0, 300.0));
+        assert!(
+            dioxus_ssr::render(&dom).contains("left: 40px; top: 32px"),
+            "8 canvas units from the slot"
+        );
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(saved.trim(), "alpha 40 32");
+    }
+
+    #[test]
+    fn opening_a_sheet_returns_to_titles_zoom() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        centre_alpha(&mut dom, pane);
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+
+        // a click at body zoom zooms out and opens — one legible gesture
+        mouse(&mut dom, "mousedown", cards[0], (300.0, 300.0));
+        mouse(&mut dom, "mouseup", pane, (300.0, 300.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains("scale(1)"), "titles again: {html}");
+        assert!(!html.contains("card-body"), "{html}");
+    }
+
+    #[test]
+    fn an_off_viewport_card_renders_nothing_until_panned_in() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let mutations = click_for_mutations(&mut dom, clicks[CHROME_TABLE]);
+        let observer = listeners(&mutations, "resize")[0];
+        let pane = listeners(&mutations, "mousedown")[0];
+        assert!(
+            dioxus_ssr::render(&dom).contains(">digest</div>"),
+            "everything shows at the default viewport"
+        );
+
+        // the pane shrinks: only the first grid slot stays visible
+        resize(&mut dom, observer, 200.0, 200.0);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">alpha</div>"), "{html}");
+        assert!(!html.contains(">capture-idea</div>"), "culled: {html}");
+        assert!(!html.contains(">digest</div>"), "culled: {html}");
+
+        // an observer that answers nothing keeps the last size
+        bare_resize(&mut dom, observer);
+        assert_eq!(dioxus_ssr::render(&dom), html);
+
+        // panning brings the neighbour slot into the small viewport
+        mouse(&mut dom, "mousedown", pane, (0.0, 0.0));
+        mouse(&mut dom, "mousemove", pane, (-192.0, 0.0));
+        mouse(&mut dom, "mouseup", pane, (-192.0, 0.0));
+        assert!(
+            dioxus_ssr::render(&dom).contains(">capture-idea</div>"),
+            "panned in"
+        );
+    }
+
+    #[test]
+    fn a_watcher_batch_invalidates_the_body_cache() {
+        let vault = temp_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        centre_alpha(&mut dom, pane);
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        let before = dioxus_ssr::render(&dom);
+        assert!(before.contains("card-body"), "{before}");
+        assert!(!before.contains("render-error"), "{before}");
+
+        // alpha keeps its meta — and its card — but stops compiling; the
+        // batch must drop the cached body, not serve it stale
+        std::fs::write(
+            vault.path().join("permanent/alpha.typ"),
+            format!("{}#let x = (\n", note("alpha")),
+        )
+        .expect("the note is broken in place");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Permanent,
+                path: PathBuf::from("permanent/alpha.typ"),
+            }],
+        );
+        let after = dioxus_ssr::render(&dom);
+        assert!(after.contains(">alpha</div>"), "the card held: {after}");
+        assert!(
+            after.contains("render-error"),
+            "the recompiled body reports its error: {after}"
+        );
+    }
+
+    #[test]
+    fn the_zoom_commands_run_through_the_palette_and_hide_in_place() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "zoom");
+        assert_eq!(palette_labels(&dom), vec!["zoom to bodies"]);
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains("scale(3)"));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "zoom");
+        assert_eq!(palette_labels(&dom), vec!["zoom to titles"]);
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains("scale(1)"));
+    }
+
     // -- constellations: link edges under the cards --------------------------
 
     #[test]
@@ -6214,19 +6505,25 @@ mod tests {
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         open_sheet_on(&mut dom, pane, cards[0]);
 
-        // the palette freezes "a sheet is open"…
-        let mutations =
-            press_for_mutations(&mut dom, keys, ctrl_p(), Modifiers::CONTROL);
-        let rows = listeners(&mutations, "click");
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        // …then the chrome, still clickable beside it, leaves for the logs
-        // and closes the sheet under it
-        click(&mut dom, clicks[CHROME_LOGS]);
+        // the palette freezes "a sheet is open" and narrows to the delete…
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete");
+        assert_eq!(palette_labels(&dom), vec!["delete note"]);
+        // …then the sheet closes under it — the pane's escape, reached
+        // directly here, is the race the guard below defends against
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
         assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
-        // the frozen "delete note" row is the palette's last; running it
-        // now finds no sheet and deletes nothing
-        click(&mut dom, rows[rows.len() - 1]);
+        assert!(
+            dioxus_ssr::render(&dom).contains("command-palette"),
+            "the palette outlived the sheet"
+        );
+        // running the frozen command now finds no sheet and deletes nothing
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         assert!(vault.path().join("permanent/alpha.typ").exists());
+        assert!(
+            !dioxus_ssr::render(&dom).contains("command-palette"),
+            "the run still closed the palette"
+        );
     }
 
     // -- promotion: a capture typed in the editor recolours ------------------
@@ -6564,6 +6861,52 @@ mod tests {
             dom.process_events();
             let _ = dom.render_immediate_to_vec();
         })
+    }
+
+    /// Fires a resize with the given observed size — how the tests stand in
+    /// for the pane's ResizeObserver
+    /// (adr/2026-08-viewport-culling-onresize.md).
+    fn resize(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        width: f64,
+        height: f64,
+    ) {
+        use dioxus::html::geometry::PixelsSize;
+        let size = PixelsSize::new(width, height);
+        deliver_resize(
+            dom,
+            target,
+            Rc::new(PlatformEventData::new(Box::new(
+                SerializedResizeData::new(size, size),
+            ))),
+        );
+    }
+
+    /// A resize whose observer refuses to answer: the handler must keep the
+    /// viewport it has.
+    fn bare_resize(dom: &mut VirtualDom, target: ElementId) {
+        deliver_resize(
+            dom,
+            target,
+            Rc::new(PlatformEventData::new(Box::new(BareResize))),
+        );
+    }
+
+    fn deliver_resize(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        data: Rc<dyn Any>,
+    ) {
+        with_reactor(|| {
+            dom.runtime().handle_event(
+                "resize",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
     }
 
     /// Fires one mouse event of the given kind at the target, carrying real
@@ -7063,6 +7406,17 @@ mod tests {
         )
     }
 
+    /// A resize whose observer answers nothing: every backing method keeps
+    /// its NotSupported default — the refusal branch the onresize handler
+    /// absorbs by keeping the current viewport.
+    struct BareResize;
+
+    impl HasResizeData for BareResize {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
     /// What the textarea's onmounted receives in the headless tests: every
     /// backing method keeps its NotSupported default, which is exactly what
     /// the focus request has to shrug off.
@@ -7234,8 +7588,13 @@ mod tests {
             unreachable!("the shell never listens for this event")
         }
 
-        fn convert_resize_data(&self, _: &PlatformEventData) -> ResizeData {
-            unreachable!("the shell never listens for this event")
+        fn convert_resize_data(&self, event: &PlatformEventData) -> ResizeData {
+            // two backings, the mounted converter's idiom: the serialized
+            // size, or a bare observer whose refusal the handler absorbs
+            match event.downcast::<SerializedResizeData>() {
+                Some(data) => ResizeData::from(data.clone()),
+                None => ResizeData::new(BareResize),
+            }
         }
 
         fn convert_scroll_data(&self, _: &PlatformEventData) -> ScrollData {

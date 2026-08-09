@@ -18,6 +18,9 @@ pub const CARD_WIDTH: f64 = 176.0;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub id: String,
+    /// Vault-relative — what body zoom renders and caches by
+    /// (adr/2026-08-body-cache-per-note-svg.md).
+    pub path: std::path::PathBuf,
     /// Falls back to the id — a card is never blank.
     pub title: String,
     /// The uppercase mono line over the title: the type name, or the
@@ -75,6 +78,7 @@ pub fn cards(
             let kind = presented_kind(note);
             Card {
                 id: note.id.clone(),
+                path: note.path.clone(),
                 title: note.title.clone().unwrap_or_else(|| note.id.clone()),
                 label: label(kind, note, today),
                 kind,
@@ -161,6 +165,75 @@ pub const CLICK_SLOP: f64 = 4.0;
 /// size — deterministic, never an error
 /// (adr/2026-08-new-card-lands-at-viewport-centre.md).
 pub const DEFAULT_VIEWPORT: (f64, f64) = (1280.0, 800.0);
+
+/// The two semantic zoom levels (plan.md § Canvas): titles, and rendered
+/// bodies at three times the size
+/// (adr/2026-08-body-zoom-scale-and-metrics.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Zoom {
+    Titles,
+    Bodies,
+}
+
+impl Zoom {
+    /// The canvas's scale factor — applied outside the translate, so the
+    /// pan stays in canvas units and `point()` divides once.
+    pub fn scale(self) -> f64 {
+        match self {
+            Zoom::Titles => 1.0,
+            Zoom::Bodies => 3.0,
+        }
+    }
+}
+
+/// The clipped body area below label and title, and the card's full height
+/// at body zoom (adr/2026-08-body-zoom-scale-and-metrics.md).
+pub const BODY_HEIGHT: f64 = 240.0;
+pub const BODY_CARD_HEIGHT: f64 = 296.0;
+/// A conservative title-card height bound for culling — cards are shorter,
+/// and a too-tall bound only keeps an off-screen card alive, never culls a
+/// visible one.
+pub const TITLE_CARD_HEIGHT: f64 = 96.0;
+
+/// Whether the card's rectangle intersects the viewport under
+/// `scale(zoom) translate(pan)`: screen = s·(canvas + pan). Exact edge
+/// contact does not count — a card ending at the boundary shows nothing
+/// (adr/2026-08-viewport-culling-onresize.md).
+pub fn in_view(
+    card: &Card,
+    zoom: Zoom,
+    pan: (f64, f64),
+    viewport: (f64, f64),
+) -> bool {
+    let scale = zoom.scale();
+    let height = match zoom {
+        Zoom::Titles => TITLE_CARD_HEIGHT,
+        Zoom::Bodies => BODY_CARD_HEIGHT,
+    };
+    let left = scale * (card.x + pan.0);
+    let top = scale * (card.y + pan.1);
+    left < viewport.0
+        && left + scale * CARD_WIDTH > 0.0
+        && top < viewport.1
+        && top + scale * height > 0.0
+}
+
+/// The pan that keeps the canvas point under the viewport centre fixed
+/// across a zoom change: p = centre/s − pan, so
+/// pan' = pan + centre·(1/s' − 1/s)
+/// (adr/2026-08-body-zoom-scale-and-metrics.md).
+pub fn rezoom(
+    pan: (f64, f64),
+    from: Zoom,
+    to: Zoom,
+    viewport: (f64, f64),
+) -> (f64, f64) {
+    let shift = 1.0 / to.scale() - 1.0 / from.scale();
+    (
+        pan.0 + viewport.0 / 2.0 * shift,
+        pan.1 + viewport.1 / 2.0 * shift,
+    )
+}
 
 /// Canvas coordinates that centre a new card in the viewport under `pan`:
 /// where the user is looking is where the note appears
@@ -266,8 +339,7 @@ fn clip(from: &Card, to: &Card) -> Option<(f64, f64, f64, f64)> {
     let (x1, y1) = (from.x + EDGE_HALF_WIDTH, from.y + EDGE_HALF_HEIGHT);
     let (x2, y2) = (to.x + EDGE_HALF_WIDTH, to.y + EDGE_HALF_HEIGHT);
     let (dx, dy) = (x2 - x1, y2 - y1);
-    let reach =
-        (EDGE_HALF_WIDTH / dx.abs()).min(EDGE_HALF_HEIGHT / dy.abs());
+    let reach = (EDGE_HALF_WIDTH / dx.abs()).min(EDGE_HALF_HEIGHT / dy.abs());
     let entry = 1.0 - reach;
     if reach >= entry {
         return None;
@@ -314,6 +386,10 @@ mod tests {
     fn note(id: &str, kind: NoteCategory) -> TableNote {
         TableNote {
             id: id.to_string(),
+            path: std::path::PathBuf::from(format!(
+                "{}/{id}.typ",
+                kind.as_dir()
+            )),
             kind,
             note_type: None,
             title: None,
@@ -619,6 +695,7 @@ mod tests {
     fn placed_card(id: &str, x: f64, y: f64) -> Card {
         Card {
             id: id.to_string(),
+            path: std::path::PathBuf::from(format!("permanent/{id}.typ")),
             title: id.to_string(),
             label: "concept".to_string(),
             kind: NoteCategory::Permanent,
@@ -630,6 +707,59 @@ mod tests {
 
     fn link(source: &str, target: &str) -> (String, String) {
         (source.to_string(), target.to_string())
+    }
+
+    #[test]
+    fn zoom_scales_are_titles_one_and_bodies_three() {
+        assert_eq!(Zoom::Titles.scale(), 1.0);
+        assert_eq!(Zoom::Bodies.scale(), 3.0);
+    }
+
+    #[test]
+    fn a_card_leaves_view_exactly_at_each_boundary() {
+        let card = placed_card("a", 100.0, 100.0);
+        let vp = (1280.0, 800.0);
+        assert!(in_view(&card, Zoom::Titles, (0.0, 0.0), vp));
+        // exact edge contact counts as out, one pixel back in as in
+        assert!(!in_view(&card, Zoom::Titles, (1180.0, 0.0), vp), "left");
+        assert!(in_view(&card, Zoom::Titles, (1179.0, 0.0), vp));
+        assert!(!in_view(&card, Zoom::Titles, (-276.0, 0.0), vp), "right");
+        assert!(in_view(&card, Zoom::Titles, (-275.0, 0.0), vp));
+        assert!(!in_view(&card, Zoom::Titles, (0.0, 700.0), vp), "top");
+        assert!(in_view(&card, Zoom::Titles, (0.0, 699.0), vp));
+        assert!(!in_view(&card, Zoom::Titles, (0.0, -196.0), vp), "bottom");
+        assert!(in_view(&card, Zoom::Titles, (0.0, -195.0), vp));
+    }
+
+    #[test]
+    fn culling_respects_the_pan_and_the_scale() {
+        let vp = (1280.0, 800.0);
+        // the same pan puts a body-zoomed card thrice as far out
+        let far = placed_card("a", 500.0, 0.0);
+        assert!(in_view(&far, Zoom::Titles, (0.0, 0.0), vp));
+        assert!(!in_view(&far, Zoom::Bodies, (0.0, 0.0), vp));
+        // the taller body card survives higher above the fold
+        let high = placed_card("b", 0.0, -290.0);
+        assert!(!in_view(&high, Zoom::Titles, (0.0, 0.0), vp));
+        assert!(in_view(&high, Zoom::Bodies, (0.0, 0.0), vp));
+        // and panning brings the far card back
+        assert!(in_view(&far, Zoom::Bodies, (-200.0, 0.0), vp));
+    }
+
+    #[test]
+    fn rezoom_keeps_the_viewport_centre_on_the_same_canvas_point() {
+        let vp = (1280.0, 800.0);
+        let pan = (-40.0, 40.0);
+        let zoomed = rezoom(pan, Zoom::Titles, Zoom::Bodies, vp);
+        // the canvas point under the centre: p = centre/s − pan
+        let before = (640.0 - pan.0, 400.0 - pan.1);
+        let after = (640.0 / 3.0 - zoomed.0, 400.0 / 3.0 - zoomed.1);
+        assert!((before.0 - after.0).abs() < 1e-9, "{before:?} {after:?}");
+        assert!((before.1 - after.1).abs() < 1e-9, "{before:?} {after:?}");
+        // and back out is the identity round trip
+        let back = rezoom(zoomed, Zoom::Bodies, Zoom::Titles, vp);
+        assert!((back.0 - pan.0).abs() < 1e-9);
+        assert!((back.1 - pan.1).abs() < 1e-9);
     }
 
     #[test]
@@ -674,7 +804,8 @@ mod tests {
     #[test]
     fn overlapping_cards_draw_no_edge() {
         // b starts inside a's nominal rectangle: the clips cross
-        let cards = [placed_card("a", 0.0, 0.0), placed_card("b", 100.0, 10.0)];
+        let cards =
+            [placed_card("a", 0.0, 0.0), placed_card("b", 100.0, 10.0)];
         assert_eq!(edges(&[link("a", "b")], &cards), vec![]);
     }
 

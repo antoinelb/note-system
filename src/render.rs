@@ -195,6 +195,53 @@ fn describe(error: RenderError) -> String {
     }
 }
 
+/// Whole-note SVGs for the table's body zoom — `FragmentCache`'s sibling
+/// with the opposite lifecycle: the table shows many notes at once where
+/// the sheet shows one, so entries live until the watcher says their file
+/// changed rather than being swept per open note
+/// (adr/2026-08-body-cache-per-note-svg.md). Reads the file itself on a
+/// miss; errors — unreadable or uncompilable — are cached like the
+/// fragment cache's. In-process only, like every render hash.
+#[derive(Debug, Default)]
+pub struct BodyCache {
+    entries: HashMap<(PathBuf, RenderTheme), Result<String, String>>,
+}
+
+impl BodyCache {
+    pub fn render(
+        &mut self,
+        root: &Path,
+        note: &Path,
+        theme: RenderTheme,
+    ) -> Result<String, String> {
+        let key = (note.to_path_buf(), theme);
+        if let Some(cached) = self.entries.get(&key) {
+            return cached.clone();
+        }
+        // the world wants the absolute path; the key stays vault-relative,
+        // the shape the index and the watcher both speak
+        let file = root.join(note);
+        let rendered = std::fs::read_to_string(&file)
+            .map_err(|error| format!("body: {error}"))
+            .and_then(|text| {
+                render_svg(root, &file, &text, theme).map_err(describe)
+            });
+        self.entries.insert(key, rendered.clone());
+        rendered
+    }
+
+    /// The watcher's per-path invalidation: both theme columns drop — the
+    /// file changed for both alike.
+    pub fn invalidate(&mut self, note: &Path) {
+        self.entries.retain(|(path, _), _| path != note);
+    }
+
+    /// A rescan's blunt answer: everything may have changed.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 pub fn render_svg(
     root: &Path,
     note: &Path,

@@ -23,6 +23,8 @@ pub enum CommandId {
     GoToLogs,
     NewNote,
     DeleteNote,
+    ZoomToBodies,
+    ZoomToTitles,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -38,7 +40,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 13] = [
+pub const COMMANDS: [Command; 15] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -106,6 +108,16 @@ pub const COMMANDS: [Command; 13] = [
         label: "delete note",
         chord: None,
     },
+    Command {
+        id: CommandId::ZoomToBodies,
+        label: "zoom to bodies",
+        chord: Some("ctrl+="),
+    },
+    Command {
+        id: CommandId::ZoomToTitles,
+        label: "zoom to titles",
+        chord: Some("ctrl+-"),
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
@@ -120,6 +132,10 @@ pub struct Context {
     /// so without one there is nothing to name
     /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
     pub sheet_open: bool,
+    /// Whether the table stands at body zoom: each zoom command hides at
+    /// its own level — going where you stand is not a command
+    /// (adr/2026-08-body-zoom-scale-and-metrics.md).
+    pub at_bodies: bool,
 }
 
 /// The rows a query leaves: the available commands whose label contains the
@@ -146,6 +162,8 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::GoToTable => !context.on_table,
         CommandId::GoToLogs => context.on_table,
         CommandId::DeleteNote => context.sheet_open,
+        CommandId::ZoomToBodies => context.on_table && !context.at_bodies,
+        CommandId::ZoomToTitles => context.on_table && context.at_bodies,
         _ => true,
     }
 }
@@ -159,21 +177,31 @@ mod tests {
         block_active: true,
         on_table: false,
         sheet_open: false,
+        at_bodies: false,
     };
     const READING: Context = Context {
         block_active: false,
         on_table: false,
         sheet_open: false,
+        at_bodies: false,
     };
     const AT_TABLE: Context = Context {
         block_active: false,
         on_table: true,
         sheet_open: false,
+        at_bodies: false,
     };
     const AT_SHEET: Context = Context {
         block_active: false,
         on_table: true,
         sheet_open: true,
+        at_bodies: false,
+    };
+    const AT_BODIES: Context = Context {
+        block_active: false,
+        on_table: true,
+        sheet_open: false,
+        at_bodies: true,
     };
 
     fn labels(rows: &[&Command]) -> Vec<&'static str> {
@@ -192,15 +220,17 @@ mod tests {
 
     #[test]
     fn an_empty_query_is_the_whole_registry_in_order() {
-        // the whole vocabulary minus the place already stood in and the
-        // sheet-bound command no sheet backs
+        // the whole vocabulary minus the place already stood in, the
+        // sheet-bound command no sheet backs, and the table-bound zooms
         assert_eq!(
             labels(&filter("", EDITING)),
             COMMANDS
                 .iter()
                 .map(|c| c.label)
                 .filter(|label| {
-                    *label != "go to logs" && *label != "delete note"
+                    *label != "go to logs"
+                        && *label != "delete note"
+                        && !label.starts_with("zoom")
                 })
                 .collect::<Vec<_>>()
         );
@@ -209,9 +239,16 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 4);
+        assert_eq!(visible.len(), COMMANDS.len() - 6);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
+    }
+
+    #[test]
+    fn the_zoom_commands_hide_off_the_table_and_at_their_own_level() {
+        assert_eq!(labels(&filter("zoom", READING)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("zoom", AT_TABLE)), vec!["zoom to bodies"]);
+        assert_eq!(labels(&filter("zoom", AT_BODIES)), vec!["zoom to titles"]);
     }
 
     #[test]
@@ -252,6 +289,8 @@ mod tests {
                 "ctrl+1",
                 "ctrl+2",
                 "ctrl+n",
+                "ctrl+=",
+                "ctrl+-",
             ]
         );
         let chordless: Vec<&str> = COMMANDS

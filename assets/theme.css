@@ -597,10 +597,13 @@ body {
   outline: none;
 }
 
-/* the panned layer; its translate is set inline from the pan signal */
+/* the panned layer; its transform is set inline from the zoom and pan
+   signals — origin at the corner, or the scale would orbit the centre
+   (adr/2026-08-body-zoom-scale-and-metrics.md) */
 .canvas {
   position: absolute;
   inset: 0;
+  transform-origin: 0 0;
 }
 
 /* the constellation (adr/2026-08-edges-svg-under-cards.md): a 1×1 box whose
@@ -683,6 +686,25 @@ body {
 .card-generated {
   border: 1px dashed var(--card-generated-edge);
   border-left: 3px dashed var(--bar-generated);
+}
+
+/* body zoom (adr/2026-08-body-zoom-scale-and-metrics.md): the card grows a
+   fixed, clipped area for the note's own rendered SVG — the template's
+   typography, fit to the card's width, never restyled */
+.card.bodies {
+  height: 296px;
+  overflow: hidden;
+}
+
+.card-body {
+  height: 240px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.card-body svg {
+  width: 100%;
+  height: auto;
 }
 
 .card-label {

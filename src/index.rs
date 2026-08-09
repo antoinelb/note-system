@@ -77,6 +77,9 @@ pub struct Backlink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableNote {
     pub id: String,
+    /// Vault-relative, straight from the notes row — what body zoom reads
+    /// and caches by (adr/2026-08-body-cache-per-note-svg.md).
+    pub path: PathBuf,
     pub kind: NoteCategory,
     pub note_type: Option<NoteType>,
     pub title: Option<String>,
@@ -391,6 +394,7 @@ impl Index {
                 };
                 Ok(TableNote {
                     id: row.get::<_, String>(0)?,
+                    path,
                     kind,
                     note_type: row
                         .get::<_, Option<String>>(2)?

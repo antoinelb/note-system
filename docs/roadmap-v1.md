@@ -111,10 +111,10 @@ Exit: the table reads as a constellation, and dragging a card drags its edges.
 
 Goal: two levels — titles ⇄ rendered typst bodies — behind a keystroke, fast over the whole vault.
 
-- [ ] Body zoom renders each card's cached SVG (the v0 phase-4 render cache; the template's own typography, never restyled by the app).
-  - [ ] Card metrics at body zoom, and the keystroke: the deck never drew this state — designed here, in the phase-6-v0 vocabulary, like the loops list was. **→ ADR**
-- [ ] Viewport culling: only visible cards render at either level — the "low thousands" scale answer (`plan.md` § Canvas).
-- [ ] Tests: toggle state, culling boundary math, off-viewport cards render nothing.
+- [x] Body zoom renders each card's cached SVG (a second cache, `BodyCache`, watcher-invalidated — the phase-4 fragment cache's sweep policy would evict the table, `adr/2026-08-body-cache-per-note-svg.md`; the template's own typography, never restyled by the app).
+  - [x] Card metrics at body zoom (scale 3, 176px logical cards, 240px clipped bodies), and the keystroke (Ctrl+= / Ctrl+-): designed in the phase-6-v0 vocabulary. **→ ADR** (`adr/2026-08-body-zoom-scale-and-metrics.md`)
+- [x] Viewport culling: only visible cards render at either level — the "low thousands" scale answer (`plan.md` § Canvas; size from onresize, `adr/2026-08-viewport-culling-onresize.md`).
+- [x] Tests: toggle state, culling boundary math, off-viewport cards render nothing.
 
 Exit: toggling zoom over the fixture vault's densest cluster shows no visible jank.
 
@@ -146,7 +146,7 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 
 - [x] Command palette: every command reachable by name via Ctrl+P (phase 0)
 - [x] Canvas with persistent positions that survive index rebuilds (phases 1–2)
-- [ ] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
+- [x] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
 - [x] Tethered writing sheet on card click, dimmed table behind it (phase 3)
 - [ ] Tag & type filters, type colours, jump-to-note (phases 2, 7)
 - [ ] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use note_system::render::{
-    FragmentCache, RenderError, RenderTheme, VaultWorld, render_svg,
+    BodyCache, FragmentCache, RenderError, RenderTheme, VaultWorld,
+    render_svg,
 };
 use typst::World;
 use typst::diag::FileError;
@@ -354,6 +355,105 @@ fn a_fragment_outside_the_vault_reports_the_path_error() {
         )
         .expect_err("a note outside the vault cannot virtualize");
     assert!(!error.is_empty());
+}
+
+// -- the body cache: whole notes for the table's body zoom -------------------
+// (adr/2026-08-body-cache-per-note-svg.md) — instrumented the same way:
+// with the template gone, a successful render can only be a hit.
+
+#[test]
+fn a_body_hit_serves_the_svg_without_recompiling_or_rereading() {
+    let vault = temp_vault();
+    write_note(&vault, "a", NOTE_A);
+    let mut cache = BodyCache::default();
+    let note = Path::new("permanent/a.typ");
+
+    let first = cache
+        .render(vault.path(), note, RenderTheme::Paper)
+        .expect("the first render reads and compiles");
+    assert!(
+        first.starts_with("<svg"),
+        "{}",
+        &first[..first.len().min(80)]
+    );
+    // file and template both vanish: only a cache hit can still answer
+    remove_template(&vault);
+    std::fs::remove_file(vault.path().join("permanent/a.typ"))
+        .expect("the note is removed");
+    let second = cache
+        .render(vault.path(), note, RenderTheme::Paper)
+        .expect("a hit must not reread or recompile");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn invalidate_drops_both_theme_columns_of_the_one_note() {
+    let vault = temp_vault();
+    write_note(&vault, "a", NOTE_A);
+    write_note(&vault, "b", NOTE_B);
+    let mut cache = BodyCache::default();
+    let a = Path::new("permanent/a.typ");
+    let b = Path::new("permanent/b.typ");
+    for theme in [RenderTheme::Dark, RenderTheme::Light] {
+        cache
+            .render(vault.path(), a, theme)
+            .expect("a compiles in both themes");
+    }
+    cache
+        .render(vault.path(), b, RenderTheme::Dark)
+        .expect("b compiles");
+
+    remove_template(&vault);
+    cache.invalidate(a);
+    // both of a's columns recompile — and fail, the template being gone —
+    // while b's untouched entry still answers
+    assert!(cache.render(vault.path(), a, RenderTheme::Dark).is_err());
+    assert!(cache.render(vault.path(), a, RenderTheme::Light).is_err());
+    assert!(cache.render(vault.path(), b, RenderTheme::Dark).is_ok());
+}
+
+#[test]
+fn clear_empties_the_whole_cache() {
+    let vault = temp_vault();
+    write_note(&vault, "a", NOTE_A);
+    let mut cache = BodyCache::default();
+    let a = Path::new("permanent/a.typ");
+    cache
+        .render(vault.path(), a, RenderTheme::Paper)
+        .expect("a compiles");
+
+    remove_template(&vault);
+    cache.clear();
+    assert!(
+        cache.render(vault.path(), a, RenderTheme::Paper).is_err(),
+        "a rescan's clear forgets every entry"
+    );
+}
+
+#[test]
+fn an_unreadable_note_caches_its_error_until_invalidated() {
+    let vault = temp_vault();
+    let mut cache = BodyCache::default();
+    let note = Path::new("permanent/absent.typ");
+
+    let error = cache
+        .render(vault.path(), note, RenderTheme::Paper)
+        .expect_err("nothing to read");
+    assert!(error.starts_with("body:"), "{error}");
+
+    // the error entry is served without rereading: the note appearing on
+    // disk changes nothing until the watcher invalidates it
+    write_note(&vault, "absent", NOTE_A);
+    assert!(cache.render(vault.path(), note, RenderTheme::Paper).is_err());
+    cache.invalidate(note);
+    assert!(cache.render(vault.path(), note, RenderTheme::Paper).is_ok());
+}
+
+fn write_note(vault: &tempfile::TempDir, id: &str, text: &str) {
+    let dir = vault.path().join("permanent");
+    std::fs::create_dir_all(&dir).expect("the category dir is creatable");
+    std::fs::write(dir.join(format!("{id}.typ")), text)
+        .expect("the note is writable");
 }
 
 const NOTE_A: &str = "#import \"/templates/template.typ\": *\n= A\n";
