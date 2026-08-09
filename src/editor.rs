@@ -2,18 +2,43 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::blocks::{self, Block};
+use crate::caret;
 
 /// The edit-command layer over one open note: the buffer, its block map,
-/// the active block and the notice the widget should surface. The widget
-/// only forwards events here — the v2 modal keymap slots in between the two
-/// without touching either (plan.md § Editor,
+/// the active block, the caret and the notice the widget should surface.
+/// The widget only forwards events here — the v2 modal keymap slots in
+/// between the two without touching either (plan.md § Editor,
 /// adr/2026-07-hybrid-active-block-textarea.md).
 #[derive(Debug, Default)]
 pub struct Editor {
     buffer: Option<Buffer>,
     blocks: Vec<Block>,
     active: Option<usize>,
+    /// App-owned caret in note-global bytes, meaningful only while a block
+    /// is active; selection is `anchor != head`
+    /// (adr/2026-08-caret-on-editor-note-bytes.md).
+    caret: Caret,
+    /// The column a run of vertical moves holds through short lines,
+    /// counted in grapheme clusters; any other move forgets it.
+    goal: Option<usize>,
     notice: Option<String>,
+}
+
+/// The caret both ends of a selection describe: `head` is where it blinks
+/// and moves, `anchor` where the selection began. Collapsed when equal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caret {
+    pub anchor: usize,
+    pub head: usize,
+}
+
+/// What a deletion keystroke removes when nothing is selected; a selection
+/// is always removed whole, whichever key asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deletion {
+    Back,
+    Forward,
+    WordBack,
 }
 
 /// Every guard in `edit` failing means the widget diverged from the buffer
@@ -33,14 +58,18 @@ impl Editor {
         match Buffer::open(file.clone()) {
             Ok(note) => {
                 let blocks = blocks::segment(note.text());
+                let end = note.text().len();
                 Editor {
                     // an open note always has its cursor somewhere: the
-                    // last block wakes active, and the widget's default
-                    // caret lands on its last line
-                    // (adr/2026-08-cursor-always-in-the-note.md)
+                    // last block wakes active with the caret on its last
+                    // line (adr/2026-08-cursor-always-in-the-note.md)
                     active: Some(blocks.len().saturating_sub(1)),
                     blocks,
                     buffer: Some(note),
+                    caret: Caret {
+                        anchor: end,
+                        head: end,
+                    },
                     ..Editor::default()
                 }
             }
@@ -74,10 +103,10 @@ impl Editor {
         self.notice = Some(notice);
     }
 
-    /// One widget keystroke: the active block's whole new content, spliced
-    /// into the buffer (the trailing separator is not the widget's to
-    /// touch), with every later block shifted by the delta. No reparse —
-    /// block boundaries move only on activate/deactivate.
+    /// One widget edit: the active block's whole new content, spliced into
+    /// the buffer (the trailing separator is not the widget's to touch),
+    /// with every later block shifted by the delta. No reparse — block
+    /// boundaries move only on activate/deactivate.
     pub fn edit(&mut self, value: &str) {
         let (Some(index), Some(note)) = (self.active, self.buffer.as_mut())
         else {
@@ -95,48 +124,184 @@ impl Editor {
         }
     }
 
-    /// The link picker's accepted completion: `text` goes in at the widget's
-    /// caret (`units`, UTF-16 code units within the active block, the same
-    /// probe `slide` reads). Routed through `edit` rather than splicing
-    /// directly — the widget's contract is "here is the block's whole new
-    /// content", and reusing it keeps one staleness policy instead of two
-    /// (adr/2026-08-ctrl-l-link-picker.md).
-    pub fn insert(&mut self, units: usize, text: &str) {
-        let Some(slice) = self.active_source() else {
+    /// Every insertion the widget makes — typing, Enter, paste, a committed
+    /// composition, an accepted link completion: `text` replaces the
+    /// selection (or lands at the collapsed caret) and the caret ends after
+    /// it. Routed through `edit` — the block's whole new content, one
+    /// staleness policy (adr/2026-08-ctrl-l-link-picker.md).
+    pub fn insert_at_caret(&mut self, text: &str) {
+        let Some((content, source)) = self.active_slice() else {
             self.notice = Some(STALE_EDIT.to_string());
             return;
         };
-        let mut value = slice.to_string();
-        // byte_offset_of_utf16 answers a char boundary or the end, so
-        // insert_str cannot panic here
-        value.insert_str(blocks::byte_offset_of_utf16(slice, units), text);
+        let (anchor, head) = self.caret_in_block();
+        let span = anchor.min(head)..anchor.max(head);
+        if !source.is_char_boundary(span.start)
+            || !source.is_char_boundary(span.end)
+        {
+            self.notice = Some(STALE_EDIT.to_string());
+            return;
+        }
+        let mut value = source;
+        value.replace_range(span.clone(), text);
+        // `active_slice` proved the block fits the buffer, which is the
+        // same validity `edit` re-checks — the splice cannot refuse here
         self.edit(&value);
+        self.place(content.start + span.start + text.len());
+    }
+
+    /// A deletion keystroke: the selection when one exists, otherwise the
+    /// cluster or word the key names. At the block's edge with nothing to
+    /// remove, nothing happens — blocks join by being emptied, never by
+    /// backspacing across the hidden separator.
+    pub fn delete_at_caret(&mut self, kind: Deletion) {
+        let Some((content, source)) = self.active_slice() else {
+            self.notice = Some(STALE_EDIT.to_string());
+            return;
+        };
+        let (anchor, head) = self.caret_in_block();
+        let span = if anchor != head {
+            anchor.min(head)..anchor.max(head)
+        } else {
+            match kind {
+                Deletion::Back => caret::prev_cluster(&source, head)..head,
+                Deletion::Forward => head..caret::next_cluster(&source, head),
+                Deletion::WordBack => caret::word_left(&source, head)..head,
+            }
+        };
+        if span.start == span.end
+            || !source.is_char_boundary(span.start)
+            || !source.is_char_boundary(span.end)
+        {
+            return;
+        }
+        let mut value = source;
+        value.replace_range(span.clone(), "");
+        self.edit(&value);
+        self.place(content.start + span.start);
+    }
+
+    /// One caret movement. Vertical moves keep the goal column and, on the
+    /// block's edge lines, slide to the neighbouring block through the same
+    /// flush-and-resegment path as a click — unless the move extends a
+    /// selection, which stays inside the active block like the widget it
+    /// replaced. A plain horizontal arrow over a selection collapses it to
+    /// the matching edge, the way the old textarea's did.
+    pub fn move_caret(&mut self, motion: caret::Move, select: bool) {
+        let Some((content, source)) = self.active_slice() else {
+            return;
+        };
+        let Caret { anchor, head } = self.caret;
+        let rel = head.clamp(content.start, content.end) - content.start;
+        let collapse = !select && anchor != head;
+        let mut goal = None;
+        let target = match motion {
+            caret::Move::Left if collapse => {
+                anchor.min(head).clamp(content.start, content.end)
+                    - content.start
+            }
+            caret::Move::Right if collapse => {
+                anchor.max(head).clamp(content.start, content.end)
+                    - content.start
+            }
+            caret::Move::Left => caret::prev_cluster(&source, rel),
+            caret::Move::Right => caret::next_cluster(&source, rel),
+            caret::Move::LineStart => caret::line_start(&source, rel),
+            caret::Move::LineEnd => caret::line_end(&source, rel),
+            caret::Move::WordLeft => caret::word_left(&source, rel),
+            caret::Move::WordRight => caret::word_right(&source, rel),
+            caret::Move::Up | caret::Move::Down => {
+                let up = motion == caret::Move::Up;
+                match caret::vertical(&source, rel, up, self.goal) {
+                    Some((offset, column)) => {
+                        goal = Some(column);
+                        offset
+                    }
+                    None if !select && self.can_slide(up) => {
+                        self.slide(up);
+                        return;
+                    }
+                    // the note's edge, or a selection that must not leave
+                    // the block: clamp to the block's ends, the textarea's
+                    // own edge-line behaviour
+                    None if up => 0,
+                    None => source.len(),
+                }
+            }
+        };
+        self.goal = goal;
+        self.caret.head = content.start + target;
+        if !select {
+            self.caret.anchor = self.caret.head;
+        }
+    }
+
+    /// A mouse press answered by the hit probe: `piece_start` is the
+    /// clicked span's block-relative start, `units` the UTF-16 offset the
+    /// webview measured within it. A press past the text (or a probe miss
+    /// signalled as `usize::MAX`) lands at the block's end.
+    pub fn place_in_block(
+        &mut self,
+        piece_start: usize,
+        units: usize,
+        select: bool,
+    ) {
+        let Some((content, source)) = self.active_slice() else {
+            return;
+        };
+        let start = piece_start.min(source.len());
+        let rel = source
+            .get(start..)
+            .map(|rest| start + blocks::byte_offset_of_utf16(rest, units))
+            .unwrap_or(source.len());
+        self.goal = None;
+        self.caret.head = content.start + rel;
+        if !select {
+            self.caret.anchor = self.caret.head;
+        }
+    }
+
+    /// Ctrl+A, block-scoped like the widget it replaced: the whole active
+    /// block's content, caret at its end.
+    pub fn select_all(&mut self) {
+        let Some(content) = self.active_content() else {
+            return;
+        };
+        self.caret = Caret {
+            anchor: content.start,
+            head: content.end,
+        };
+        self.goal = None;
     }
 
     /// A click on a rendered block: flush any pending edit, resegment (the
     /// edit may have split or merged blocks), then land on the block owning
     /// the clicked block's first byte — a coordinate, so it survives the
-    /// index shuffle resegmentation can cause.
+    /// index shuffle resegmentation can cause. The caret lands at the woken
+    /// block's end, where the old textarea's default put it.
     pub fn activate(&mut self, start: usize) {
         self.deactivate();
         self.active = (!self.blocks.is_empty())
             .then(|| blocks::block_at(&self.blocks, start));
+        let end = self
+            .active_content()
+            .map(|content| content.end)
+            .unwrap_or(0);
+        self.caret = Caret {
+            anchor: end,
+            head: end,
+        };
+        self.goal = None;
     }
 
-    /// A boundary arrow: `units` is the active textarea's `selectionStart`
-    /// in UTF-16 code units. When the caret sits on the block's edge line,
-    /// slide to the neighbouring block through the same flush-and-resegment
-    /// path as a click; anywhere else — or at the note's ends — the arrow
-    /// was ordinary caret movement and nothing happens.
-    pub fn slide(&mut self, units: usize, up: bool) {
+    /// A vertical move leaving the block: the neighbouring block wakes
+    /// through the same flush-and-resegment path as a click; at the note's
+    /// ends, nothing happens.
+    pub fn slide(&mut self, up: bool) {
         let Some(index) = self.active else { return };
-        let slice = self.active_source().unwrap_or("");
-        let caret = blocks::byte_offset_of_utf16(slice, units);
-        let target = match blocks::boundary_slide(slice, caret, up) {
-            Some(blocks::Slide::Prev) if index > 0 => {
-                self.blocks[index - 1].range.start
-            }
-            Some(blocks::Slide::Next) if index + 1 < self.blocks.len() => {
+        let target = match up {
+            true if index > 0 => self.blocks[index - 1].range.start,
+            false if index + 1 < self.blocks.len() => {
                 self.blocks[index + 1].range.start
             }
             _ => return,
@@ -188,6 +353,71 @@ impl Editor {
         let block = self.blocks.get(self.active?)?;
         let (_, text) = self.note()?;
         text.get(block.content())
+    }
+
+    /// The caret, only while a block is active — a rendered note has no
+    /// caret to draw or move.
+    pub fn caret(&self) -> Option<Caret> {
+        self.active.map(|_| self.caret)
+    }
+
+    /// The caret as the widget draws it: block-relative bytes, clamped into
+    /// the active block's content so a stale coordinate degrades to the
+    /// block's edge instead of panicking downstream.
+    pub fn caret_in_block(&self) -> (usize, usize) {
+        self.active_content()
+            .map(|content| {
+                let clamp = |offset: usize| {
+                    offset.clamp(content.start, content.end) - content.start
+                };
+                (clamp(self.caret.anchor), clamp(self.caret.head))
+            })
+            .unwrap_or((0, 0))
+    }
+
+    /// The selected note-global span, `None` when collapsed or inactive.
+    pub fn selection(&self) -> Option<Range<usize>> {
+        self.active?;
+        let Caret { anchor, head } = self.caret;
+        (anchor != head).then(|| anchor.min(head)..anchor.max(head))
+    }
+
+    /// What Ctrl+C copies: the selected text, `None` when nothing is.
+    pub fn selected_text(&self) -> Option<String> {
+        let span = self.selection()?;
+        let (_, text) = self.note()?;
+        text.get(span).map(str::to_string)
+    }
+
+    /// The active block's content span and text together — every caret op's
+    /// first read, as one option so they can never disagree.
+    fn active_slice(&self) -> Option<(Range<usize>, String)> {
+        let content = self.active_content()?;
+        let source = self.active_source()?.to_string();
+        Some((content, source))
+    }
+
+    /// The active block's content range in note-global bytes.
+    fn active_content(&self) -> Option<Range<usize>> {
+        self.blocks.get(self.active?).map(Block::content)
+    }
+
+    /// Whether a neighbouring block exists in that direction.
+    fn can_slide(&self, up: bool) -> bool {
+        self.active.is_some_and(|index| {
+            if up {
+                index > 0
+            } else {
+                index + 1 < self.blocks.len()
+            }
+        })
+    }
+
+    /// The collapsed caret after an edit: both ends at `head`, the goal
+    /// column forgotten.
+    fn place(&mut self, head: usize) {
+        self.caret = Caret { anchor: head, head };
+        self.goal = None;
     }
 }
 
@@ -474,68 +704,350 @@ mod tests {
         assert!(!text.contains("title"), "the emptied block is gone: {text}");
     }
 
+    // -- the caret: app-owned, note-global bytes -----------------------------
+    // (adr/2026-08-caret-on-editor-note-bytes.md)
+
     #[test]
-    fn insert_splices_at_the_caret_wherever_it_sits() {
-        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
-        for (units, expected) in [
-            (0, "#l(\"x\")= title\n"),
-            (2, "= #l(\"x\")title\n"),
-            // past the block's end clamps to it — the separator is not the
-            // widget's to write into
-            (99, "= title#l(\"x\")\n"),
-        ] {
-            let (_dir, mut editor) = open_note(NOTE);
-            editor.activate(editor.blocks()[1].range.start);
-            editor.insert(units, "#l(\"x\")");
-            let (_, text) = editor.note().expect("still open");
-            assert!(text.contains(expected), "at {units}: {text}");
-            assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
-            assert_eq!(editor.notice(), None);
-        }
+    fn open_lands_the_caret_on_the_notes_last_line() {
+        let (_dir, editor) = open_note(NOTE);
+        let caret = editor.caret().expect("an open note has a caret");
+        assert_eq!(caret.head, NOTE.len());
+        assert_eq!(caret.anchor, NOTE.len(), "collapsed");
+        assert_eq!(editor.caret_in_block(), (6, 6), "prose\\n is six bytes");
     }
 
     #[test]
-    fn insert_counts_the_caret_in_utf16_units_like_the_widget() {
-        let (_dir, mut editor) = open_note("été\n\nprose\n");
-        editor.activate(0);
-        // "été" is 5 bytes but 3 code units: after the first é is byte 2
-        editor.insert(1, "!");
+    fn activation_lands_the_caret_at_the_woken_blocks_end() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        let content = editor.blocks()[1].content();
+        let caret = editor.caret().expect("a caret");
+        assert_eq!(caret.head, content.end);
+        assert_eq!(editor.caret_in_block(), (7, 7), "= title is seven bytes");
+    }
+
+    #[test]
+    fn a_rendered_note_has_no_caret() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
+        assert_eq!(editor.caret(), None);
+        assert_eq!(editor.caret_in_block(), (0, 0));
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.selected_text(), None);
+        assert_eq!(Editor::closed().caret(), None);
+    }
+
+    #[test]
+    fn insert_at_caret_types_and_the_caret_follows() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.move_caret(caret::Move::LineStart, false);
+        editor.move_caret(caret::Move::Right, false);
+        editor.move_caret(caret::Move::Right, false);
+        editor.insert_at_caret("é");
         let (_, text) = editor.note().expect("still open");
-        assert!(text.starts_with("é!té"), "{text}");
+        assert!(text.contains("= étitle"), "{text}");
+        assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
+        assert_eq!(editor.caret_in_block(), (4, 4), "after the é");
+        assert_eq!(editor.notice(), None);
     }
 
     #[test]
-    fn insert_against_a_stale_editor_is_dropped_loudly() {
+    fn insert_at_caret_replaces_the_selection() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[2].range.start);
+        // the caret opens on the empty last line; up reaches the prose
+        editor.move_caret(caret::Move::Up, false);
+        editor.move_caret(caret::Move::LineStart, false);
+        for _ in 0..5 {
+            editor.move_caret(caret::Move::Right, true);
+        }
+        assert_eq!(editor.selected_text().as_deref(), Some("prose"));
+        editor.insert_at_caret("vers");
+        let (_, text) = editor.note().expect("still open");
+        assert!(text.ends_with("vers\n"), "{text}");
+        assert_eq!(editor.selection(), None, "typing collapsed it");
+    }
+
+    #[test]
+    fn insert_at_caret_against_a_stale_editor_is_dropped_loudly() {
         // no block active: only deactivation reaches it now
         let (_dir, mut editor) = open_note(NOTE);
         editor.deactivate();
-        editor.insert(0, "#l(\"x\")");
+        editor.insert_at_caret("x");
         assert_eq!(editor.notice(), Some(STALE_EDIT));
 
         // an active index the block map no longer has
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.blocks.clear();
-        editor.insert(0, "#l(\"x\")");
+        editor.insert_at_caret("x");
         assert_eq!(editor.notice(), Some(STALE_EDIT));
 
-        // a span that no longer fits the buffer
+        // a caret off a char boundary is a stale coordinate
+        let (_dir, mut editor) = open_note("été\n");
+        editor.activate(0);
+        editor.caret = Caret { anchor: 1, head: 1 };
+        editor.insert_at_caret("x");
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "été\n", "a refused insert changes nothing");
+
+        // a block whose span no longer fits the buffer
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.blocks[0].content_end = NOTE.len() + 40;
-        editor.insert(0, "#l(\"x\")");
+        editor.insert_at_caret("x");
         assert_eq!(editor.notice(), Some(STALE_EDIT));
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, NOTE, "a refused insert changes nothing");
+    }
 
-        // a block map outliving the note it was cut from — unreachable
-        // through the widget (a closed editor has no blocks to activate),
-        // but the guard exists so a future caller cannot make it reachable
+    #[test]
+    fn the_caret_reads_guard_each_divergence_alone() {
+        // every widget read survives an editor whose halves diverged —
+        // unreachable through the widget, but a future caller must not be
+        // able to make them panic
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
+        assert_eq!(editor.active_source(), None, "no active block");
+
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.blocks.clear();
+        assert_eq!(editor.active_source(), None, "a stale index");
+
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.buffer = None;
-        editor.insert(0, "#l(\"x\")");
+        assert_eq!(editor.active_source(), None, "a vanished note");
+        editor.caret = Caret { anchor: 0, head: 3 };
+        assert_eq!(
+            editor.selected_text(),
+            None,
+            "a selection over a vanished note"
+        );
+    }
+
+    #[test]
+    fn deletion_takes_the_cluster_the_word_or_the_selection() {
+        let (_dir, mut editor) = open_note("l'idée\n");
+        editor.activate(0);
+        editor.delete_at_caret(Deletion::Back);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "l'idée", "the trailing newline went");
+
+        editor.delete_at_caret(Deletion::Back);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "l'idé", "é went whole, not one byte");
+
+        editor.delete_at_caret(Deletion::WordBack);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "l'", "the word went, the apostrophe stayed");
+
+        editor.move_caret(caret::Move::LineStart, false);
+        editor.delete_at_caret(Deletion::Forward);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "'");
+
+        editor.move_caret(caret::Move::LineEnd, true);
+        editor.delete_at_caret(Deletion::Back);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "", "the selection went whole");
+    }
+
+    #[test]
+    fn deletion_at_the_blocks_edges_is_inert() {
+        // blocks join by being emptied, never by backspacing across the
+        // hidden separator
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.move_caret(caret::Move::LineStart, false);
+        editor.delete_at_caret(Deletion::Back);
+        editor.delete_at_caret(Deletion::WordBack);
+        editor.move_caret(caret::Move::LineEnd, false);
+        editor.delete_at_caret(Deletion::Forward);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, NOTE, "nothing to remove, nothing removed");
+        assert_eq!(editor.notice(), None, "and nothing to complain about");
+    }
+
+    #[test]
+    fn deletion_against_a_stale_editor_is_dropped_loudly() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
+        editor.delete_at_caret(Deletion::Back);
         assert_eq!(editor.notice(), Some(STALE_EDIT));
+
+        // a stale caret refuses quietly: there is no span to remove
+        let (_dir, mut editor) = open_note("été\n");
+        editor.activate(0);
+        editor.caret = Caret { anchor: 1, head: 3 };
+        editor.delete_at_caret(Deletion::Back);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "été\n", "a refused deletion changes nothing");
+    }
+
+    #[test]
+    fn horizontal_moves_walk_clusters_and_collapse_selections() {
+        let (_dir, mut editor) = open_note("été\n");
+        editor.activate(0);
+        // from the end: left over the newline, then over the second é
+        editor.move_caret(caret::Move::Left, false);
+        assert_eq!(editor.caret_in_block().1, 5);
+        editor.move_caret(caret::Move::Left, false);
+        assert_eq!(editor.caret_in_block().1, 3, "é is one step");
+        editor.move_caret(caret::Move::Left, false);
+        assert_eq!(editor.caret_in_block().1, 2);
+
+        // shift-left selects; a plain arrow collapses to the matching edge
+        editor.move_caret(caret::Move::Left, true);
+        assert_eq!(editor.selected_text().as_deref(), Some("é"));
+        editor.move_caret(caret::Move::Left, false);
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.caret_in_block().1, 0, "collapsed left");
+
+        editor.move_caret(caret::Move::Right, true);
+        editor.move_caret(caret::Move::Right, true);
+        assert_eq!(editor.selected_text().as_deref(), Some("ét"));
+        editor.move_caret(caret::Move::Right, false);
+        assert_eq!(editor.caret_in_block().1, 3, "collapsed right");
+        editor.move_caret(caret::Move::Right, false);
+        assert_eq!(editor.caret_in_block().1, 5, "stepped over é");
+    }
+
+    #[test]
+    fn word_moves_and_line_edges_answer() {
+        let (_dir, mut editor) = open_note("l'idée est là\n");
+        editor.activate(0);
+        // the caret opens on the empty last line; up reaches the text
+        editor.move_caret(caret::Move::Up, false);
+        editor.move_caret(caret::Move::LineStart, false);
+        editor.move_caret(caret::Move::WordRight, false);
+        assert_eq!(editor.caret_in_block().1, 1, "the end of l");
+        editor.move_caret(caret::Move::WordRight, false);
+        assert_eq!(editor.caret_in_block().1, 7, "the end of idée");
+        editor.move_caret(caret::Move::WordLeft, false);
+        assert_eq!(editor.caret_in_block().1, 2, "the start of idée");
+        editor.move_caret(caret::Move::LineEnd, false);
+        assert_eq!(editor.caret_in_block().1, 15, "before the newline");
+    }
+
+    #[test]
+    fn vertical_moves_keep_the_goal_column_through_short_lines() {
+        let (_dir, mut editor) = open_note("premier\nab\ntroisième\n");
+        editor.activate(0);
+        // to line 0's column 6, then down twice: the short line clamps,
+        // the long line restores the column
+        for _ in 0..3 {
+            editor.move_caret(caret::Move::Up, false);
+        }
+        for _ in 0..6 {
+            editor.move_caret(caret::Move::Right, false);
+        }
+        editor.move_caret(caret::Move::Down, false);
+        assert_eq!(editor.caret_in_block().1, 10, "clamped to ab's end");
+        editor.move_caret(caret::Move::Down, false);
+        let head = editor.caret_in_block().1;
+        assert_eq!(&"premier\nab\ntroisième\n"[head..head + 2], "è");
+        // a horizontal move forgets the goal
+        editor.move_caret(caret::Move::Left, false);
+        editor.move_caret(caret::Move::Down, false);
+        assert_eq!(editor.caret_in_block().1, 22, "clamped to the last line");
+    }
+
+    #[test]
+    fn vertical_moves_slide_blocks_at_their_edges() {
+        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.move_caret(caret::Move::Up, false);
+        assert_eq!(editor.active(), Some(0), "up from the first line");
+        let end = editor.blocks()[0].content().len();
+        assert_eq!(editor.caret_in_block(), (end, end), "landed at its end");
+
+        editor.activate(editor.blocks()[1].range.start);
+        editor.move_caret(caret::Move::Down, false);
+        assert_eq!(editor.active(), Some(2), "down from the last line");
+    }
+
+    #[test]
+    fn vertical_moves_clamp_at_the_notes_ends() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        // the preamble has three lines; walking past the top clamps
+        for _ in 0..3 {
+            editor.move_caret(caret::Move::Up, false);
+        }
+        assert_eq!(editor.active(), Some(0), "no block above the first");
+        assert_eq!(editor.caret_in_block().1, 0, "clamped to the start");
+
+        let last = editor.blocks().len() - 1;
+        editor.activate(editor.blocks()[last].range.start);
+        editor.move_caret(caret::Move::Down, false);
+        assert_eq!(editor.active(), Some(last), "no block below the last");
+        let end = editor.blocks()[last].content().len();
+        assert_eq!(editor.caret_in_block().1, end, "clamped to the end");
+    }
+
+    #[test]
+    fn a_selecting_vertical_move_stays_inside_the_block() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.move_caret(caret::Move::Up, true);
+        assert_eq!(editor.active(), Some(1), "no slide while selecting");
+        assert_eq!(editor.caret_in_block().1, 0, "clamped to the start");
+        assert_eq!(editor.selected_text().as_deref(), Some("= title"));
+
+        editor.move_caret(caret::Move::Down, true);
+        assert_eq!(editor.active(), Some(1));
+        assert_eq!(editor.selection(), None, "back to the anchor");
+    }
+
+    #[test]
+    fn moves_with_nothing_active_are_inert() {
+        let mut editor = Editor::closed();
+        editor.move_caret(caret::Move::Up, false);
+        editor.place_in_block(0, 0, false);
+        editor.select_all();
+        editor.slide(true);
+        assert_eq!(editor.active(), None);
+        assert_eq!(editor.notice(), None);
+
+        // a slide with no neighbour in that direction holds
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.slide(true);
+        assert_eq!(editor.active(), Some(0), "no block above the first");
+
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
+        editor.move_caret(caret::Move::Up, false);
+        assert_eq!(editor.active(), None, "rendered view: arrows are inert");
+    }
+
+    #[test]
+    fn select_all_takes_the_block_not_the_note() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.select_all();
+        assert_eq!(editor.selected_text().as_deref(), Some("= title"));
+    }
+
+    #[test]
+    fn place_in_block_converts_the_probes_utf16_answer() {
+        let (_dir, mut editor) = open_note("été\n\nprose\n");
+        editor.activate(0);
+        // the probe answers (span start, UTF-16 units within it): "été" is
+        // five bytes but three units — after the first é is byte 2
+        editor.place_in_block(0, 1, false);
+        assert_eq!(editor.caret_in_block(), (2, 2));
+        // a drag extends from the anchor
+        editor.place_in_block(0, 3, true);
+        assert_eq!(editor.selected_text().as_deref(), Some("té"));
+        // a probe miss lands at the block's end
+        editor.place_in_block(usize::MAX, 0, false);
+        assert_eq!(editor.caret_in_block().1, 5, "the end of été");
     }
 
     #[test]
@@ -548,52 +1060,26 @@ mod tests {
     }
 
     #[test]
-    fn boundary_arrows_slide_to_the_neighbouring_block() {
-        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
-        let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
-
-        editor.slide(0, true);
-        assert_eq!(editor.active(), Some(0), "up from the first line");
-
-        editor.activate(editor.blocks()[1].range.start);
-        let end = editor.blocks()[1].range.len();
-        editor.slide(end, false);
-        assert_eq!(editor.active(), Some(2), "down from the last line");
-    }
-
-    #[test]
-    fn arrows_inside_a_block_or_at_the_notes_ends_slide_nowhere() {
-        let (_dir, mut editor) = open_note(NOTE);
-
-        // mid-block: a caret on the preamble's middle line has newlines on
-        // both sides, so either arrow is ordinary caret movement
+    fn typing_round_trips_byte_identical() {
+        // the roadmap's phase-0 exit test: a French corpus driven one
+        // keystroke at a time arrives on disk byte-identical
+        let corpus = "L'été à Montréal — cœur, naïveté, ça va.\n";
+        let (dir, mut editor) = open_note("");
         editor.activate(0);
-        let mid = NOTE.find("#show").expect("the preamble has a show") + 2;
-        editor.slide(mid, true);
-        assert_eq!(editor.active(), Some(0), "a newline precedes");
-        editor.slide(mid, false);
-        assert_eq!(editor.active(), Some(0), "a newline follows");
-
-        // the note's ends clamp
-        editor.slide(0, true);
-        assert_eq!(editor.active(), Some(0), "no block above the first");
-        let last = editor.blocks().len() - 1;
-        editor.activate(editor.blocks()[last].range.start);
-        editor.slide(editor.blocks()[last].content().len(), false);
-        assert_eq!(editor.active(), Some(last), "no block below the last");
-    }
-
-    #[test]
-    fn a_slide_with_nothing_active_is_a_no_op() {
-        let mut editor = Editor::closed();
-        editor.slide(0, true);
-        assert_eq!(editor.active(), None);
-
-        let (_dir, mut editor) = open_note(NOTE);
+        for cluster in
+            unicode_segmentation::UnicodeSegmentation::graphemes(corpus, true)
+        {
+            if cluster == "\n" {
+                editor.insert_at_caret("\n");
+            } else {
+                editor.insert_at_caret(cluster);
+            }
+        }
         editor.deactivate();
-        editor.slide(0, true);
-        assert_eq!(editor.active(), None, "rendered view: arrows are inert");
+        let saved = std::fs::read_to_string(dir.path().join("note.typ"))
+            .expect("the note is readable");
+        assert_eq!(saved, corpus);
+        assert_eq!(editor.notice(), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ The seam this version fills was architected in v0 phase 5 and has held since: "t
 One editor serves every surface — the logs centre pane and the writing sheet mount the same machinery (`adr/2026-08-sheet-reuses-the-one-editor.md`) — so each phase below lands everywhere at once.
 **"Implemented incrementally as needed" is the design, not a disclaimer** (`plan.md` § Roadmap): every phase leaves the editor daily-drivable, and the *not in v2* list at the bottom is the ceiling — a key earns its way in through daily friction, never through completeness.
 
-**Next step → phase 0; or the v0/v1 polish backlogs.**
+**Next step → phase 1; or the v0/v1 polish backlogs.**
 
 ## How we work
 
@@ -28,18 +28,18 @@ This is the v0 polish-backlog item pulled to the front as v2's foundation: WebKi
 The phase is deliberately behaviour-neutral — no modes yet — so the pre-declared retreat is free: if the widget stalls, the textarea stays and v2 waits.
 This is the editor's second iceberg (`plan.md` § Known risks 1 still applies); composition is the part to budget for.
 
-- [ ] A homemade active-block widget: the block's source with an app-drawn caret capable of bar *and* box, mounted exactly where the textarea was; the widget still hands whole-block values to `Editor::edit`, and `Buffer` stays a path and a `String`.
-  - [ ] Where the caret lives (suggestion: on `Editor`, the buffer-owned-cursor path `adr/2026-07-buffer-is-path-plus-string.md` sketched — app-owned state needs no JS probe and tests headlessly). **→ ADR**
-- [ ] The textarea's free features, hand-rolled — the exact costs `adr/2026-07-hybrid-active-block-textarea.md` priced in when it deferred them:
-  - [ ] key handling and key repeat;
-  - [ ] selection: Shift-arrows, mouse drag, a drawn highlight (phase 4's visual mode will reuse the drawing);
-  - [ ] clipboard: Ctrl+C/X/V through an injected seam — the `navigator.clipboard` pattern capture already uses;
-  - [ ] **French dead-key composition** (`^` + `e` → `ê`) via composition events — the notes are written in French, so this is load-bearing, not polish.
-- [ ] The caret seams dissolve: `CaretProbe` and `CaretWriter` retire with their staleness rules — boundary slides and the link picker read and write app state directly.
-- [ ] Undo cannot lapse: the textarea's native undo dies with it, so a linear buffer undo/redo ships in the same phase, behind ordinary chords with palette entries; phase 5 re-cuts the grain to vim units and retires the chords. **→ ADR**
-- [ ] Tests: caret movement and drawing state, selection maths, composition sequences, clipboard through the seam, typing round-trips byte-identical to the textarea era.
+- [x] A homemade active-block widget: the block's source with an app-drawn caret capable of bar *and* box, mounted exactly where the textarea was; the widget still hands whole-block values to `Editor::edit`, and `Buffer` stays a path and a `String`.
+  - [x] Where the caret lives: on `Editor`, in note-global bytes (`adr/2026-08-caret-on-editor-note-bytes.md`); the pure text math and render model live in `src/caret.rs`.
+- [x] The textarea's free features, hand-rolled — the exact costs `adr/2026-07-hybrid-active-block-textarea.md` priced in when it deferred them:
+  - [x] key handling and key repeat;
+  - [x] selection: Shift-arrows, mouse drag, a drawn highlight (phase 4's visual mode will reuse the drawing);
+  - [x] clipboard: Ctrl+C/X/V through injected seams — the `navigator.clipboard` pattern capture already uses, plus a write seam;
+  - [x] **French dead-key composition** (`^` + `e` → `ê`) via composition events on a hidden IME sink (`adr/2026-08-hidden-ime-sink.md`) — spike-verified on WebKitGTK before implementation.
+- [x] The caret seams dissolve: `CaretProbe` and `CaretWriter` retired with their staleness rules — slides, the link picker and every overlay read and write app state directly; a `HitProbe` seam answers mouse geometry, which stays the webview's.
+- [x] ~~Undo cannot lapse~~ **Phase 0 ships without undo** (`adr/2026-08-no-stopgap-undo-in-phase-0.md`): the textarea's native undo already died on every remount, so the stopgap was cut with the user; vim-grain undo is born in phase 5.
+- [x] Tests: caret movement and drawing state, selection maths, composition sequences, clipboard through the seams, typing round-trips byte-identical to the textarea era.
 
-Exit: days of daily writing in the homemade widget are indistinguishable from the textarea — dead keys compose, repeat repeats, selection, clipboard and undo all answer.
+Exit: days of daily writing in the homemade widget are indistinguishable from the textarea — dead keys compose, repeat repeats, selection and clipboard answer (undo waits for phase 5 by decision).
 
 ## Phase 1 — Modes
 
@@ -91,7 +91,7 @@ Exit: v e d reads like the sentence it is.
 
 Goal: the finishing grammar — . and u and / are what make it vim rather than modal arrow keys.
 
-- [ ] Undo regrained: one insert session or one change = one undo step; u and Ctrl+R replace phase 0's linear chords (which retire, palette entries included). **→ ADR**
+- [ ] Undo born at vim grain: one insert session or one change = one undo step, behind u and Ctrl+R — the editor's first undo, phase 0 having shipped without one (`adr/2026-08-no-stopgap-undo-in-phase-0.md`). **→ ADR**
 - [ ] `.` repeats the last change — operator applications and insert sessions replay.
 - [ ] / search within the note, n N to walk matches: a match may live in a rendered block, so landing activates it and places the caret — the offset-walking cousin of Ctrl+Enter's `links::link_at`.
 - [ ] Tests: undo grain over insert sessions and operators, dot after each change class, search landing across block boundaries.
@@ -106,7 +106,7 @@ Anything above earns its way in through daily friction, queued in the polish bac
 ## v2 exit criteria (from `plan.md`)
 
 - [ ] The modal keymap sits between the widget and `Editor`, inserted without rewriting either — the invariant held from v0 phase 5 to its payoff (`plan.md` § Editor)
-- [ ] The owned-caret widget retired the textarea, and the v0 polish-backlog item with it; composition, clipboard, selection and undo survived the move (phase 0)
+- [ ] The owned-caret widget retired the textarea, and the v0 polish-backlog item with it; composition, clipboard and selection survived the move (phase 0; undo arrives with phase 5, `adr/2026-08-no-stopgap-undo-in-phase-0.md`)
 - [ ] Normal, insert and visual modes; note-scoped motions; operators and text objects; vim-grain undo, dot repeat, in-note search (phases 1–5)
 - [ ] `make test` green with 100% coverage; every note still compiles with vanilla typst (`make check-vault`)
 - [ ] The ceiling held: nothing shipped in v2 beyond this list

@@ -12,9 +12,11 @@ use jiff::civil::Date;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::blocks;
+use crate::caret;
 use crate::domain::{NoteCategory, NoteType};
-use crate::editor::Editor;
+use crate::editor::{Deletion, Editor};
 use crate::index::{Index, IndexError, TableNote};
+use crate::keymap;
 use crate::links;
 use crate::logs::{self, Selection};
 use crate::loops;
@@ -48,27 +50,27 @@ pub struct Closer(pub Arc<dyn Fn() + Send + Sync>);
 #[derive(Clone)]
 pub struct Viewport(pub Arc<dyn Fn() -> (f64, f64) + Send + Sync>);
 
-/// How a boundary arrow reads the active textarea's caret: `main` injects a
-/// JS `selectionStart` probe (UTF-16 code units; None when nothing
-/// applies), the headless tests inject scripted fakes — the `Closer`
-/// pattern (adr/2026-07-hybrid-active-block-textarea.md).
-#[derive(Clone)]
-pub struct CaretProbe(
-    #[allow(clippy::type_complexity)]
-    pub  Arc<
-        dyn Fn() -> Pin<Box<dyn Future<Output = Option<usize>>>> + Send + Sync,
-    >,
-);
+/// What the hit probe answers: the hit span's `data-start` byte and the
+/// UTF-16 offset within its text node — or `None` off any text.
+pub type Hit = Pin<Box<dyn Future<Output = Option<(usize, usize)>>>>;
 
-/// How an accepted completion puts the caret back after the link it wrote:
-/// `main` injects a JS `setSelectionRange`, the headless tests inject a
-/// recorder — the `CaretProbe` pattern in the other direction
-/// (adr/2026-08-ctrl-l-link-picker.md).
+/// How a mouse press finds the character it landed on: `main` injects a JS
+/// `caretPositionFromPoint` walk over client coordinates, the headless
+/// tests inject scripted fakes — the `Closer` pattern. This reads pointer
+/// geometry, which the app never owns; the caret itself is `Editor` state
+/// (adr/2026-08-caret-on-editor-note-bytes.md).
 #[derive(Clone)]
-pub struct CaretWriter(
-    #[allow(clippy::type_complexity)]
-    pub  Arc<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()>>> + Send + Sync>,
-);
+pub struct HitProbe(pub Arc<dyn Fn(f64, f64) -> Hit + Send + Sync>);
+
+/// One clipboard write, done when the future resolves.
+pub type Written = Pin<Box<dyn Future<Output = ()>>>;
+
+/// How Ctrl+C reaches the system clipboard: `main` injects a JS
+/// `navigator.clipboard.writeText`, the headless tests inject a recorder —
+/// the `Clipboard` seam in the other direction
+/// (adr/2026-08-hidden-ime-sink.md).
+#[derive(Clone)]
+pub struct ClipboardWrite(pub Arc<dyn Fn(String) -> Written + Send + Sync>);
 
 /// How the in-app capture chord reads what is on the clipboard: `main`
 /// injects a JS `navigator.clipboard.readText()`, the headless tests inject
@@ -251,11 +253,11 @@ fn Shell(
     // the body cache, its table-side sibling: per-note SVGs living until
     // the watcher invalidates them (adr/2026-08-body-cache-per-note-svg.md)
     let bodies = use_hook(|| Rc::new(RefCell::new(BodyCache::default())));
-    // absent in headless tests that don't inject a fake: arrows then stay
-    // ordinary caret movement
-    let probe = try_consume_context::<CaretProbe>();
-    let writer = try_consume_context::<CaretWriter>();
+    // absent in headless tests that don't inject a fake: mouse presses then
+    // land at the block's end and the clipboard chords quietly decline
+    let hit = try_consume_context::<HitProbe>();
     let clipboard = try_consume_context::<Clipboard>();
+    let clipboard_write = try_consume_context::<ClipboardWrite>();
     let now = try_consume_context::<Now>();
     let window_size = try_consume_context::<Viewport>();
     // always provided by App above; the palette dispatches through it
@@ -298,12 +300,14 @@ fn Shell(
     let mut jump = use_signal(|| None::<Jump>);
     let mut jump_query = use_signal(String::new);
     let mut jump_highlighted = use_signal(|| 0usize);
-    // the uncontrolled textarea only shows a spliced-in link if it remounts,
-    // and it remounts when its key changes — keystrokes never touch this
-    let mut epoch = use_signal(|| 0u32);
-    // where the caret goes once that remount lands; a plain cell, like
-    // QuitFlush, because only the mount handler ever reads it
-    let pending_caret = use_hook(|| Rc::new(std::cell::Cell::new(None)));
+    // the live IME composition ("^" mid–dead-key), previewed at the caret
+    // and absent from the buffer until compositionend commits it
+    // (adr/2026-08-hidden-ime-sink.md)
+    let mut preview = use_signal(|| None::<String>);
+    // a drag in flight, and whether a hit probe is already out — plain
+    // cells, like QuitFlush: only the mouse handlers read them
+    let dragging = use_hook(|| Rc::new(std::cell::Cell::new(false)));
+    let probing = use_hook(|| Rc::new(std::cell::Cell::new(false)));
 
     // the Ctrl+Q flush: reports whether the open note and the canvas
     // positions reached disk, so a failed save can hold the app open
@@ -533,42 +537,17 @@ fn Shell(
         }
     });
 
-    // the create overlay's opening half — summon_palette's twin: what is
-    // true now is frozen now, because the overlay's input is about to own
-    // the focus (adr/2026-08-ctrl-n-two-step-create-overlay.md)
-    let open_creator = use_callback({
-        let probe = probe.clone();
-        move |()| {
-            let probe = probe.clone();
-            spawn(async move {
-                let block_active = editor.peek().active().is_some();
-                let caret = match probe {
-                    Some(probe) if block_active => (probe.0)().await,
-                    _ => None,
-                };
-                creator_query.set(String::new());
-                creator_highlighted.set(0);
-                creator_notice.set(None);
-                creator.set(Some(Creator {
-                    picked: None,
-                    caret,
-                }));
-            });
-        }
+    // the create overlay's opening half — summon_palette's twin
+    // (adr/2026-08-ctrl-n-two-step-create-overlay.md)
+    let open_creator = use_callback(move |()| {
+        creator_query.set(String::new());
+        creator_highlighted.set(0);
+        creator_notice.set(None);
+        creator.set(Some(Creator { picked: None }));
     });
 
-    // close_palette's twin, focus restoration and all
-    let close_creator = use_callback({
-        let pending_caret = pending_caret.clone();
-        move |restore: bool| {
-            let caret = creator.peek().as_ref().and_then(|open| open.caret);
-            creator.set(None);
-            if restore && editor.peek().active().is_some() {
-                pending_caret.set(caret);
-                epoch += 1;
-            }
-        }
-    });
+    // close_palette's twin: the focus effect hands the focus back
+    let close_creator = use_callback(move |()| creator.set(None));
 
     // the overlay's final Enter: the note exists before the sheet opens on
     // it, and the card lands centred in the viewport with its position
@@ -632,19 +611,8 @@ fn Shell(
             Err(msg) => editor.write().set_notice(msg),
         }
     });
-    // closing hands focus back the palette's way: the pane-focus effect
-    // re-takes the pane, and an active block gets its textarea remounted —
-    // dead chords otherwise
-    let close_filter = use_callback({
-        let pending_caret = pending_caret.clone();
-        move |()| {
-            filter_picker.set(None);
-            if editor.peek().active().is_some() {
-                pending_caret.set(None);
-                epoch += 1;
-            }
-        }
-    });
+    // closing hands focus back through the focus effect, like every overlay
+    let close_filter = use_callback(move |()| filter_picker.set(None));
     let apply_filter = use_callback(move |chosen: Option<table::Filter>| {
         filter.set(chosen);
         close_filter.call(());
@@ -673,16 +641,7 @@ fn Shell(
             Err(msg) => editor.write().set_notice(msg),
         }
     });
-    let close_jump = use_callback({
-        let pending_caret = pending_caret.clone();
-        move |()| {
-            jump.set(None);
-            if editor.peek().active().is_some() {
-                pending_caret.set(None);
-                epoch += 1;
-            }
-        }
-    });
+    let close_jump = use_callback(move |()| jump.set(None));
     let jump_to = use_callback({
         let fallback = fallback.clone();
         move |id: String| {
@@ -784,25 +743,33 @@ fn Shell(
     // go dead until something inside is clicked. A plain cell, like
     // QuitFlush: nothing re-renders when the pane announces itself.
     let pane = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
+    // where the invisible keyboard sink is, the pane cell's twin: the
+    // widget's keystrokes and compositions land on it, so it must hold the
+    // focus whenever a block is active and no overlay owns it
+    // (adr/2026-08-hidden-ime-sink.md)
+    let sink = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
     use_effect({
         let pane = pane.clone();
+        let sink = sink.clone();
         move || {
-            // all three are read every time, so the effect follows them
-            // all. While the palette is up the pane must not take focus —
-            // the palette's input just asked for it in its own mount; when
-            // it closes, this re-runs and the pane gets it back
+            // every flag is read every time, so the effect follows them
+            // all. While an overlay is up neither may take focus — the
+            // overlay's input just asked for it in its own mount; when it
+            // closes, this re-runs and hands the focus back
             let editing = editor.read().active().is_some();
             let listing = loops_open();
-            let summoned = palette.read().is_some();
-            let creating = creator.read().is_some();
-            let finding =
-                filter_picker.read().is_some() || jump.read().is_some();
-            let handle = pane.borrow().clone();
-            if let Some(handle) = handle
-                && (!editing || listing)
-                && !summoned
-                && !creating
-                && !finding
+            let overlaid = palette.read().is_some()
+                || creator.read().is_some()
+                || picker.read().is_some()
+                || filter_picker.read().is_some()
+                || jump.read().is_some();
+            let target = if editing && !listing {
+                sink.borrow().clone()
+            } else {
+                pane.borrow().clone()
+            };
+            if let Some(handle) = target
+                && !overlaid
             {
                 // a headless refusal has no one to tell; the caret simply
                 // stays where it was
@@ -813,18 +780,17 @@ fn Shell(
         }
     });
 
-    // the follow's landing half, from a caret already in hand — the palette
-    // runs this against the offset it froze at open, where a live probe
-    // would answer `null` because its own input took the focus
-    let follow_at = use_callback(move |units: usize| {
+    // one follow path for Ctrl+Enter, Ctrl+click and the palette: the
+    // caret is app state now, so everyone reads the same one — no probe,
+    // no frozen offsets (adr/2026-08-ctrl-enter-opens-time-links.md,
+    // adr/2026-08-caret-on-editor-note-bytes.md)
+    let follow_at = use_callback(move |()| {
         let target = {
             let editor = editor.peek();
-            editor.active_source().and_then(|slice| {
-                links::link_at(
-                    slice,
-                    blocks::byte_offset_of_utf16(slice, units),
-                )
-            })
+            let (_, head) = editor.caret_in_block();
+            editor
+                .active_source()
+                .and_then(|slice| links::link_at(slice, head))
         };
         let Some(target) = target else { return };
         if let Some(scale) = links::scale_of(&target, &notes.peek()) {
@@ -843,35 +809,14 @@ fn Shell(
         }
     });
 
-    // one follow path for Ctrl+Enter and for a Ctrl+click in the source:
-    // both ask the widget where the caret is and go wherever it is standing
-    // (adr/2026-08-ctrl-enter-opens-time-links.md)
-    let follow_link = use_callback({
-        let probe = probe.clone();
-        move |()| {
-            let Some(probe) = probe.clone() else { return };
-            spawn(async move {
-                // the probe answers `null` unless a textarea has focus, so
-                // a note with no active block stops here
-                let Some(units) = (probe.0)().await else {
-                    return;
-                };
-                follow_at.call(units);
-            });
-        }
-    });
-
-    // one accept path for Enter and for a click on a row; the anchor comes
-    // from the render that drew the row, so nothing here has to look it up
-    let accept = use_callback({
-        let pending_caret = pending_caret.clone();
-        move |(anchor, link_id): (usize, String)| {
-            let text = links::format_link(&link_id);
-            editor.write().insert(anchor, &text);
-            pending_caret.set(Some(anchor + text.encode_utf16().count()));
-            picker.set(None);
-            epoch += 1;
-        }
+    // one accept path for Enter and for a click on a row: the link lands at
+    // the caret, which nothing could have moved while the picker held the
+    // focus — app-owned state is frozen for free
+    let accept = use_callback(move |link_id: String| {
+        editor
+            .write()
+            .insert_at_caret(&links::format_link(&link_id));
+        picker.set(None);
     });
 
     // the capture chord's working half, lifted so the palette runs the same
@@ -910,101 +855,48 @@ fn Shell(
         }
     });
 
-    // the picker's opening half, from an anchor already in hand — Ctrl+L
-    // probes and then lands here; the palette lands here with the caret it
-    // froze at open (adr/2026-08-command-palette-overlay-shape.md)
-    let open_picker_at = use_callback({
+    // the picker's opening half; the splice point is the caret itself,
+    // which the overlay cannot move (adr/2026-08-ctrl-l-link-picker.md)
+    let open_picker = use_callback({
         let root = root.clone();
-        move |anchor: usize| match completions(&root) {
+        move |()| match completions(&root) {
             Ok(entries) => {
                 query.set(String::new());
                 highlighted.set(0);
-                picker.set(Some(Picker { anchor, entries }));
+                picker.set(Some(Picker { entries }));
             }
             Err(msg) => editor.write().set_notice(msg),
         }
     });
 
-    // escaping the picker must hand focus back itself, like the palette's
-    // close below: its input held the focus, and losing it to `<body>`
-    // would kill every chord. The picker only ever opens over an active
-    // block, so the way back is always the textarea remount, with the
-    // anchor pending so the caret stands where Ctrl+L found it
-    let close_picker = use_callback({
-        let pending_caret = pending_caret.clone();
-        move |anchor: usize| {
-            picker.set(None);
-            pending_caret.set(Some(anchor));
-            epoch += 1;
-        }
-    });
+    // closing an overlay is just closing it: the focus effect above sees
+    // the signal flip and hands the focus back to the sink or the pane,
+    // and the caret never moved (adr/2026-08-caret-on-editor-note-bytes.md)
+    let close_picker = use_callback(move |()| picker.set(None));
+    let close_palette = use_callback(move |()| palette.set(None));
 
-    // closing the palette puts the focus back itself, because nothing else
-    // will: with no block active the effect above re-takes the pane, and
-    // with one active a remount with the frozen caret pending re-takes the
-    // textarea — the accepted completion's machinery
+    // the palette's opening half, shared by both screens' Ctrl+P
     // (adr/2026-08-command-palette-overlay-shape.md)
-    let close_palette = use_callback({
-        let pending_caret = pending_caret.clone();
-        move |restore: bool| {
-            let caret = (*palette.peek()).and_then(|open| open.caret);
-            palette.set(None);
-            if restore && editor.peek().active().is_some() {
-                pending_caret.set(caret);
-                epoch += 1;
-            }
-        }
+    let summon_palette = use_callback(move |()| {
+        palette_query.set(String::new());
+        palette_highlighted.set(0);
+        palette.set(Some(Palette {
+            block_active: editor.peek().active().is_some(),
+            on_table: *screen.peek() == Screen::Table,
+            sheet_open: sheet.peek().is_some(),
+            at_bodies: *zoom.peek() == table::Zoom::Bodies,
+        }));
     });
 
-    // the palette's opening half, shared by both screens' Ctrl+P: what is
-    // true now is frozen now — by dispatch time the palette's input owns the
-    // focus and the probe would answer null
-    // (adr/2026-08-command-palette-overlay-shape.md)
-    let summon_palette = use_callback({
-        let probe = probe.clone();
-        move |()| {
-            let probe = probe.clone();
-            spawn(async move {
-                let block_active = editor.peek().active().is_some();
-                let caret = match probe {
-                    Some(probe) if block_active => (probe.0)().await,
-                    _ => None,
-                };
-                palette_query.set(String::new());
-                palette_highlighted.set(0);
-                palette.set(Some(Palette {
-                    block_active,
-                    caret,
-                    on_table: *screen.peek() == Screen::Table,
-                    sheet_open: sheet.peek().is_some(),
-                    at_bodies: *zoom.peek() == table::Zoom::Bodies,
-                }));
-            });
-        }
-    });
-
-    // one run path for Enter and for a click on a row. Focus settles first,
-    // then the command runs — except the two that must keep it: `insert
-    // link`'s picker owns the focus it just took, and `follow link`
-    // replaces the editor wholesale, where a stale pending caret would leak
-    // into the next note's textarea. Exhaustive on purpose: a CommandId
+    // one run path for Enter and for a click on a row. The palette closes
+    // first, then the command runs; the focus effect settles whoever should
+    // hold the focus, including the overlays a command opens — their inputs
+    // ask again in their own mounts. Exhaustive on purpose: a CommandId
     // added without wiring does not compile
     // (adr/2026-08-palette-birth-command-list.md).
     let run_command =
-        use_callback(move |(frozen, id): (Palette, palette::CommandId)| {
-            let restores = !matches!(
-                id,
-                // the picker, the creator and the finders own the focus
-                // they just took; delete replaces the editor wholesale,
-                // follow-link's stale-caret rationale
-                palette::CommandId::InsertLink
-                    | palette::CommandId::FollowLink
-                    | palette::CommandId::NewNote
-                    | palette::CommandId::DeleteNote
-                    | palette::CommandId::FilterCards
-                    | palette::CommandId::JumpToNote
-            );
-            close_palette.call(restores);
+        use_callback(move |(_frozen, id): (Palette, palette::CommandId)| {
+            close_palette.call(());
             match id {
                 palette::CommandId::ToggleTheme => {
                     root_commands.toggle_theme.call(());
@@ -1013,19 +905,12 @@ fn Shell(
                 palette::CommandId::CaptureClipboard => {
                     capture_clipboard.call(());
                 }
-                // the caret commands run against the frozen offset; when
-                // the open froze none (a headless run without a probe),
-                // they quietly decline — the chords' own guard idiom
-                palette::CommandId::InsertLink => {
-                    if let Some(anchor) = frozen.caret {
-                        open_picker_at.call(anchor);
-                    }
-                }
-                palette::CommandId::FollowLink => {
-                    if let Some(units) = frozen.caret {
-                        follow_at.call(units);
-                    }
-                }
+                // the caret commands run against the caret the palette
+                // opened over — app state nothing could have moved; the
+                // palette lists them only over an active block, which is
+                // their guard (palette.rs `available`)
+                palette::CommandId::InsertLink => open_picker.call(()),
+                palette::CommandId::FollowLink => follow_at.call(()),
                 palette::CommandId::PreviousMonth => page.call(false),
                 palette::CommandId::NextMonth => page.call(true),
                 palette::CommandId::OpenLoops => toggle_loops.call(()),
@@ -1067,15 +952,82 @@ fn Shell(
         .then(|| link_footer(&root, &editor.read(), &id, &note_list))
         .flatten();
 
+    // the sink's keystroke, translated by `keymap::action` and applied —
+    // the only code that runs editor ops for typing; the v2 modal layer
+    // slots between the translation and this (editor.rs, plan.md § Editor)
+    let apply_action = use_callback({
+        let clipboard = clipboard.clone();
+        let clipboard_write = clipboard_write.clone();
+        let fragments = fragments.clone();
+        move |action: keymap::Action| match action {
+            keymap::Action::Insert(text) => {
+                editor.write().insert_at_caret(&text);
+            }
+            keymap::Action::NewLine => editor.write().insert_at_caret("\n"),
+            keymap::Action::Backspace => {
+                editor.write().delete_at_caret(Deletion::Back);
+            }
+            keymap::Action::Delete => {
+                editor.write().delete_at_caret(Deletion::Forward);
+            }
+            keymap::Action::WordBackspace => {
+                editor.write().delete_at_caret(Deletion::WordBack);
+            }
+            keymap::Action::Move { motion, select } => {
+                // a vertical move on an edge line slides to the
+                // neighbouring block; the fragment cache must drop the
+                // block that just went from source to rendered
+                let before = editor.peek().active();
+                editor.write().move_caret(motion, select);
+                if editor.peek().active() != before {
+                    fragments.borrow_mut().sweep();
+                }
+            }
+            keymap::Action::SelectAll => editor.write().select_all(),
+            keymap::Action::Copy => {
+                if let (Some(write), Some(text)) =
+                    (clipboard_write.clone(), editor.peek().selected_text())
+                {
+                    spawn(async move { (write.0)(text).await });
+                }
+            }
+            keymap::Action::Cut => {
+                // copy, then remove the selection — which is what a
+                // deletion keystroke over a selection does; without one,
+                // cut is a no-op like the textarea's
+                let selected = editor.peek().selected_text();
+                if let (Some(write), Some(text)) =
+                    (clipboard_write.clone(), selected)
+                {
+                    spawn(async move { (write.0)(text).await });
+                    editor.write().delete_at_caret(Deletion::Back);
+                }
+            }
+            keymap::Action::Paste => {
+                // the capture seam read the other way: a clipboard that
+                // will not answer pastes nothing
+                if let Some(clipboard) = clipboard.clone() {
+                    spawn(async move {
+                        if let Some(text) = (clipboard.0)().await {
+                            editor.write().insert_at_caret(&text);
+                        }
+                    });
+                }
+            }
+            keymap::Action::Ignore => {}
+        }
+    });
+
     // the block panes, one closure both screens mount: the logs centre pane
     // and the writing sheet show the one editor through the one widget
     // (adr/2026-08-sheet-reuses-the-one-editor.md)
     let blocks_view = {
         let root = root.clone();
         let fragments = fragments.clone();
-        let pending_caret = pending_caret.clone();
-        let writer = writer.clone();
-        let probe = probe.clone();
+        let sink = sink.clone();
+        let hit = hit.clone();
+        let dragging = dragging.clone();
+        let probing = probing.clone();
         move || -> Option<Element> {
             let panes = block_panes(
                 &editor.read(),
@@ -1089,100 +1041,175 @@ fn Shell(
                         {
                             match pane {
                                 Pane::Source { start, text } => {
-                                    let rows = text.split('\n').count();
-                                    // the widget's default caret: the end
-                                    // of the block — a note opens with the
-                                    // cursor on its last line
-                                    // (adr/2026-08-cursor-always-in-the-note.md)
-                                    let end_units = text.encode_utf16().count();
+                                    // the app draws the caret the webview
+                                    // never could: the source cut into
+                                    // pieces around selection and caret
+                                    // (adr/2026-08-caret-on-editor-note-bytes.md)
+                                    let (anchor, head) = editor.read().caret_in_block();
+                                    let lines = caret::layout(
+                                        &text,
+                                        anchor,
+                                        head,
+                                        preview.read().as_deref(),
+                                        caret::Shape::Bar,
+                                    );
                                     rsx! {
-                                        textarea {
-                                            // the epoch remounts it after a link is
-                                            // spliced in, so the uncontrolled value is
-                                            // rebuilt from the buffer
-                                            key: "{start}-{epoch}",
+                                        div {
+                                            key: "{start}",
                                             class: "block-active",
-                                            rows: "{rows}",
-                                            spellcheck: "false",
-                                            // autofocus only applies at document load in
-                                            // the webview: a swapped-in textarea asks for
-                                            // its own focus, and a refusal has no one to
-                                            // tell — the caret simply stays where it was
-                                            onmounted: {
-                                                let pending_caret = pending_caret.clone();
-                                                let writer = writer.clone();
-                                                move |event: Event<MountedData>| {
-                                                    // a pending caret (accepted completion,
-                                                    // restored overlay) wins; otherwise the
-                                                    // cursor lands at the end — the note's
-                                                    // last line, never wherever the webview
-                                                    // happens to put it
-                                                    let caret = pending_caret
-                                                        .take()
-                                                        .unwrap_or(end_units);
-                                                    let writer = writer.clone();
-                                                    async move {
-                                                        let _ = event.set_focus(true).await;
-                                                        if let Some(writer) = writer {
-                                                            (writer.0)(caret).await;
+                                            // a press asks the hit probe which character it
+                                            // landed on; Ctrl makes it a follow, like
+                                            // Ctrl+Enter (adr/2026-08-ctrl-enter-opens-time-links.md)
+                                            onmousedown: {
+                                                let hit = hit.clone();
+                                                let dragging = dragging.clone();
+                                                move |event: MouseEvent| {
+                                                    let follow = event.modifiers().ctrl();
+                                                    dragging.set(!follow);
+                                                    let Some(hit) = hit.clone() else {
+                                                        // headless without a fake: the caret
+                                                        // holds, a Ctrl+press still follows it
+                                                        if follow {
+                                                            follow_at.call(());
+                                                        }
+                                                        return;
+                                                    };
+                                                    let at = event.client_coordinates();
+                                                    spawn(async move {
+                                                        // a miss (the empty margin) lands at
+                                                        // the block's end
+                                                        let (piece, units) = (hit.0)(at.x, at.y)
+                                                            .await
+                                                            .unwrap_or((usize::MAX, 0));
+                                                        editor.write().place_in_block(piece, units, false);
+                                                        if follow {
+                                                            follow_at.call(());
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            // the drag's moving half: one probe in flight
+                                            // at a time, or a mousemove flood would queue
+                                            // an eval per pixel
+                                            onmousemove: {
+                                                let hit = hit.clone();
+                                                let dragging = dragging.clone();
+                                                let probing = probing.clone();
+                                                move |event: MouseEvent| {
+                                                    if !dragging.get() {
+                                                        return;
+                                                    }
+                                                    let Some(hit) = hit.clone() else { return };
+                                                    if probing.replace(true) {
+                                                        return;
+                                                    }
+                                                    let probing = probing.clone();
+                                                    let at = event.client_coordinates();
+                                                    spawn(async move {
+                                                        let landed = (hit.0)(at.x, at.y).await;
+                                                        probing.set(false);
+                                                        if let Some((piece, units)) = landed {
+                                                            editor.write().place_in_block(piece, units, true);
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            onmouseup: {
+                                                let dragging = dragging.clone();
+                                                move |_| dragging.set(false)
+                                            },
+                                            for (row, line) in lines.into_iter().enumerate() {
+                                                div { key: "{row}", class: "source-line",
+                                                    for piece in line.pieces {
+                                                        {
+                                                            match piece.drawn() {
+                                                                // the bar: keyed by position, so every move
+                                                                // remounts it — restarting the blink (solid
+                                                                // while typing) and the scroll-into-view
+                                                                None => rsx! {
+                                                                    span {
+                                                                        key: "caret-{head}",
+                                                                        class: "caret",
+                                                                        onmounted: move |event: Event<MountedData>| async move {
+                                                                            let _ = event
+                                                                                .scroll_to_with_options(ScrollToOptions {
+                                                                                    behavior: ScrollBehavior::Instant,
+                                                                                    // nearest: a visible caret scrolls nothing
+                                                                                    vertical: ScrollLogicalPosition::Nearest,
+                                                                                    horizontal: ScrollLogicalPosition::Nearest,
+                                                                                })
+                                                                                .await;
+                                                                        },
+                                                                    }
+                                                                },
+                                                                Some((class, start, text)) => rsx! {
+                                                                    span {
+                                                                        key: "{start}-{class}",
+                                                                        class: if !class.is_empty() { "{class}" },
+                                                                        "data-start": "{start}",
+                                                                        "{text}"
+                                                                    }
+                                                                },
+                                                            }
                                                         }
                                                     }
                                                 }
-                                            },
-                                            initial_value: "{text}",
-                                            oninput: move |event| {
-                                                editor.write().edit(&event.value());
-                                            },
-                                            // Ctrl+click follows the link it lands
-                                            // in, like Ctrl+Enter: the click has
-                                            // already moved the caret, so the same
-                                            // probe answers where
-                                            onclick: move |event: MouseEvent| {
-                                                if event.modifiers().ctrl() {
-                                                    follow_link.call(());
-                                                }
-                                            },
-                                            onkeydown: {
-                                                let fragments = fragments.clone();
-                                                let probe = probe.clone();
-                                                move |event: KeyboardEvent| {
-                                                    let key = event.key();
-                                                    if key == Key::Escape {
-                                                        // escape no longer deactivates — the
-                                                        // cursor always stays in the note; the
-                                                        // keystroke bubbles to the pane, which
-                                                        // closes the sheet or the loops list
-                                                        // (adr/2026-08-cursor-always-in-the-note.md)
-                                                    } else if key == Key::ArrowUp
-                                                        || key == Key::ArrowDown
+                                            }
+                                            // the invisible keyboard socket: WebKitGTK
+                                            // attaches its IME only to editable elements,
+                                            // so French dead keys compose here while the
+                                            // app owns everything drawn
+                                            // (adr/2026-08-hidden-ime-sink.md)
+                                            input {
+                                                class: "ime-sink",
+                                                onmounted: {
+                                                    let sink = sink.clone();
+                                                    move |event: Event<MountedData>| {
+                                                        sink.borrow_mut().replace(event.data());
+                                                        async move {
+                                                            let _ = event.set_focus(true).await;
+                                                        }
+                                                    }
+                                                },
+                                                onkeydown: move |event: KeyboardEvent| {
+                                                    // never touch a composing keystroke: the
+                                                    // IME owns it, and an open preview means
+                                                    // the IME owns it whatever isComposing
+                                                    // says (the spike saw both)
+                                                    if event.data().is_composing()
+                                                        || event.key() == Key::Dead
+                                                        || preview.peek().is_some()
                                                     {
-                                                        // a vertical arrow may leave the block:
-                                                        // ask the webview where the caret is —
-                                                        // the browser default on the edge lines
-                                                        // is a no-op, so the async probe races
-                                                        // nothing. It must still not page the
-                                                        // month grid below.
-                                                        event.stop_propagation();
-                                                        if let Some(probe) = &probe {
-                                                            let probe = probe.clone();
-                                                            let fragments = fragments.clone();
-                                                            let up = key == Key::ArrowUp;
-                                                            spawn(async move {
-                                                                if let Some(units) = (probe.0)().await {
-                                                                    editor.write().slide(units, up);
-                                                                    fragments.borrow_mut().sweep();
-                                                                }
-                                                            });
-                                                        }
-                                                    } else if !event.modifiers().ctrl() {
-                                                        // the rest belongs to the caret: keep
-                                                        // enter off the create handler below;
-                                                        // the ctrl chords still bubble to the
-                                                        // app root
-                                                        event.stop_propagation();
+                                                        return;
                                                     }
-                                                }
-                                            },
+                                                    // when the key is not ours (None), Escape and
+                                                    // the app chords bubble exactly as they always
+                                                    // did
+                                                    if let Some(action) = keymap::action(&event.key(), event.modifiers()) {
+                                                        // ours: keep the default out of the
+                                                        // sink and the key off the pane
+                                                        event.prevent_default();
+                                                        event.stop_propagation();
+                                                        apply_action.call(action);
+                                                    }
+                                                },
+                                                oncompositionstart: move |_| {
+                                                    preview.set(Some(String::new()));
+                                                },
+                                                oncompositionupdate: move |event: Event<CompositionData>| {
+                                                    preview.set(Some(event.data().data()));
+                                                },
+                                                oncompositionend: move |event: Event<CompositionData>| {
+                                                    // WebKitGTK can fire an empty end before
+                                                    // the real one (the spike's transcript);
+                                                    // only committed text lands
+                                                    preview.set(None);
+                                                    let committed = event.data().data();
+                                                    if !committed.is_empty() {
+                                                        editor.write().insert_at_caret(&committed);
+                                                    }
+                                                },
+                                            }
                                         }
                                     }
                                 }
@@ -1226,10 +1253,10 @@ fn Shell(
                     .into_iter()
                     .cloned()
                     .collect();
-            (open.anchor, matches)
+            matches
         });
         match open {
-            Some((anchor, matches)) => {
+            Some(matches) => {
                 let rows = matches.clone();
                 rsx! {
                 div { class: "link-picker",
@@ -1247,12 +1274,12 @@ fn Shell(
                             let key = event.key();
                             let last = matches.len().saturating_sub(1);
                             match key {
-                                Key::Escape => close_picker.call(anchor),
+                                Key::Escape => close_picker.call(()),
                                 Key::Enter => {
                                     // no matches: the keystroke does
                                     // nothing rather than guessing
                                     if let Some(entry) = matches.get(highlighted()) {
-                                        accept.call((anchor, entry.id.clone()));
+                                        accept.call(entry.id.clone());
                                     }
                                 }
                                 Key::ArrowDown => {
@@ -1280,7 +1307,7 @@ fn Shell(
                             class: if rank == highlighted() { "selected" },
                             onclick: {
                                 let id = entry.id.clone();
-                                move |_| accept.call((anchor, id.clone()))
+                                move |_| accept.call(id.clone())
                             },
                             span { class: "picker-id", "{entry.id}" }
                             if let Some(title) = entry.title {
@@ -1387,7 +1414,6 @@ fn Shell(
     let keyboard = {
         let root = root.clone();
         let fragments = fragments.clone();
-        let probe = probe.clone();
         move |event: KeyboardEvent| {
             match event.key() {
                 // the open-loops list is a destination you leave; escape
@@ -1421,13 +1447,7 @@ fn Shell(
                         && picker.peek().is_none()
                         && editor.peek().active().is_some() =>
                 {
-                    let Some(probe) = probe.clone() else { return };
-                    spawn(async move {
-                        let Some(anchor) = (probe.0)().await else {
-                            return;
-                        };
-                        open_picker_at.call(anchor);
-                    });
+                    open_picker.call(());
                 }
                 // the command palette — beside Ctrl+L for the reason its
                 // ADR gives: the dispatch needs what only this pane has in
@@ -1482,7 +1502,7 @@ fn Shell(
                 // never sees the chord — it would read it as "create the
                 // selected note" and write a file the user never asked for.
                 Key::Enter if event.modifiers().ctrl() => {
-                    follow_link.call(());
+                    follow_at.call(());
                 }
                 // only enter writes the file — navigating never does
                 Key::Enter => {
@@ -1521,7 +1541,6 @@ fn Shell(
     // the sheet holds the editor here — the editor chords the logs pane has;
     // everything else bubbles to the app root
     let table_keys = {
-        let probe = probe.clone();
         move |event: KeyboardEvent| match event.key() {
             // escape reaches here only when no block or overlay owns it:
             // the sheet closes and the card goes back (wireframe 6b)
@@ -1534,13 +1553,7 @@ fn Shell(
                     && picker.peek().is_none()
                     && editor.peek().active().is_some() =>
             {
-                let Some(probe) = probe.clone() else { return };
-                spawn(async move {
-                    let Some(anchor) = (probe.0)().await else {
-                        return;
-                    };
-                    open_picker_at.call(anchor);
-                });
+                open_picker.call(());
             }
             Key::Character(ref character)
                 if character == "p"
@@ -1583,7 +1596,7 @@ fn Shell(
             // Ctrl+Enter follows the link under the caret, sheet to sheet
             // or sheet to logs (adr/2026-08-permanent-links-open-sheets.md)
             Key::Enter if event.modifiers().ctrl() => {
-                follow_link.call(());
+                follow_at.call(());
             }
             // the semantic zoom pair, table-only
             // (adr/2026-08-body-zoom-scale-and-metrics.md)
@@ -1665,7 +1678,7 @@ fn Shell(
                                 let key = event.key();
                                 let last = matches.len().saturating_sub(1);
                                 match key {
-                                    Key::Escape => close_palette.call(true),
+                                    Key::Escape => close_palette.call(()),
                                     Key::Enter => {
                                         // no matches: the keystroke does
                                         // nothing rather than guessing
@@ -1757,10 +1770,9 @@ fn Shell(
                                             creator_notice.set(None);
                                             creator.set(Some(Creator {
                                                 picked: None,
-                                                ..keydown_frozen.clone()
                                             }));
                                         } else {
-                                            close_creator.call(true);
+                                            close_creator.call(());
                                         }
                                     }
                                     Key::Enter => match &keydown_frozen.picked {
@@ -1778,7 +1790,6 @@ fn Shell(
                                                 creator_highlighted.set(0);
                                                 creator.set(Some(Creator {
                                                     picked: Some(picked.clone()),
-                                                    ..keydown_frozen.clone()
                                                 }));
                                             }
                                         }
@@ -1811,13 +1822,11 @@ fn Shell(
                                 class: if rank == creator_highlighted() { "selected" },
                                 onclick: {
                                     let picked = entry.clone();
-                                    let frozen = frozen.clone();
                                     move |_| {
                                         creator_query.set(String::new());
                                         creator_highlighted.set(0);
                                         creator.set(Some(Creator {
                                             picked: Some(picked.clone()),
-                                            ..frozen.clone()
                                         }));
                                     }
                                 },
@@ -2718,28 +2727,25 @@ fn block_panes(
     )
 }
 
-/// The open link picker's fixed half. `anchor` is the caret Ctrl+L froze, in
-/// UTF-16 code units within the active block; `entries` is the index
-/// snapshot the query filters, taken once at open because nothing can change
-/// it while the popup holds focus (adr/2026-08-ctrl-l-link-picker.md). The
-/// moving half — query and highlight — lives in its own signals.
+/// The open link picker's fixed half: the index snapshot the query filters,
+/// taken once at open because nothing can change it while the popup holds
+/// focus (adr/2026-08-ctrl-l-link-picker.md). The splice point is the caret
+/// itself — app state no overlay can move, so nothing needs freezing
+/// (adr/2026-08-caret-on-editor-note-bytes.md). The moving half — query and
+/// highlight — lives in its own signals.
 #[derive(Clone, PartialEq)]
 struct Picker {
-    anchor: usize,
     entries: Vec<links::Completion>,
 }
 
-/// The open command palette's fixed half — the `Picker.anchor` idiom.
+/// The open command palette's fixed half — the `Picker` idiom.
 /// `block_active` decides which commands exist at all
-/// (adr/2026-08-palette-birth-command-list.md); `caret` is the offset the
-/// caret commands run against, probed at open because by dispatch time the
-/// palette's own input holds the focus and the probe would answer `null`
-/// (adr/2026-08-command-palette-overlay-shape.md). The moving half — query
-/// and highlight — lives in its own signals, like the picker's.
+/// (adr/2026-08-palette-birth-command-list.md); the caret commands run
+/// against the editor's own caret, which the palette cannot move. The
+/// moving half — query and highlight — lives in its own signals.
 #[derive(Clone, Copy, PartialEq)]
 struct Palette {
     block_active: bool,
-    caret: Option<usize>,
     /// Which screen the palette opened over: the screen commands hide where
     /// they already stand (adr/2026-08-screen-switch-gesture.md).
     on_table: bool,
@@ -2754,12 +2760,10 @@ struct Palette {
 /// The open create overlay's fixed half — the `Palette` idiom with one more
 /// fact: which step it stands in. `picked: None` is step 1 (the type list);
 /// `Some` is step 2, where the same input is the title prompt
-/// (adr/2026-08-ctrl-n-two-step-create-overlay.md). `caret` is the offset
-/// the final Escape restores, frozen at open for the palette's reason.
+/// (adr/2026-08-ctrl-n-two-step-create-overlay.md).
 #[derive(Clone, PartialEq)]
 struct Creator {
     picked: Option<NoteType>,
-    caret: Option<usize>,
 }
 
 /// The open filter overlay's fixed half: its vocabulary — every tag, then
@@ -2913,13 +2917,12 @@ mod tests {
     const FOOTER_BACKLINK: usize = 44;
     const FOOTER_OUTGOING: usize = 45;
     const BLOCK_PREAMBLE: usize = 46;
-    const BLOCK_HEADING: usize = 47;
-    const CRUMB_WEEK: usize = 48;
-    const RAIL_SUMMER: usize = 50;
-    const RAIL_W30: usize = 51;
-    const RAIL_DAY_23: usize = 52;
-    const RAIL_DAY_22: usize = 53;
-    const RAIL_DAY_21: usize = 54;
+    const CRUMB_WEEK: usize = 47;
+    const RAIL_SUMMER: usize = 49;
+    const RAIL_W30: usize = 50;
+    const RAIL_DAY_23: usize = 51;
+    const RAIL_DAY_22: usize = 52;
+    const RAIL_DAY_21: usize = 53;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
     /// one gutter per started week row (and everything sits behind the two
     /// chrome icons).
@@ -3080,9 +3083,9 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = activate_heading(&mut dom, &clicks);
         // typed but inside the quiet window: only the flush can save it
-        type_into(&mut dom, input, "= presque perdu\n");
+        retype(&mut dom, sink, "= presque perdu\n");
         press(
             &mut dom,
             keydown,
@@ -3135,8 +3138,9 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_heading(&mut dom, &clicks);
-        type_and_settle(&mut dom, input, "= autosauvé\n");
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        retype(&mut dom, sink, "= autosauvé\n");
+        block_on(settle(&mut dom));
 
         let saved =
             std::fs::read_to_string(vault.path().join("time/2026-07-23.typ"))
@@ -3154,7 +3158,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = activate_heading(&mut dom, &clicks);
 
         let file = vault.path().join("time/2026-07-23.typ");
         let mut permissions = std::fs::metadata(&file)
@@ -3166,7 +3170,8 @@ mod tests {
 
         // the settle loop spans several autosave restarts, so the
         // value-gated write is exercised on both of its sides here
-        type_and_settle(&mut dom, input, "= en panne\n");
+        retype(&mut dom, sink, "= en panne\n");
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
@@ -4004,8 +4009,9 @@ mod tests {
             dioxus_ssr::render(&dom)
         );
 
-        let (input, _) = sheet_block_targets(&opened);
-        type_and_settle(&mut dom, input, "= alpha renommé\n");
+        let (_, sink) = sheet_block_targets(&opened);
+        retype(&mut dom, sink, "= alpha renommé\n");
+        block_on(settle(&mut dom));
         let saved =
             std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
                 .expect("the note is readable");
@@ -4032,9 +4038,9 @@ mod tests {
             quit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let (input, _) = sheet_block_targets(&opened);
+        let (_, sink) = sheet_block_targets(&opened);
         // typed but inside the quiet window: only the flush can save it
-        type_into(&mut dom, input, "= presque perdu\n");
+        retype(&mut dom, sink, "= presque perdu\n");
 
         press(
             &mut dom,
@@ -4052,15 +4058,13 @@ mod tests {
     #[test]
     fn ctrl_l_in_the_sheet_opens_the_picker_and_accepts() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let (_, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_block_targets(&opened);
 
-        // the caret sits at the end of "= alpha"
-        let anchor = "= alpha".len();
-        *caret.lock().expect("the probe cell never poisons") = Some(anchor);
+        // put the caret at the end of "= alpha"
+        place_caret(&mut dom, block, &hit, "= alpha".len());
         let (input, picker_keys) = open_picker(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-picker"), "{html}");
@@ -4071,7 +4075,7 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "accepting closes it: {html}");
         assert!(
-            source_of(&dom).contains(r#"#l("digest")"#),
+            source_of(&dom).contains(r#"= alpha#l("digest")"#),
             "spliced at the caret: {}",
             source_of(&dom)
         );
@@ -4101,32 +4105,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_in_the_sheet_needs_a_probe_that_answers() {
-        let vault = temp_vault();
-        // no probe injected: the chord stops before spawning
-        {
-            let (mut dom, clicks, _, _) =
-                rendered_app(Some(vault.path().to_path_buf()));
-            let (pane, cards) = table_targets(&mut dom, &clicks);
-            let opened = open_sheet_on(&mut dom, pane, cards[0]);
-            let (_, keys) = sheet_block_targets(&opened);
-            press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
-            assert!(!dioxus_ssr::render(&dom).contains("link-picker"));
-        }
-
-        // a probe that answers nothing: the spawn stops at the anchor
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (pane, cards) = table_targets(&mut dom, &clicks);
-        let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let (_, keys) = sheet_block_targets(&opened);
-        *caret.lock().expect("the probe cell never poisons") = None;
-        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
-        block_on(settle(&mut dom));
-        assert!(!dioxus_ssr::render(&dom).contains("link-picker"));
-    }
-
-    #[test]
     fn ctrl_enter_on_a_permanent_link_opens_the_sheet() {
         let vault = temp_vault();
         // today's heading links alpha instead of yesterday
@@ -4135,12 +4113,10 @@ mod tests {
             linking(time_note("2026-07-23", "daily"), "alpha"),
         )
         .expect("the day is rewritten");
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
 
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING + 3);
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -4165,15 +4141,14 @@ mod tests {
     fn ctrl_enter_in_the_sheet_opens_the_linked_sheet() {
         let vault = temp_vault();
         beta_with_both_links(vault.path());
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         // beta sits second in id order
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
-        let (_, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_block_targets(&opened);
 
         // inside `#l("alpha")`, just past "= beta\n"
-        *caret.lock().expect("the probe cell never poisons") = Some(10);
+        place_caret(&mut dom, block, &hit, 10);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         // the raised card is now alpha's, on alpha's slot; beta went back
@@ -4188,14 +4163,13 @@ mod tests {
     fn a_time_link_in_the_sheet_lands_on_the_logs() {
         let vault = temp_vault();
         beta_with_both_links(vault.path());
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
-        let (_, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_block_targets(&opened);
 
         // inside `#l("2026-07-22")`
-        *caret.lock().expect("the probe cell never poisons") = Some(22);
+        place_caret(&mut dom, block, &hit, 22);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="logs""#), "{html}");
@@ -4214,15 +4188,14 @@ mod tests {
             format!("{}#l(\"fantome\")\n", note("gamma")),
         )
         .expect("gamma is written");
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         // gamma sits last in id order
         let opened = open_sheet_on(&mut dom, pane, cards[3]);
-        let (_, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_block_targets(&opened);
 
         // inside `#l("fantome")`, just past "= gamma\n"
-        *caret.lock().expect("the probe cell never poisons") = Some(11);
+        place_caret(&mut dom, block, &hit, 11);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -4327,9 +4300,10 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            55,
+            54,
             "2 chrome icons + 3 header + 3 seasons + 5 gutters + 31 days \
-             + 2 footer links + 2 blocks + 2 crumbs + 5 rail: {html}"
+             + 2 footer links + 1 rendered block + 2 crumbs + 5 rail — the \
+             active widget listens for presses, not clicks: {html}"
         );
     }
 
@@ -4531,30 +4505,21 @@ mod tests {
     #[test]
     fn a_note_opens_with_the_caret_on_its_last_line() {
         let vault = temp_vault();
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorder = written.clone();
-        let writer = CaretWriter(Arc::new(move |units| {
-            recorder
-                .lock()
-                .expect("the writer cell never poisons")
-                .push(units);
-            Box::pin(async {})
-        }));
-        let (mut dom, mutations) = mounted_app_with_probe(
-            Some(vault.path().to_path_buf()),
-            None,
-            None,
-            Some(writer),
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        // the heading block "= 2026-07-23\n#l(\"2026-07-22\")\n" ends in a
+        // newline, so the caret's line is the empty last one: a source
+        // line holding nothing but the drawn caret
+        // (adr/2026-08-cursor-always-in-the-note.md)
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"<div class="source-line"><span class="caret">"#),
+            "{html}"
         );
-        // the pane mounts first, the born-active textarea second
-        mount(&mut dom, listeners(&mutations, "mounted")[1]);
-        assert_eq!(
-            *written.lock().expect("the writer cell never poisons"),
-            // the heading block "= 2026-07-23\n#l(\"2026-07-22\")\n" is 30
-            // UTF-16 units: the caret sits past the final newline, on the
-            // empty last line (adr/2026-08-cursor-always-in-the-note.md)
-            vec![30],
-        );
+        // the renderer announces the caret's mount; the scroll-into-view
+        // asks and the headless refusal is absorbed
+        mount(&mut dom, listeners(&mutations, "mounted")[2]);
+        block_on(settle(&mut dom));
     }
 
     #[test]
@@ -4586,9 +4551,9 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
-        type_into(&mut dom, input, "= renamed\n\nencore\n");
+        retype(&mut dom, keys, "= renamed\n\nencore\n");
         let file = vault.path().join("time/2026-07-23.typ");
         let untouched =
             std::fs::read_to_string(&file).expect("the note is readable");
@@ -4664,16 +4629,18 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let bounced = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
-        let heading = listeners(&bounced, "click")[1];
+        // the woken preamble widget has no click listener, so the heading
+        // fragment's is the bounce's only one
+        let heading = listeners(&bounced, "click")[0];
         let woken = click_for_mutations(&mut dom, heading);
-        let input = listeners(&woken, "input")[0];
+        let sink = listeners(&woken, "keydown")[0];
         // the preamble re-rendered as a fragment under a fresh id
         let preamble = listeners(&woken, "click")[0];
-        type_into(&mut dom, input, "= renamed\n");
+        retype(&mut dom, sink, "= renamed\n");
 
         let mutations = click_for_mutations(&mut dom, preamble);
         assert_eq!(
-            listeners(&mutations, "input").len(),
+            listeners(&mutations, "keydown").len(),
             1,
             "the source moved to the preamble block"
         );
@@ -4688,12 +4655,11 @@ mod tests {
     #[test]
     fn boundary_arrows_slide_the_source_between_blocks() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret) =
-            probe_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
 
         // caret on the heading's first line: up slides into the preamble
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        place_caret(&mut dom, block, &hit, 0);
         press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "the preamble source: {html}");
@@ -4701,24 +4667,375 @@ mod tests {
     }
 
     #[test]
-    fn a_mid_block_caret_or_an_empty_probe_slides_nowhere() {
+    fn a_mid_block_caret_slides_nowhere_and_a_missed_press_lands_at_the_end() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret) =
-            probe_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_PREAMBLE]);
-
-        // the probe answered nothing (no textarea focused)
-        press(&mut dom, keys, Key::ArrowDown, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("#import"), "still the preamble: {html}");
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_block(&mut dom, clicks[BLOCK_PREAMBLE]);
 
         // a caret with newlines on both sides is ordinary movement
-        *caret.lock().expect("the probe cell never poisons") =
-            Some("#import \"/templates/template.typ\": *\n#s".len());
+        place_caret(
+            &mut dom,
+            block,
+            &hit,
+            "#import \"/templates/template.typ\": *\n#s".len(),
+        );
         press(&mut dom, keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "still the preamble: {html}");
+
+        // a press the probe cannot place — the empty margin — lands the
+        // caret at the block's end rather than dropping the press
+        *hit.lock().expect("the hit cell never poisons") = None;
+        mouse(&mut dom, "mousedown", block, (0.0, 0.0));
+        block_on(settle(&mut dom));
+        press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "still the preamble: {html}");
+    }
+
+    #[test]
+    fn a_dead_key_composes_and_commits_at_the_caret() {
+        // the spike's transcript, replayed: keydown Dead, composition
+        // start/update, the commit keystroke flagged composing, an empty
+        // compositionend, then the real one (adr/2026-08-hidden-ime-sink.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        press(&mut dom, sink, Key::Dead, Modifiers::empty());
+        compose(&mut dom, sink, "compositionstart", "");
+        compose(&mut dom, sink, "compositionupdate", "^");
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="compose""#),
+            "the dead key previews at the caret: {html}"
+        );
+        assert_eq!(
+            source_of(&dom),
+            before,
+            "the preview is not in the buffer"
+        );
+
+        press_composing(&mut dom, sink, Key::Character("e".into()));
+        compose(&mut dom, sink, "compositionend", "");
+        assert_eq!(
+            source_of(&dom),
+            before,
+            "the empty end WebKitGTK fires first commits nothing"
+        );
+        compose(&mut dom, sink, "compositionend", "ê");
+        let source = source_of(&dom);
+        assert_eq!(
+            source,
+            format!("{before}ê"),
+            "one ê at the caret — never a stray e or ^"
+        );
+        assert!(
+            !dioxus_ssr::render(&dom).contains(r#"class="compose""#),
+            "the preview is gone"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_during_an_open_preview_is_the_imes() {
+        // GTK's ordering is not trusted: whatever isComposing says, an
+        // open preview means the IME owns the keys (the spike saw both)
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        compose(&mut dom, sink, "compositionstart", "");
+        compose(&mut dom, sink, "compositionupdate", "¨");
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(source_of(&dom), before, "the x never typed");
+        compose(&mut dom, sink, "compositionend", "ï");
+        assert_eq!(source_of(&dom), format!("{before}ï"));
+    }
+
+    #[test]
+    fn shift_arrows_draw_a_selection_and_typing_replaces_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // from the empty last line, shift+up selects the link line
+        press(&mut dom, sink, Key::ArrowUp, Modifiers::SHIFT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="sel""#),
+            "the selection is drawn: {html}"
+        );
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("X".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(
+            source_of(&dom),
+            "= 2026-07-23\nX",
+            "the keystroke replaced the selection"
+        );
+        assert!(
+            !dioxus_ssr::render(&dom).contains(r#"class="sel""#),
+            "and collapsed it"
+        );
+
+        // the erase keys answer; tab is consumed inert
+        press(&mut dom, sink, Key::Tab, Modifiers::empty());
+        press(&mut dom, sink, Key::Delete, Modifiers::empty());
+        assert_eq!(
+            source_of(&dom),
+            "= 2026-07-23\nX",
+            "nothing to their right"
+        );
+        press(&mut dom, sink, Key::Backspace, Modifiers::CONTROL);
+        assert_eq!(source_of(&dom), "= 2026-07-23\n", "the word went");
+        press(&mut dom, sink, Key::Backspace, Modifiers::empty());
+        assert_eq!(source_of(&dom), "= 2026-07-23", "one cluster went");
+    }
+
+    #[test]
+    fn the_clipboard_chords_round_trip_through_the_seams() {
+        let vault = temp_vault();
+        let (mut dom, clicks, written) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Some("collé".to_string()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // copy with nothing selected is a no-op, like the textarea's
+        press(
+            &mut dom,
+            sink,
+            Key::Character("c".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert!(written.lock().expect("the write cell").is_empty());
+
+        // select all, copy: the block's whole content reaches the seam
+        press(
+            &mut dom,
+            sink,
+            Key::Character("a".into()),
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("c".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(
+            *written.lock().expect("the write cell"),
+            vec!["= 2026-07-23\n#l(\"2026-07-22\")\n".to_string()],
+        );
+
+        // cut: a second copy lands and the block empties
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(written.lock().expect("the write cell").len(), 2);
+        assert_eq!(source_of(&dom), "", "the selection went with the cut");
+
+        // cut with nothing selected is a no-op too
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(written.lock().expect("the write cell").len(), 2);
+
+        // paste inserts what the read seam answers
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), "collé");
+    }
+
+    #[test]
+    fn clipboard_chords_without_seams_quietly_decline() {
+        // headless without fakes: the selection stays, nothing pastes
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("a".into()),
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("c".into()),
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before, "nothing moved without seams");
+
+        // a paste whose read answers nothing pastes nothing
+        let (mut dom, clicks, _) =
+            clipboard_app(Some(vault.path().to_path_buf()), None);
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before);
+    }
+
+    #[test]
+    fn a_drag_extends_the_selection_one_probe_in_flight_at_a_time() {
+        let vault = temp_vault();
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, _) = activate_heading(&mut dom, &clicks);
+
+        // the press anchors at the start…
+        *hit.lock().expect("the hit cell never poisons") = Some((0, 0));
+        mouse(&mut dom, "mousedown", block, (0.0, 0.0));
+        block_on(settle(&mut dom));
+
+        // …the drag moves the head; a second move while the first probe is
+        // out is skipped rather than queued
+        *hit.lock().expect("the hit cell never poisons") = Some((0, 5));
+        mouse(&mut dom, "mousemove", block, (40.0, 0.0));
+        mouse(&mut dom, "mousemove", block, (41.0, 0.0));
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"<span class="sel" data-start="0">= 202</span>"#),
+            "the drag drew the selection: {html}"
+        );
+
+        // a move whose probe misses extends nothing
+        *hit.lock().expect("the hit cell never poisons") = None;
+        mouse(&mut dom, "mousemove", block, (60.0, 0.0));
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(r#"<span class="sel" data-start="0">= 202</span>"#),
+            "the miss changed nothing"
+        );
+
+        // after the release, moves stop extending
+        mouse(&mut dom, "mouseup", block, (41.0, 0.0));
+        *hit.lock().expect("the hit cell never poisons") = Some((0, 9));
+        mouse(&mut dom, "mousemove", block, (80.0, 0.0));
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(r#"<span class="sel" data-start="0">= 202</span>"#),
+            "the selection held where the button went up"
+        );
+
+        // one probe in flight: while one hangs, the next move is skipped
+        // rather than queued
+        mouse(&mut dom, "mousedown", block, (0.0, 0.0));
+        *hit.lock().expect("the hit cell never poisons") = Some(HIT_HANGS);
+        mouse(&mut dom, "mousemove", block, (90.0, 0.0));
+        *hit.lock().expect("the hit cell never poisons") = Some((0, 9));
+        mouse(&mut dom, "mousemove", block, (91.0, 0.0));
+        block_on(settle(&mut dom));
+        assert!(
+            !dioxus_ssr::render(&dom)
+                .contains(r#"<span class="sel" data-start="0">= 2026-07"#),
+            "the second move was skipped while the first probe was out"
+        );
+    }
+
+    #[test]
+    fn presses_without_a_hit_probe_keep_the_caret_and_ctrl_still_follows() {
+        // headless without a fake: the caret holds; with Ctrl the press
+        // still follows whatever the caret already stands in
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (block, _) = activate_heading(&mut dom, &clicks);
+
+        mouse(&mut dom, "mousedown", block, (0.0, 0.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "{html}");
+        // a drag without a probe extends nothing either
+        mouse(&mut dom, "mousemove", block, (10.0, 0.0));
+        assert!(!dioxus_ssr::render(&dom).contains(r#"class="sel""#));
+
+        // the caret opens on the empty last line: nothing to follow there
+        ctrl_press(&mut dom, block);
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
+            "no link under the caret, nothing followed: {html}"
+        );
+    }
+
+    #[test]
+    fn the_sink_takes_focus_back_when_an_overlay_closes() {
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let keys = listeners(&mutations, "keydown");
+        // registration order: the pane, then the sink, then the caret span
+        // — the sink is the one that also holds a keydown listener
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[1],
+        );
+        block_on(settle(&mut dom));
+        let before = focused.load(Ordering::SeqCst);
+
+        // the picker's input owns the focus while it is up; closing hands
+        // it back to the sink through the focus effect
+        let (_, picker_keys) = open_picker(&mut dom, keys[LOGS_KEYS]);
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+        block_on(settle(&mut dom));
+        assert!(
+            focused.load(Ordering::SeqCst) > before,
+            "the sink asked for focus once the picker closed"
+        );
     }
 
     // -- the scale chain jumps -----------------------------------------------
@@ -5342,13 +5659,12 @@ mod tests {
     #[test]
     fn ctrl_l_opens_the_picker_and_enter_writes_the_link() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, written) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
 
         // the caret sits right after "= 2026-07-23\n"
         let anchor = "= 2026-07-23\n".len();
-        *caret.lock().expect("the probe cell never poisons") = Some(anchor);
+        place_caret(&mut dom, block, &hit, anchor);
         let (input, picker_keys) = open_picker(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-picker"), "{html}");
@@ -5361,36 +5677,28 @@ mod tests {
             "the query filters the list"
         );
 
-        let mutations = press_for_mutations(
-            &mut dom,
-            picker_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "accepting closes it: {html}");
         assert!(
-            source_of(&dom).contains(r#"#l("2026-summer")"#),
+            source_of(&dom).contains(r#"#l("2026-summer")#l("2026-07-22")"#),
             "spliced at the caret: {}",
             source_of(&dom)
         );
-        // the accept remounted the textarea; the renderer then announces it,
-        // which is when the caret is put back
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        assert_eq!(
-            *written.lock().expect("the writer cell never poisons"),
-            vec![anchor + r#"#l("2026-summer")"#.len()],
-            "the caret lands past the link it just wrote"
+        // the caret lands past the link it just wrote: the drawn caret
+        // stands between the new link and the old one
+        assert!(
+            html.contains(r#"summer&#34;)</span><span class="caret">"#),
+            "{html}"
         );
     }
 
     #[test]
     fn a_row_click_accepts_the_completion_too() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, 0);
 
         let mutations =
             press_for_mutations(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
@@ -5409,10 +5717,9 @@ mod tests {
     #[test]
     fn the_arrows_move_the_highlight_and_stop_at_both_ends() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         let (input, picker_keys) = open_picker(&mut dom, keys);
 
         // two entries: the daily notes 22 and 23
@@ -5444,10 +5751,9 @@ mod tests {
     fn escape_closes_the_picker_and_a_query_that_matches_nothing_writes_nothing()
      {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         let (input, picker_keys) = open_picker(&mut dom, keys);
 
         type_into(&mut dom, input, "fantôme");
@@ -5478,43 +5784,35 @@ mod tests {
     }
 
     #[test]
-    fn escaping_the_picker_remounts_the_textarea_at_the_anchor() {
-        // the picker's input held the focus; escape hands it back to the
-        // textarea instead of stranding it outside the app
+    fn escaping_the_picker_leaves_the_caret_where_it_stood() {
+        // the caret is app state: the picker's input held the focus, but
+        // nothing could move the caret — escape just closes the overlay
         let vault = temp_vault();
-        let (mut dom, clicks, caret, written) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING);
         let (_, picker_keys) = open_picker(&mut dom, keys);
 
-        let mutations = press_for_mutations(
-            &mut dom,
-            picker_keys,
-            Key::Escape,
-            Modifiers::empty(),
-        );
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
         assert!(html.contains("block-active"), "still editing: {html}");
-        // the escape remounted the textarea; its mount puts the caret back
-        // on the anchor Ctrl+L froze
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        assert_eq!(
-            *written.lock().expect("the writer cell never poisons"),
-            vec![LINK_IN_HEADING],
-            "the caret went back where the picker was anchored"
+        // the caret still stands where Ctrl+L found it: at the start of
+        // the heading's second line, before the day link
+        assert!(
+            html.contains(
+                r#"<div class="source-line"><span class="caret"></span><span data-start="13">"#
+            ),
+            "{html}"
         );
     }
 
     #[test]
     fn the_theme_chord_still_works_over_an_open_picker() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         let (_, picker_keys) = open_picker(&mut dom, keys);
 
         press(
@@ -5529,41 +5827,29 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_needs_an_active_block_a_probe_and_a_closed_picker() {
+    fn ctrl_l_needs_an_active_block_and_a_closed_picker() {
         let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
 
-        // no active block: the caret is nowhere to anchor to
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys, _) = pane_targets(&mut dom, &clicks);
-        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
+        // an empty day holds a closed editor: no block, no caret to
+        // anchor to, no picker
+        click(&mut dom, clicks[day_cell(20)]);
+        press(&mut dom, keys[LOGS_KEYS], ctrl_l(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
 
-        // a probe that answers nothing: no anchor, no picker
-        let (_, block_keys) = activate_heading(&mut dom, &clicks);
-        press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
-        let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("link-picker"), "{html}");
-
-        // open, then a second Ctrl+L leaves the first one alone
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
-        let (input, _) = open_picker(&mut dom, block_keys);
+        // back over a note: open, then a second Ctrl+L leaves the first
+        // one alone
+        click(&mut dom, clicks[RAIL_DAY_23]);
+        let (input, _) = open_picker(&mut dom, keys[LOGS_KEYS]);
         type_into(&mut dom, input, "summer");
-        press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
+        press(&mut dom, keys[LOGS_KEYS], ctrl_l(), Modifiers::CONTROL);
         assert_eq!(
             picker_ids(&dom),
             vec!["2026-summer"],
             "the second chord left the open picker alone"
         );
-
-        // and without an injected probe at all, the chord is inert
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
-        let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("link-picker"), "{html}");
     }
 
     // -- Ctrl+Enter: following the link under the caret ---------------------
@@ -5575,13 +5861,11 @@ mod tests {
     #[test]
     fn ctrl_enter_opens_the_time_note_under_the_caret() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
 
         // inside the `#l("2026-07-22")` the heading block ends with
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING + 3);
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -5592,37 +5876,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_clicking_a_link_in_the_source_opens_it_too() {
+    fn ctrl_pressing_a_link_in_the_source_opens_it_too() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        // the heading is already the active source: its own click listener
-        // sits at the heading's mount slot
-        let source = clicks[BLOCK_HEADING];
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, _) = activate_heading(&mut dom, &clicks);
 
-        // the click that follows has already moved the caret into the link
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING + 3);
-        ctrl_click(&mut dom, source);
+        // the press asks the probe where it landed: inside the day link
+        *hit.lock().expect("the hit cell never poisons") =
+            Some((0, LINK_IN_HEADING + 3));
+        ctrl_press(&mut dom, block);
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains("cal-day has-note selected\">22"),
-            "the ctrl+click jumped to the linked day: {html}"
+            "the ctrl+press jumped to the linked day: {html}"
         );
         assert!(html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
-    fn a_plain_click_in_the_source_only_moves_the_caret() {
+    fn a_plain_press_in_the_source_only_moves_the_caret() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let source = clicks[BLOCK_HEADING];
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, _) = activate_heading(&mut dom, &clicks);
 
-        // the caret is in the link, but without the modifier nothing follows
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING + 3);
-        click(&mut dom, source);
+        // the caret lands in the link, but without the modifier nothing
+        // follows
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains("cal-day has-note selected\">23"),
@@ -5634,12 +5914,11 @@ mod tests {
     #[test]
     fn ctrl_enter_away_from_a_link_neither_jumps_nor_creates() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
 
         // in the heading text, well before the link
-        *caret.lock().expect("the probe cell never poisons") = Some(2);
+        place_caret(&mut dom, block, &hit, 2);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -5652,37 +5931,25 @@ mod tests {
     fn ctrl_enter_without_an_active_block_writes_no_file() {
         let vault = temp_vault();
         // an empty day is selected, the one the plain Enter would create
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[day_cell(20)]);
         let (_, keys, _) = pane_targets(&mut dom, &clicks);
 
-        // the probe answers nothing, the way it does with no textarea focused
-        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
-        // and again with an answer, which no block can be measured against
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
+        // a closed editor has no caret to follow from
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         assert!(
             !vault.path().join("time/2026-07-20.typ").exists(),
             "the chord is not the create keystroke"
         );
-
-        // and with no probe injected at all it is simply inert
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("cal-day has-note selected\">23"), "{html}");
     }
 
     #[test]
     fn an_index_that_cannot_list_notes_becomes_the_notice() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         let saboteur =
             rusqlite::Connection::open(vault.path().join(".index/index.db"))
                 .expect("a second connection opens");
@@ -5699,44 +5966,14 @@ mod tests {
     #[test]
     fn a_picker_over_an_unopenable_index_says_so() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         replace_database_with_a_directory(vault.path());
 
         press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("links:"), "{html}");
-    }
-
-    #[test]
-    fn accepting_without_a_caret_writer_still_splices() {
-        // `main` always injects one; a renderer that cannot move the caret
-        // must still not lose the link
-        let vault = temp_vault();
-        let caret = Arc::new(std::sync::Mutex::new(Some(0usize)));
-        let feed = caret.clone();
-        let probe = CaretProbe(Arc::new(move || {
-            let units = *feed.lock().expect("the probe cell never poisons");
-            Box::pin(async move { units })
-        }));
-        let (mut dom, mutations) = mounted_app_with_probe(
-            Some(vault.path().to_path_buf()),
-            None,
-            Some(probe),
-            None,
-        );
-        let clicks = listeners(&mutations, "click");
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        let (input, picker_keys) = open_picker(&mut dom, keys);
-        type_into(&mut dom, input, "summer");
-        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
-        assert!(
-            source_of(&dom).contains(r#"#l("2026-summer")"#),
-            "{}",
-            source_of(&dom)
-        );
     }
 
     // -- the links footer: both directions, dangling marked ------------------
@@ -5818,9 +6055,10 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = activate_heading(&mut dom, &clicks);
         // the heading block loses its outgoing link and gains a ghost one
-        type_and_settle(&mut dom, input, "= 2026-07-23\n#l(\"fantôme\")\n");
+        retype(&mut dom, sink, "= 2026-07-23\n#l(\"fantôme\")\n");
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-dangling\">fantôme"), "{html}");
         assert_eq!(
@@ -5835,8 +6073,9 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_heading(&mut dom, &clicks);
-        type_and_settle(&mut dom, input, "= 2026-07-23\n");
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        retype(&mut dom, sink, "= 2026-07-23\n");
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains('←'), "the backlink survives: {html}");
         assert!(!html.contains('→'), "the outgoing row is gone: {html}");
@@ -5932,10 +6171,9 @@ mod tests {
     #[test]
     fn over_an_active_block_all_but_the_stood_screen_are_listed() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
         assert_eq!(labels.len(), 11, "{labels:?}");
@@ -6010,17 +6248,14 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_runs_insert_link_at_the_frozen_caret() {
+    fn the_palette_runs_insert_link_at_the_caret() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, written) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
+        // the caret is app state: the palette cannot move it, so the link
+        // lands where it stood before Ctrl+P
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING);
         let (input, palette_keys) = open_palette(&mut dom, keys);
-        // the palette holds the offset it froze; a live probe would now
-        // answer nothing, its own input having taken the focus
-        *caret.lock().expect("the probe cell never poisons") = None;
 
         type_into(&mut dom, input, "insert");
         let mutations = press_for_mutations(
@@ -6038,33 +6273,20 @@ mod tests {
         let picker_keys = listeners(&mutations, "keydown")[0];
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
         type_into(&mut dom, picker_input, "summer");
-        let accept = press_for_mutations(
-            &mut dom,
-            picker_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         assert!(
-            source_of(&dom).contains(r#"#l("2026-summer")"#),
-            "spliced at the frozen anchor: {}",
+            source_of(&dom).contains(r#"#l("2026-summer")#l("2026-07-22")"#),
+            "spliced at the caret: {}",
             source_of(&dom)
-        );
-        mount(&mut dom, listeners(&accept, "mounted")[0]);
-        assert_eq!(
-            *written.lock().expect("the writer cell never poisons"),
-            vec![LINK_IN_HEADING + r#"#l("2026-summer")"#.len()],
-            "the caret lands past the link, from the frozen offset"
         );
     }
 
     #[test]
-    fn the_palette_runs_follow_link_from_the_frozen_caret() {
+    fn the_palette_runs_follow_link_from_the_caret() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING + 3);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "follow");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
@@ -6072,32 +6294,6 @@ mod tests {
         assert!(
             html.contains("cal-day has-note selected\">22"),
             "the command jumped to the linked day: {html}"
-        );
-    }
-
-    #[test]
-    fn the_caret_commands_decline_without_a_frozen_caret() {
-        // a probe that answers nothing froze no caret: both commands are
-        // listed (a block is active) but quietly decline
-        let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-
-        let (input, palette_keys) = open_palette(&mut dom, keys);
-        type_into(&mut dom, input, "insert link");
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("link-picker"), "{html}");
-        assert!(!html.contains("command-palette"), "closed all the same");
-
-        let (input, palette_keys) = open_palette(&mut dom, keys);
-        type_into(&mut dom, input, "follow");
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(
-            html.contains("cal-day has-note selected\">23"),
-            "the selection stayed put: {html}"
         );
     }
 
@@ -6188,30 +6384,22 @@ mod tests {
     }
 
     #[test]
-    fn escape_over_a_block_remounts_the_textarea_with_the_frozen_caret() {
+    fn escape_over_a_block_leaves_the_caret_where_the_palette_found_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, written) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") =
-            Some(LINK_IN_HEADING);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, LINK_IN_HEADING);
 
         let (_, palette_keys) = open_palette(&mut dom, keys);
-        let mutations = press_for_mutations(
-            &mut dom,
-            palette_keys,
-            Key::Escape,
-            Modifiers::empty(),
-        );
+        press(&mut dom, palette_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("block-active"), "still editing: {html}");
-        // the textarea came back; its mount puts the caret where Ctrl+P
-        // froze it
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        assert_eq!(
-            *written.lock().expect("the writer cell never poisons"),
-            vec![LINK_IN_HEADING],
-            "the caret went back where the palette found it"
+        // the caret is app state the palette never touched
+        assert!(
+            html.contains(
+                r#"<div class="source-line"><span class="caret"></span><span data-start="13">"#
+            ),
+            "{html}"
         );
     }
 
@@ -6298,10 +6486,9 @@ mod tests {
         assert!(html.contains("command-palette"), "still open: {html}");
 
         // and over an open link picker, Ctrl+P is inert
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (_, block_keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
         open_picker(&mut dom, block_keys);
         press(&mut dom, block_keys, ctrl_p(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
@@ -6687,39 +6874,30 @@ mod tests {
     }
 
     #[test]
-    fn escape_over_a_block_remounts_the_textarea_for_the_finders() {
+    fn escape_over_a_block_closes_the_finders_and_editing_continues() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, _) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
         let (_, block_keys) = sheet_block_targets(&opened);
-        *caret.lock().expect("the probe cell never poisons") = Some(0);
 
-        // the filter, opened over the active block, escapes back into it
+        // the filter, opened over the active block, escapes back into it —
+        // the widget never unmounted, so the same sink still answers
         let (_, filter_keys) = open_overlay(&mut dom, block_keys, ctrl_f());
-        let mutations = press_for_mutations(
-            &mut dom,
-            filter_keys,
-            Key::Escape,
-            Modifiers::empty(),
-        );
+        press(&mut dom, filter_keys, Key::Escape, Modifiers::empty());
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
-        // the escape remounted the textarea: the old keydown target is
-        // dead, the mutations carry the live one
-        let block_keys = listeners(&mutations, "keydown")[0];
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
 
         // and the jump the same way
         let (_, jump_keys) = open_overlay(&mut dom, block_keys, ctrl_o());
-        let mutations = press_for_mutations(
-            &mut dom,
-            jump_keys,
-            Key::Escape,
-            Modifiers::empty(),
-        );
+        press(&mut dom, jump_keys, Key::Escape, Modifiers::empty());
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        type_keys(&mut dom, block_keys, "x");
+        assert!(
+            source_of(&dom).contains('x'),
+            "the sink still types: {}",
+            source_of(&dom)
+        );
     }
 
     #[test]
@@ -7212,26 +7390,21 @@ mod tests {
     }
 
     #[test]
-    fn escape_over_a_block_remounts_the_textarea_with_the_creators_caret() {
+    fn escape_over_a_block_leaves_the_caret_where_ctrl_n_found_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, caret, written) =
-            probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
-        *caret.lock().expect("the probe cell never poisons") = Some(4);
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_heading(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, 4);
 
         let (_, creator_keys) = open_creator(&mut dom, keys);
-        let mutations = press_for_mutations(
-            &mut dom,
-            creator_keys,
-            Key::Escape,
-            Modifiers::empty(),
-        );
-        assert!(dioxus_ssr::render(&dom).contains("block-active"));
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        assert_eq!(
-            *written.lock().expect("the writer cell never poisons"),
-            vec![4],
-            "the caret went back where Ctrl+N found it"
+        press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "{html}");
+        // the caret is app state the overlay never touched: still after
+        // the fourth character of the heading's first line
+        assert!(
+            html.contains(r#">= 20</span><span class="caret">"#),
+            "{html}"
         );
     }
 
@@ -7511,14 +7684,13 @@ mod tests {
         root: Option<PathBuf>,
         closer: Option<Closer>,
     ) -> (VirtualDom, Mutations) {
-        mounted_app_with_probe(root, closer, None, None)
+        mounted_app_with_hit(root, closer, None)
     }
 
-    fn mounted_app_with_probe(
+    fn mounted_app_with_hit(
         root: Option<PathBuf>,
         closer: Option<Closer>,
-        probe: Option<CaretProbe>,
-        writer: Option<CaretWriter>,
+        hit: Option<HitProbe>,
     ) -> (VirtualDom, Mutations) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
@@ -7529,60 +7701,113 @@ mod tests {
         if let Some(closer) = closer {
             dom.insert_any_root_context(Box::new(closer));
         }
-        if let Some(probe) = probe {
-            dom.insert_any_root_context(Box::new(probe));
-        }
-        if let Some(writer) = writer {
-            dom.insert_any_root_context(Box::new(writer));
+        if let Some(hit) = hit {
+            dom.insert_any_root_context(Box::new(hit));
         }
         let mutations = dom.rebuild_to_vec();
         (dom, mutations)
     }
 
-    /// Like `rendered_app`, but with a scripted caret probe injected: each
-    /// arrow press reads whatever the returned cell holds at that moment.
-    fn probe_app(
+    /// A hit cell holding this never answers.
+    const HIT_HANGS: (usize, usize) = (usize::MAX, usize::MAX);
+
+    /// Like `rendered_app`, but with a scripted hit probe injected: each
+    /// mouse press reads whatever the returned cell holds at that moment —
+    /// (span `data-start`, UTF-16 units within it), or `None` for a miss.
+    #[allow(clippy::type_complexity)]
+    fn hit_app(
         root: Option<PathBuf>,
     ) -> (
         VirtualDom,
         Vec<ElementId>,
-        Arc<std::sync::Mutex<Option<usize>>>,
+        Arc<std::sync::Mutex<Option<(usize, usize)>>>,
     ) {
-        let (dom, clicks, caret, _) = probe_and_writer_app(root);
-        (dom, clicks, caret)
+        let landing = Arc::new(std::sync::Mutex::new(None::<(usize, usize)>));
+        let feed = landing.clone();
+        let hit = HitProbe(Arc::new(move |_, _| {
+            let landed = *feed.lock().expect("the hit cell never poisons");
+            if landed == Some(HIT_HANGS) {
+                // the probe that stays out, for the one-in-flight guard
+                return Box::pin(std::future::pending());
+            }
+            Box::pin(async move { landed })
+        }));
+        let (dom, mutations) = mounted_app_with_hit(root, None, Some(hit));
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, landing)
     }
 
-    /// The link picker's harness: a scripted probe feeding it an anchor and
-    /// a recording caret writer, so both halves of the round trip are
-    /// observable.
-    #[allow(clippy::type_complexity)]
-    fn probe_and_writer_app(
-        root: Option<PathBuf>,
-    ) -> (
-        VirtualDom,
-        Vec<ElementId>,
-        Arc<std::sync::Mutex<Option<usize>>>,
-        Arc<std::sync::Mutex<Vec<usize>>>,
+    /// Puts the caret at `units` (UTF-16, block-relative) through the mouse
+    /// path: script the hit probe, press, let the spawned probe land.
+    fn place_caret(
+        dom: &mut VirtualDom,
+        block: ElementId,
+        hit: &Arc<std::sync::Mutex<Option<(usize, usize)>>>,
+        units: usize,
     ) {
-        let caret = Arc::new(std::sync::Mutex::new(None::<usize>));
-        let feed = caret.clone();
-        let probe = CaretProbe(Arc::new(move || {
-            let units = *feed.lock().expect("the probe cell never poisons");
-            Box::pin(async move { units })
-        }));
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorder = written.clone();
-        let writer = CaretWriter(Arc::new(move |units| {
-            recorder
-                .lock()
-                .expect("the writer cell never poisons")
-                .push(units);
-            Box::pin(async {})
-        }));
-        let (dom, mutations) =
-            mounted_app_with_probe(root, None, Some(probe), Some(writer));
-        let clicks = listeners(&mutations, "click");
-        (dom, clicks, caret, written)
+        *hit.lock().expect("the hit cell never poisons") = Some((0, units));
+        mouse(dom, "mousedown", block, (0.0, 0.0));
+        mouse(dom, "mouseup", block, (0.0, 0.0));
+        block_on(settle(dom));
+    }
+
+    /// Types text as the sink receives it: one keydown per cluster, Enter
+    /// for each newline — the shape real typing has
+    /// (adr/2026-08-hidden-ime-sink.md).
+    fn type_keys(dom: &mut VirtualDom, sink: ElementId, text: &str) {
+        for cluster in
+            unicode_segmentation::UnicodeSegmentation::graphemes(text, true)
+        {
+            if cluster == "\n" {
+                press(dom, sink, Key::Enter, Modifiers::empty());
+            } else {
+                press(
+                    dom,
+                    sink,
+                    Key::Character(cluster.to_string()),
+                    Modifiers::empty(),
+                );
+            }
+        }
+    }
+
+    /// Replaces the active block's whole content: select all, then type —
+    /// the keystroke-honest successor to feeding the textarea a new value.
+    fn retype(dom: &mut VirtualDom, sink: ElementId, text: &str) {
+        press(dom, sink, Key::Character("a".into()), Modifiers::CONTROL);
+        type_keys(dom, sink, text);
+    }
+
+    /// Fires one composition event at the sink.
+    fn compose(
+        dom: &mut VirtualDom,
+        sink: ElementId,
+        kind: &'static str,
+        data: &str,
+    ) {
+        with_reactor(|| {
+            let payload: Rc<dyn Any> = Rc::new(PlatformEventData::new(
+                Box::new(FakeComposition(data.to_string())),
+            ));
+            dom.runtime()
+                .handle_event(kind, Event::new(payload, true), sink);
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// What the IME hands the sink — the `FakeMount` idiom for composition.
+    #[derive(Clone)]
+    struct FakeComposition(String);
+
+    impl HasCompositionData for FakeComposition {
+        fn data(&self) -> String {
+            self.0.clone()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
     }
 
     /// The app with a scripted clipboard and a fixed capture clock, for the
@@ -7629,6 +7854,70 @@ mod tests {
         modifiers: Modifiers,
     ) {
         press_for_mutations(dom, target, key, modifiers);
+    }
+
+    /// A keydown flagged `isComposing` — the commit keystroke the IME owns,
+    /// which the sink must leave alone (adr/2026-08-hidden-ime-sink.md).
+    fn press_composing(dom: &mut VirtualDom, target: ElementId, key: Key) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedKeyboardData::new(
+                    key,
+                    Code::KeyT,
+                    Location::Standard,
+                    false,
+                    Modifiers::empty(),
+                    true,
+                ),
+            )));
+            dom.runtime().handle_event(
+                "keydown",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// The app with both clipboard seams scripted: reads answer `pasted`,
+    /// writes land in the returned recorder — the widget's Ctrl+C/X/V
+    /// harness (adr/2026-08-hidden-ime-sink.md).
+    #[allow(clippy::type_complexity)]
+    fn clipboard_app(
+        root: Option<PathBuf>,
+        pasted: Option<String>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
+            move || {
+                let pasted = pasted.clone();
+                Box::pin(async move { pasted })
+            },
+        ))));
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = written.clone();
+        dom.insert_any_root_context(Box::new(ClipboardWrite(Arc::new(
+            move |text| {
+                recorder
+                    .lock()
+                    .expect("the write cell never poisons")
+                    .push(text);
+                Box::pin(async {})
+            },
+        ))));
+        let mutations = dom.rebuild_to_vec();
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, written)
     }
 
     /// Like `press`, but hands back the mutations it caused — how the
@@ -7704,8 +7993,9 @@ mod tests {
         click_for_mutations(dom, target);
     }
 
-    /// A click with Ctrl held — the chord that follows a link in the source.
-    fn ctrl_click(dom: &mut VirtualDom, target: ElementId) {
+    /// A mousedown with Ctrl held — the press that follows a link in the
+    /// source (adr/2026-08-ctrl-enter-opens-time-links.md).
+    fn ctrl_press(dom: &mut VirtualDom, target: ElementId) {
         with_reactor(|| {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedMouseData::new(
@@ -7724,7 +8014,7 @@ mod tests {
                 ),
             )));
             dom.runtime().handle_event(
-                "click",
+                "mousedown",
                 Event::new(data, true),
                 target,
             );
@@ -7897,22 +8187,6 @@ mod tests {
         });
     }
 
-    /// Types and lets the debounced autosave finish, so assertions see the
-    /// settled state rather than a half-run timer.
-    fn type_and_settle(dom: &mut VirtualDom, target: ElementId, text: &str) {
-        block_on(async {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedFormData::new(text.to_string(), Vec::new()),
-            )));
-            dom.runtime().handle_event(
-                "input",
-                Event::new(data, true),
-                target,
-            );
-            settle(dom).await;
-        });
-    }
-
     /// The picker's rows, in order — the assertions want the list itself,
     /// not a substring of a page that also holds the rail.
     fn picker_ids(dom: &VirtualDom) -> Vec<String> {
@@ -7923,15 +8197,48 @@ mod tests {
             .collect()
     }
 
-    /// The active textarea's text, unescaped — the rendered page HTML-escapes
-    /// the quotes an `#l(..)` call is made of.
+    /// The active block's drawn text, reassembled from its source lines and
+    /// unescaped — the widget renders the source as spans, so the page is
+    /// read the way a reader would: line by line, tags stripped. The
+    /// zero-width caret span contributes nothing.
     fn source_of(dom: &VirtualDom) -> String {
-        dioxus_ssr::render(dom)
-            .split(r#"initial_value=""#)
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .unwrap_or_default()
+        let html = dioxus_ssr::render(dom);
+        let lines: Vec<String> = html
+            .split(r#"<div class="source-line">"#)
+            .skip(1)
+            .filter_map(|rest| rest.split("</div>").next())
+            .map(|line| {
+                // the composition preview is drawn but not buffer content
+                let line: String = line
+                    .split(r#"<span class="compose""#)
+                    .enumerate()
+                    .map(|(index, part)| {
+                        if index == 0 {
+                            part.to_string()
+                        } else {
+                            part.split_once("</span>")
+                                .map(|(_, rest)| rest)
+                                .unwrap_or("")
+                                .to_string()
+                        }
+                    })
+                    .collect();
+                line.split('<')
+                    .map(|chunk| {
+                        chunk
+                            .split_once('>')
+                            .map(|(_, text)| text.to_string())
+                            .unwrap_or_else(|| chunk.to_string())
+                    })
+                    .collect::<String>()
+            })
+            .collect();
+        lines
+            .join("\n")
             .replace("&#34;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
     }
 
     /// The link chord, spelled once.
@@ -8089,36 +8396,43 @@ mod tests {
 
     /// Activates a block and returns the textarea's (input, keydown)
     /// targets from the mount mutations.
+    /// Wakes a rendered block and hands back the widget's two targets: the
+    /// block div's mousedown (where presses land) and the sink's keydown
+    /// (where typing lands) — the woken widget's own listeners are in the
+    /// click's mutations.
     fn activate_block(
         dom: &mut VirtualDom,
         block: ElementId,
     ) -> (ElementId, ElementId) {
         let mutations = click_for_mutations(dom, block);
-        let inputs = listeners(&mutations, "input");
+        let downs = listeners(&mutations, "mousedown");
         let keys = listeners(&mutations, "keydown");
-        (inputs[0], keys[0])
+        (downs[0], keys[0])
     }
 
-    /// The heading textarea's targets. A note now opens with its last
-    /// block — the fixture's heading — already active, so the old
+    /// The heading widget's targets. A note opens with its last block —
+    /// the fixture's heading — already active, so the old
     /// click-to-activate is a bounce: activate the preamble, then click
-    /// the heading fragment back into a fresh textarea, landing on the
+    /// the heading fragment back into a fresh widget, landing on the
     /// exact state the pre-cursor tests started from.
     fn activate_heading(
         dom: &mut VirtualDom,
         clicks: &[ElementId],
     ) -> (ElementId, ElementId) {
         let bounced = click_for_mutations(dom, clicks[BLOCK_PREAMBLE]);
-        let heading = listeners(&bounced, "click")[1];
+        // the woken preamble widget carries no click listener, so the
+        // heading fragment's is the bounce's only one
+        let heading = listeners(&bounced, "click")[0];
         activate_block(dom, heading)
     }
 
-    /// The sheet's active textarea targets: the sheet opens with the
-    /// note's last block already awake, its listeners in the opening
-    /// mutations themselves (adr/2026-08-cursor-always-in-the-note.md).
+    /// The sheet's active widget targets: the sheet opens with the note's
+    /// last block already awake, its listeners in the opening mutations —
+    /// the raised card's and aside's mousedowns register ahead of the
+    /// block's (adr/2026-08-cursor-always-in-the-note.md).
     fn sheet_block_targets(opened: &Mutations) -> (ElementId, ElementId) {
         (
-            listeners(opened, "input")[0],
+            listeners(opened, "mousedown")[2],
             listeners(opened, "keydown")[0],
         )
     }
@@ -8466,9 +8780,13 @@ mod tests {
 
         fn convert_composition_data(
             &self,
-            _: &PlatformEventData,
+            event: &PlatformEventData,
         ) -> CompositionData {
-            unreachable!("the shell never listens for this event")
+            event
+                .downcast::<FakeComposition>()
+                .cloned()
+                .map(CompositionData::from)
+                .expect("the tests only fire fake composition events")
         }
 
         fn convert_drag_data(&self, _: &PlatformEventData) -> DragData {

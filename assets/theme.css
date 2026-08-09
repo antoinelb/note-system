@@ -45,6 +45,10 @@
   --sheet-fill: #171331;
   --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.18);
   --selection: #5c538a;
+  /* the drawn text selection in the active block: the selection role's
+     hue, translucent so the source stays readable under it
+     (adr/2026-08-caret-on-editor-note-bytes.md) */
+  --select-fill: rgba(92, 83, 138, 0.35);
   /* multiplies var(--bg), which already swaps per theme */
   --dim-opacity: 0.4;
 }
@@ -87,6 +91,7 @@
   --sheet-fill: #edebf5;
   --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.25);
   --selection: #6f64ab;
+  --select-fill: rgba(111, 100, 171, 0.25);
   --dim-opacity: 0.4;
 }
 
@@ -249,6 +254,7 @@ body {
 
 .block-active {
   display: block;
+  position: relative;
   width: 100%;
   box-sizing: border-box;
   margin: 4px 0;
@@ -256,19 +262,74 @@ body {
   border: none;
   background: transparent;
   color: var(--ink-bright);
-  /* the one warm element is the ember and the caret (plan.md § design);
-     caret-shape upgrades it to a box once WebKitGTK ships support */
-  caret-color: var(--ember);
-  caret-shape: block;
   /* the source wears the prose face so entering a block is not a costume
      change (adr/2026-07-reading-scale-bumped.md,
      adr/2026-08-cormorant-garamond-replaces-parisienne.md) */
   font: 18px "Cormorant Garamond", serif;
   line-height: 1.5;
-  resize: none;
+  /* the app draws caret and selection itself; the webview must not paint
+     its own over a drag (adr/2026-08-caret-on-editor-note-bytes.md) */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  cursor: text;
+  user-select: none;
 }
 
-.block-active:focus {
+/* an empty line still occupies its line box, so the caret can rest on it */
+.source-line {
+  min-height: 27px;
+}
+
+/* the one warm element is the ember and the caret (plan.md § design): a
+   2px bar drawn beside the caret span. The span remounts on every move,
+   restarting the blink — solid while typing, the native rhythm. */
+.caret {
+  position: relative;
+}
+
+.caret::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: -0.1em;
+  height: 1.25em;
+  width: 2px;
+  background: var(--ember);
+  animation: caret-blink 1.06s steps(1) infinite;
+}
+
+@keyframes caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* normal mode's box caret (v2 phase 1): the cluster under it, inverted */
+.caret-box {
+  background: var(--ember);
+  color: var(--bg);
+}
+
+.sel {
+  background: var(--select-fill);
+}
+
+/* the live IME composition, previewed at the caret until it commits */
+.compose {
+  color: var(--ember);
+  text-decoration: underline dashed;
+}
+
+/* the invisible keyboard socket: WebKitGTK attaches its IME only to
+   editable elements (adr/2026-08-hidden-ime-sink.md) */
+.ime-sink {
+  position: absolute;
+  left: 8px;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  border: none;
+  padding: 0;
   outline: none;
 }
 

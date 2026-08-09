@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
 jiff = "0.2"
+unicode-segmentation = "1"
 notify-debouncer-full = "0.7"
 # "hooks" is only used by the fault-injection tests in src/index.rs, but cargo
 # features are not per-profile, so it has to be declared here

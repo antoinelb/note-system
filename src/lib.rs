@@ -3,10 +3,12 @@
 pub mod arrange;
 pub mod blocks;
 pub mod capture;
+pub mod caret;
 pub mod create;
 pub mod domain;
 pub mod editor;
 pub mod index;
+pub mod keymap;
 pub mod links;
 pub mod logs;
 pub mod loops;

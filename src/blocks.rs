@@ -136,32 +136,6 @@ pub fn fragment_source(text: &str, block: &Block) -> String {
     }
 }
 
-/// Where a boundary arrow leaves the active block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Slide {
-    Prev,
-    Next,
-}
-
-/// ArrowUp with the caret on the first line slides to the previous block,
-/// ArrowDown on the last line to the next; anywhere else the arrow is the
-/// browser's ordinary caret movement. `caret` is a byte offset; one that
-/// lands off a char boundary is a stale probe and slides nowhere.
-pub fn boundary_slide(
-    block_text: &str,
-    caret: usize,
-    up: bool,
-) -> Option<Slide> {
-    let (before, after) = block_text.split_at_checked(caret)?;
-    if up && !before.contains('\n') {
-        Some(Slide::Prev)
-    } else if !up && !after.contains('\n') {
-        Some(Slide::Next)
-    } else {
-        None
-    }
-}
-
 /// JS `selectionStart` counts UTF-16 code units; block ranges count UTF-8
 /// bytes. Clamps to the text's end, and to the character's start when the
 /// probe lands mid-surrogate-pair.
@@ -360,27 +334,6 @@ mod tests {
             standalone: false,
         };
         assert_eq!(fragment_source(NOTE, &block), FRAGMENT_PREAMBLE);
-    }
-
-    #[test]
-    fn boundary_slides_only_fire_on_the_edge_lines() {
-        let text = "first line\nlast line";
-        assert_eq!(boundary_slide(text, 5, true), Some(Slide::Prev));
-        assert_eq!(boundary_slide(text, 5, false), None, "newline follows");
-        assert_eq!(boundary_slide(text, 15, false), Some(Slide::Next));
-        assert_eq!(boundary_slide(text, 15, true), None, "newline precedes");
-    }
-
-    #[test]
-    fn a_single_line_block_slides_both_ways() {
-        assert_eq!(boundary_slide("only", 2, true), Some(Slide::Prev));
-        assert_eq!(boundary_slide("only", 2, false), Some(Slide::Next));
-    }
-
-    #[test]
-    fn a_caret_off_a_char_boundary_slides_nowhere() {
-        assert_eq!(boundary_slide("été", 1, true), None);
-        assert_eq!(boundary_slide("été", 1, false), None);
     }
 
     #[test]

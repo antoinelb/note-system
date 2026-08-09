@@ -62,33 +62,46 @@ fn main() {
                 .and_then(|value| value.as_str().map(str::to_string))
             })
         })))
-        // the boundary arrows' caret probe: selectionStart of the active
-        // textarea, in the UTF-16 units the editor converts from
-        // (adr/2026-07-hybrid-active-block-textarea.md)
-        .with_context(ui::CaretProbe(std::sync::Arc::new(|| {
-            Box::pin(async {
-                dioxus::document::eval(
-                    "const el = document.activeElement; \
-                     return el && el.tagName === 'TEXTAREA' \
-                         ? el.selectionStart : null;",
-                )
-                .await
-                .ok()
-                .and_then(|value| value.as_u64())
-                .map(|units| units as usize)
+        // Ctrl+C's half of the clipboard: sent over the eval channel rather
+        // than interpolated, so arbitrary note text cannot break the script
+        // (adr/2026-08-hidden-ime-sink.md)
+        .with_context(ui::ClipboardWrite(std::sync::Arc::new(|text| {
+            Box::pin(async move {
+                let eval = dioxus::document::eval(
+                    "const text = await dioxus.recv(); \
+                     await navigator.clipboard.writeText(text);",
+                );
+                let _ = eval.send(text);
+                let _ = eval.await;
             })
         })))
-        // and back the other way: after an accepted completion the caret
-        // belongs past the link it wrote
-        // (adr/2026-08-ctrl-l-link-picker.md)
-        .with_context(ui::CaretWriter(std::sync::Arc::new(|units| {
+        // where a mouse press landed, in a coordinate the editor speaks:
+        // the hit span's data-start plus the UTF-16 offset within its text
+        // node (adr/2026-08-caret-on-editor-note-bytes.md). Geometry stays
+        // the webview's — the caret itself is app state.
+        .with_context(ui::HitProbe(std::sync::Arc::new(|x, y| {
             Box::pin(async move {
-                let _ = dioxus::document::eval(&format!(
-                    "const el = document.activeElement; \
-                     if (el && el.tagName === 'TEXTAREA') \
-                         el.setSelectionRange({units}, {units});"
-                ))
-                .await;
+                let eval = dioxus::document::eval(
+                    "const [x, y] = await dioxus.recv(); \
+                     const at = document.caretPositionFromPoint \
+                         ? document.caretPositionFromPoint(x, y) \
+                         : document.caretRangeFromPoint(x, y); \
+                     if (!at) return null; \
+                     const node = at.offsetNode ?? at.startContainer; \
+                     const offset = at.offset ?? at.startOffset; \
+                     const el = node.nodeType === Node.TEXT_NODE \
+                         ? node.parentElement : node; \
+                     const span = el && el.closest('[data-start]'); \
+                     if (!span) return null; \
+                     return [parseInt(span.dataset.start), offset];",
+                );
+                let _ = eval.send((x, y));
+                eval.await.ok().and_then(|value| {
+                    let pair = value.as_array()?;
+                    let start = pair.first()?.as_u64()?;
+                    let units = pair.get(1)?.as_u64()?;
+                    Some((start as usize, units as usize))
+                })
             })
         })))
         .launch(ui::App)

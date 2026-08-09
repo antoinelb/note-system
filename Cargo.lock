@@ -3510,6 +3510,7 @@ dependencies = [
  "typst-layout",
  "typst-svg",
  "typst-syntax",
+ "unicode-segmentation",
 ]
 
 [[package]]
