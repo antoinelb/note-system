@@ -76,7 +76,7 @@
   stroke: if done { none } else { 0.75pt + palette.muted },
   fill: if done { palette.done } else { none },
   align(center + horizon, if done {
-    // no font named: Parisienne has no ✓, the fallback chain does
+    // no font named: Cormorant Garamond has no ✓, the fallback chain does
     text(fill: white, size: 0.6em, "✓")
   }),
 )
@@ -88,7 +88,7 @@
     margin: palette.margin,
     fill: palette.page,
   )
-  set text(font: "Parisienne", size: 13.5pt, fill: palette.ink)
+  set text(font: "Cormorant Garamond", size: 13.5pt, fill: palette.ink)
   set par(leading: 0.75em)
   show heading.where(level: 1): set text(size: 24pt, weight: 600)
   // `- [ ]` renders as an open task circle, `- [x]` as a done one with the

@@ -261,8 +261,9 @@ body {
   caret-color: var(--ember);
   caret-shape: block;
   /* the source wears the prose face so entering a block is not a costume
-     change (adr/2026-07-reading-scale-bumped.md) */
-  font: 18px Parisienne, cursive;
+     change (adr/2026-07-reading-scale-bumped.md,
+     adr/2026-08-cormorant-garamond-replaces-parisienne.md) */
+  font: 18px "Cormorant Garamond", serif;
   line-height: 1.5;
   resize: none;
 }
