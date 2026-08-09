@@ -45,6 +45,16 @@ pub enum Deletion {
 /// — a bug, surfaced as a visible notice rather than silently eaten input.
 const STALE_EDIT: &str = "edit dropped: the editor lost its block";
 
+/// `offset` clamped into the text and back onto a char boundary — a stale
+/// coordinate degrades instead of panicking.
+fn floor_boundary(text: &str, offset: usize) -> usize {
+    let offset = offset.min(text.len());
+    (0..=offset)
+        .rev()
+        .find(|&at| text.is_char_boundary(at))
+        .unwrap_or(0)
+}
+
 impl Editor {
     /// A closed editor: the empty-day state, and the fallback when a note
     /// cannot be opened.
@@ -292,6 +302,24 @@ impl Editor {
             head: end,
         };
         self.goal = None;
+    }
+
+    /// A motion's landing: the caret collapses to a note-global offset,
+    /// waking the block that owns it when it lies outside the active one —
+    /// the same flush-and-resegment path as a click, with the coordinate
+    /// riding through because resegmenting never edits
+    /// (adr/2026-08-caret-on-editor-note-bytes.md). Phase 5's search lands
+    /// through this too.
+    pub fn place_at(&mut self, offset: usize) {
+        let Some((_, text)) = self.note() else { return };
+        let offset = floor_boundary(text, offset);
+        let inside = self.active_content().is_some_and(|content| {
+            offset >= content.start && offset <= content.end
+        });
+        if !inside {
+            self.activate(offset);
+        }
+        self.place(offset);
     }
 
     /// A vertical move leaving the block: the neighbouring block wakes
@@ -1048,6 +1076,36 @@ mod tests {
         // a probe miss lands at the block's end
         editor.place_in_block(usize::MAX, 0, false);
         assert_eq!(editor.caret_in_block().1, 5, "the end of été");
+    }
+
+    #[test]
+    fn place_at_wakes_the_block_that_owns_the_offset() {
+        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        let (_dir, mut editor) = open_note(NOTE);
+        assert_eq!(editor.active(), Some(2));
+
+        // a landing outside the active block wakes its owner
+        let target = editor.blocks()[0].content().start + 2;
+        editor.place_at(target);
+        assert_eq!(editor.active(), Some(0));
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(target));
+
+        // a landing inside it just moves the caret
+        editor.place_at(target + 3);
+        assert_eq!(editor.active(), Some(0));
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(target + 3));
+
+        // a stale coordinate floors to a boundary; past the end clamps
+        let (_dir, mut editor) = open_note("été\n");
+        editor.place_at(1);
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(0));
+        editor.place_at(99);
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(6));
+
+        // nothing open, nothing to place
+        let mut editor = Editor::closed();
+        editor.place_at(3);
+        assert_eq!(editor.caret(), None);
     }
 
     #[test]

@@ -1028,10 +1028,11 @@ fn Shell(
     let apply_vim = use_callback({
         let fragments = fragments.clone();
         move |acts: Vec<vim::Act>| {
+            let before = editor.peek().active();
             for act in acts {
                 match act {
                     vim::Act::Place(at) => {
-                        editor.write().place_in_block(at, 0, false);
+                        editor.write().place_at(at);
                     }
                     vim::Act::Type(text) => {
                         editor.write().insert_at_caret(&text);
@@ -1040,9 +1041,13 @@ fn Shell(
                         // the ladder's second rung: the block renders
                         // again, and the cache drops its stale fragment
                         editor.write().deactivate();
-                        fragments.borrow_mut().sweep();
                     }
                 }
+            }
+            // a landing that woke another block — or the rung that closed
+            // one — leaves a stale fragment behind
+            if editor.peek().active() != before {
+                fragments.borrow_mut().sweep();
             }
         }
     });
@@ -1220,22 +1225,27 @@ fn Shell(
                                                     }
                                                     // the grammar speaks first (editor.rs
                                                     // names this slot); Pass hands the key to
-                                                    // the phase-0 keymap unchanged
-                                                    let (source, head) = {
-                                                        let editor = editor.peek();
-                                                        let (_, head) = editor.caret_in_block();
-                                                        let source = editor
-                                                            .active_source()
-                                                            .unwrap_or("")
-                                                            .to_string();
-                                                        (source, head)
+                                                    // the phase-0 keymap unchanged. The sink
+                                                    // only exists over an open note with a
+                                                    // caret, so the zip never comes up empty.
+                                                    let outcome = {
+                                                        let snapshot = editor.peek();
+                                                        snapshot.note().zip(snapshot.caret()).map_or(
+                                                            vim::Outcome::Pass,
+                                                            |((_, note_text), at)| {
+                                                                vim.write().handle(
+                                                                    &event.key(),
+                                                                    event.modifiers(),
+                                                                    &vim::View {
+                                                                        text: note_text,
+                                                                        blocks: snapshot.blocks(),
+                                                                        head: at.head,
+                                                                    },
+                                                                )
+                                                            },
+                                                        )
                                                     };
-                                                    match vim.write().handle(
-                                                        &event.key(),
-                                                        event.modifiers(),
-                                                        &source,
-                                                        head,
-                                                    ) {
+                                                    match outcome {
                                                         vim::Outcome::Acts(acts) => {
                                                             event.prevent_default();
                                                             event.stop_propagation();
@@ -4848,6 +4858,52 @@ mod tests {
             source_of(&dom),
             "= 2026-07-23\n#l(\"2026-07-22\")\n\nouvert",
             "the line opened below the caret's line"
+        );
+    }
+
+    #[test]
+    fn gg_and_g_carry_the_caret_across_blocks() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // normal mode, then gg: the preamble block wakes with the caret
+        // on its first line, still boxed
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let woken = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            source_of(&dom).contains("#import"),
+            "the preamble is the source: {}",
+            source_of(&dom)
+        );
+        assert!(html.contains(r#"class="caret-box""#), "{html}");
+
+        // the widget remounted with the woken block: G goes to its fresh
+        // sink and comes back to the last block's last line
+        let sink = listeners(&woken, "keydown")[0];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            source_of(&dom).contains("= 2026-07-23"),
+            "the heading woke again: {}",
+            source_of(&dom)
         );
     }
 

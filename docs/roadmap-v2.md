@@ -7,7 +7,7 @@ The seam this version fills was architected in v0 phase 5 and has held since: "t
 One editor serves every surface — the logs centre pane and the writing sheet mount the same machinery (`adr/2026-08-sheet-reuses-the-one-editor.md`) — so each phase below lands everywhere at once.
 **"Implemented incrementally as needed" is the design, not a disclaimer** (`plan.md` § Roadmap): every phase leaves the editor daily-drivable, and the *not in v2* list at the bottom is the ceiling — a key earns its way in through daily friction, never through completeness.
 
-**Next step → phase 2; or the v0/v1 polish backlogs.**
+**Next step → phase 3; or the v0/v1 polish backlogs.**
 
 ## How we work
 
@@ -58,10 +58,10 @@ Exit: Escape thinks instead of closing, i writes, and phase 0's writing flow is 
 
 Goal: the note navigable at the speed of intent — a writing session never touches the arrow keys.
 
-- [ ] h j k l; w b e; 0 ^ $; f F t T with ; and ,; gg G — all with counts.
-- [ ] Motions are note-scoped and blocks follow the caret: j from a block's last line slides to the next block through the flush-and-resegment path the boundary arrows already use (`Editor::slide`); gg and G land on the first and last blocks.
-- [ ] j and k keep the goal column, falling through short lines without forgetting it.
-- [ ] Tests: each motion against fixture text, counts, boundary slides, goal-column memory, motion over multi-byte French text (char-wise, never byte-wise).
+- [x] h j k l; w b e; 0 ^ $; f F t T with ; and ,; gg G — all with counts (`src/motions.rs`, `adr/2026-08-motions-on-visible-lines.md`).
+- [x] Motions are note-scoped and blocks follow the caret: every landing goes through `Editor::place_at`, which wakes the owning block via the flush-and-resegment path; gg and G land on the first and last blocks.
+- [x] j and k keep the goal column, falling through short lines without forgetting it.
+- [x] Tests: each motion against fixture text, counts, boundary slides, goal-column memory, motion over multi-byte French text (char-wise, never byte-wise).
 
 Exit: h j k l w b $ gg carry you anywhere in the note; the arrows are nostalgia.
 
