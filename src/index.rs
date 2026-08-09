@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsStr,
     path::{Path, PathBuf},
 };
@@ -86,6 +87,9 @@ pub struct TableNote {
     /// ISO `YYYY-MM-DD` as the column stores it; parsed only where a
     /// capture's age is drawn.
     pub created: Option<String>,
+    /// Sorted, straight from the tags table — what the tag filter matches
+    /// (adr/2026-08-filter-overlay-ctrl-f.md).
+    pub tags: Vec<String>,
 }
 
 pub struct Index {
@@ -375,6 +379,22 @@ impl Index {
     /// WHERE clause already constrains the column, and re-reading it would
     /// only add an untestable decode branch.
     pub fn table_notes(&self) -> Result<Vec<TableNote>, IndexError> {
+        // tags gathered by a second statement and merged by path — no
+        // GROUP_CONCAT delimiter gamble (adr/2026-08-filter-overlay-ctrl-f.md)
+        let mut tags: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for (path, tag) in query_rows(
+            &self.connection,
+            "SELECT note_path, tag FROM tags ORDER BY note_path, tag",
+            [],
+            |row| {
+                Ok((
+                    PathBuf::from(row.get::<_, String>(0)?),
+                    row.get::<_, String>(1)?,
+                ))
+            },
+        )? {
+            tags.entry(path).or_default().push(tag);
+        }
         query_rows(
             &self.connection,
             concat!(
@@ -392,6 +412,7 @@ impl Index {
                 } else {
                     NoteCategory::Permanent
                 };
+                let tags = tags.remove(&path).unwrap_or_default();
                 Ok(TableNote {
                     id: row.get::<_, String>(0)?,
                     path,
@@ -401,8 +422,20 @@ impl Index {
                         .map(|name| NoteType::from_name(&name)),
                     title: row.get::<_, Option<String>>(3)?,
                     created: row.get::<_, Option<String>>(4)?,
+                    tags,
                 })
             },
+        )
+    }
+
+    /// Every distinct tag in the vault — the filter overlay's tag half
+    /// (adr/2026-08-filter-overlay-ctrl-f.md).
+    pub fn tag_names(&self) -> Result<Vec<String>, IndexError> {
+        query_rows(
+            &self.connection,
+            "SELECT DISTINCT tag FROM tags ORDER BY tag",
+            [],
+            |row| row.get(0),
         )
     }
 
@@ -867,6 +900,69 @@ mod tests {
                 Err(IndexError::Sqlite(_))
             ));
         }
+    }
+
+    #[test]
+    fn table_notes_carry_their_tags_and_tag_names_deduplicate() {
+        let (_dir, mut index) = temp_index();
+        let notes = scan_vault(&fixture_vault()).expect("scan fixture");
+        index.rebuild(&notes).expect("rebuild");
+
+        let rows = index.table_notes().expect("query");
+        let tags_of = |id: &str| {
+            rows.iter()
+                .find(|note| note.id == id)
+                .map(|note| note.tags.clone())
+                .expect("the note is on the table")
+        };
+        assert_eq!(tags_of("zettelkasten"), vec!["method".to_string()]);
+        assert_eq!(tags_of("luhmann"), Vec::<String>::new());
+
+        // "method" appears on two notes and once in the vocabulary
+        assert_eq!(
+            index.tag_names().expect("query"),
+            vec![
+                "book".to_string(),
+                "method".to_string(),
+                "rust".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_queries_report_rows_that_will_not_decode() {
+        // one blob per column read: the merge statement's two, and
+        // tag_names' one
+        for plant in [
+            "INSERT INTO notes (path, category) \
+             VALUES (x'00', 'permanent'); \
+             INSERT INTO tags (note_path, tag) VALUES (x'00', 'ok');",
+            "INSERT INTO notes (path, category) \
+             VALUES ('permanent/a.typ', 'permanent'); \
+             INSERT INTO tags (note_path, tag) \
+             VALUES ('permanent/a.typ', x'00');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(
+                index.table_notes(),
+                Err(IndexError::Sqlite(_))
+            ));
+        }
+        // tag_names decodes only the tag column
+        let (dir, index) = temp_index();
+        let raw = Connection::open(dir.path().join("index.sqlite"))
+            .expect("raw open");
+        raw.execute_batch(
+            "INSERT INTO notes (path, category) \
+             VALUES ('permanent/a.typ', 'permanent'); \
+             INSERT INTO tags (note_path, tag) \
+             VALUES ('permanent/a.typ', x'00');",
+        )
+        .expect("plant the blob row");
+        assert!(matches!(index.tag_names(), Err(IndexError::Sqlite(_))));
     }
 
     #[test]

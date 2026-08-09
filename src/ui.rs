@@ -287,6 +287,17 @@ fn Shell(
     let mut creator_query = use_signal(String::new);
     let mut creator_highlighted = use_signal(|| 0usize);
     let mut creator_notice = use_signal(|| None::<String>);
+
+    // the active filter, and the Ctrl+F overlay that sets it — dims cards,
+    // never drops them (adr/2026-08-filter-overlay-ctrl-f.md)
+    let mut filter = use_signal(|| None::<table::Filter>);
+    let mut filter_picker = use_signal(|| None::<FilterPicker>);
+    let mut filter_query = use_signal(String::new);
+    let mut filter_highlighted = use_signal(|| 0usize);
+    // the Ctrl+O jump overlay (adr/2026-08-jump-ctrl-o-centres-viewport.md)
+    let mut jump = use_signal(|| None::<Jump>);
+    let mut jump_query = use_signal(String::new);
+    let mut jump_highlighted = use_signal(|| 0usize);
     // the uncontrolled textarea only shows a spliced-in link if it remounts,
     // and it remounts when its key changes — keystrokes never touch this
     let mut epoch = use_signal(|| 0u32);
@@ -590,6 +601,7 @@ fn Shell(
                             note_type: Some(picked),
                             title: Some(title.clone()),
                             created: Some(created),
+                            tags: Vec::new(),
                         });
                     });
                     show_sheet.call((id, Editor::open(path)));
@@ -597,6 +609,95 @@ fn Shell(
                 Err(error) => {
                     creator_notice.set(Some(crate::create::notice(&error)));
                 }
+            }
+        }
+    });
+
+    // the filter overlay's opening half: the tag vocabulary frozen at open,
+    // the picker pattern (adr/2026-08-filter-overlay-ctrl-f.md)
+    let open_filter = use_callback({
+        let root = root.clone();
+        move |()| match tag_names(&root) {
+            Ok(tags) => {
+                filter_query.set(String::new());
+                filter_highlighted.set(0);
+                filter_picker.set(Some(FilterPicker {
+                    entries: table::filter_entries(&tags),
+                }));
+            }
+            Err(msg) => editor.write().set_notice(msg),
+        }
+    });
+    // closing hands focus back the palette's way: the pane-focus effect
+    // re-takes the pane, and an active block gets its textarea remounted —
+    // dead chords otherwise
+    let close_filter = use_callback({
+        let pending_caret = pending_caret.clone();
+        move |()| {
+            filter_picker.set(None);
+            if editor.peek().active().is_some() {
+                pending_caret.set(None);
+                epoch += 1;
+            }
+        }
+    });
+    let apply_filter = use_callback(move |chosen: Option<table::Filter>| {
+        filter.set(chosen);
+        close_filter.call(());
+    });
+
+    // the jump overlay's opening half: completions narrowed to notes with
+    // cards — the table never hosts the rest
+    // (adr/2026-08-jump-ctrl-o-centres-viewport.md)
+    let open_jump = use_callback({
+        let root = root.clone();
+        move |()| match completions(&root) {
+            Ok(entries) => {
+                let carded: Vec<links::Completion> = entries
+                    .into_iter()
+                    .filter(|entry| {
+                        table_notes
+                            .peek()
+                            .iter()
+                            .any(|note| note.id == entry.id)
+                    })
+                    .collect();
+                jump_query.set(String::new());
+                jump_highlighted.set(0);
+                jump.set(Some(Jump { entries: carded }));
+            }
+            Err(msg) => editor.write().set_notice(msg),
+        }
+    });
+    let close_jump = use_callback({
+        let pending_caret = pending_caret.clone();
+        move |()| {
+            jump.set(None);
+            if editor.peek().active().is_some() {
+                pending_caret.set(None);
+                epoch += 1;
+            }
+        }
+    });
+    let jump_to = use_callback({
+        let fallback = fallback.clone();
+        move |id: String| {
+            close_jump.call(());
+            // re-derived, so a fallback-slot card jumps to where it stands
+            let placed = table::cards(
+                &table_notes.peek(),
+                &positions.peek(),
+                &mut fallback.borrow_mut(),
+                filter.peek().as_ref(),
+                today,
+            );
+            if let Some(card) = placed.iter().find(|card| card.id == id) {
+                let landed = table::centre_on(
+                    card,
+                    *zoom.peek(),
+                    *viewport.peek(),
+                );
+                pan.set(landed);
             }
         }
     });
@@ -628,10 +729,13 @@ fn Shell(
     });
     let go_logs = use_callback(move |()| {
         // the mirror hygiene: a sheet left open behind the logs would hold
-        // the one editor away from the day the centre pane is showing
+        // the one editor away from the day the centre pane is showing, and
+        // the table's finder overlays would reopen unasked on the way back
         if sheet.peek().is_some() {
             close_sheet.call(());
         }
+        filter_picker.set(None);
+        jump.set(None);
         screen.set(Screen::Logs);
     });
 
@@ -654,11 +758,13 @@ fn Shell(
             let listing = loops_open();
             let summoned = palette.read().is_some();
             let creating = creator.read().is_some();
+            let finding = filter_picker.read().is_some() || jump.read().is_some();
             let handle = pane.borrow().clone();
             if let Some(handle) = handle
                 && (!editing || listing)
                 && !summoned
                 && !creating
+                && !finding
             {
                 // a headless refusal has no one to tell; the caret simply
                 // stays where it was
@@ -851,13 +957,15 @@ fn Shell(
         use_callback(move |(frozen, id): (Palette, palette::CommandId)| {
             let restores = !matches!(
                 id,
-                // the picker and the creator own the focus they just took;
-                // delete replaces the editor wholesale, follow-link's
-                // stale-caret rationale
+                // the picker, the creator and the finders own the focus
+                // they just took; delete replaces the editor wholesale,
+                // follow-link's stale-caret rationale
                 palette::CommandId::InsertLink
                     | palette::CommandId::FollowLink
                     | palette::CommandId::NewNote
                     | palette::CommandId::DeleteNote
+                    | palette::CommandId::FilterCards
+                    | palette::CommandId::JumpToNote
             );
             close_palette.call(restores);
             match id {
@@ -895,6 +1003,8 @@ fn Shell(
                 palette::CommandId::ZoomToTitles => {
                     zoom_to.call(table::Zoom::Titles);
                 }
+                palette::CommandId::FilterCards => open_filter.call(()),
+                palette::CommandId::JumpToNote => open_jump.call(()),
             }
         });
 
@@ -1161,12 +1271,13 @@ fn Shell(
     });
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
-    // reading both signals here is what repaints the table on a drag write
-    // and on a watcher batch alike
+    // reading the signals here is what repaints the table on a drag write,
+    // a watcher batch and a filter change alike
     let placed = table::cards(
         &table_notes.read(),
         &positions.read(),
         &mut fallback.borrow_mut(),
+        filter.read().as_ref(),
         today,
     );
     let day_ids: HashSet<&str> =
@@ -1207,6 +1318,7 @@ fn Shell(
             rsx! {
                 div {
                     class: "card card-{card.kind.as_dir()} {card.bar} raised",
+                    class: if card.dimmed { "dimmed" },
                     style: "left: {left}px; top: {top}px",
                     onmousedown: move |event: MouseEvent| {
                         seed_grab(event, seed.0.clone(), seed.1, seed.2);
@@ -1387,7 +1499,9 @@ fn Shell(
                     && event.modifiers().ctrl()
                     && palette.peek().is_none()
                     && picker.peek().is_none()
-                    && creator.peek().is_none() =>
+                    && creator.peek().is_none()
+                    && filter_picker.peek().is_none()
+                    && jump.peek().is_none() =>
             {
                 // the webview answers a bare Ctrl+P with a print dialog
                 event.prevent_default();
@@ -1400,7 +1514,9 @@ fn Shell(
                     && event.modifiers().ctrl()
                     && creator.peek().is_none()
                     && palette.peek().is_none()
-                    && picker.peek().is_none() =>
+                    && picker.peek().is_none()
+                    && filter_picker.peek().is_none()
+                    && jump.peek().is_none() =>
             {
                 // the webview's own Ctrl+N would open a window
                 event.prevent_default();
@@ -1436,6 +1552,35 @@ fn Shell(
                 event.prevent_default();
                 zoom_to.call(table::Zoom::Titles);
             }
+            // the finders, table-only, guarded like every overlay chord
+            // (adr/2026-08-filter-overlay-ctrl-f.md,
+            // adr/2026-08-jump-ctrl-o-centres-viewport.md)
+            Key::Character(ref character)
+                if character == "f"
+                    && event.modifiers().ctrl()
+                    && filter_picker.peek().is_none()
+                    && jump.peek().is_none()
+                    && palette.peek().is_none()
+                    && creator.peek().is_none()
+                    && picker.peek().is_none() =>
+            {
+                // the webview owns Ctrl+F as find-in-page
+                event.prevent_default();
+                open_filter.call(());
+            }
+            Key::Character(ref character)
+                if character == "o"
+                    && event.modifiers().ctrl()
+                    && jump.peek().is_none()
+                    && filter_picker.peek().is_none()
+                    && palette.peek().is_none()
+                    && creator.peek().is_none()
+                    && picker.peek().is_none() =>
+            {
+                // the webview owns Ctrl+O as an open dialog
+                event.prevent_default();
+                open_jump.call(());
+            }
             _ => {}
         }
     };
@@ -1444,6 +1589,7 @@ fn Shell(
         Chrome {
             screen: screen(),
             loops: loops.read().len(),
+            filter: filter.read().as_ref().map(table::filter_label),
             on_ember: move |_| toggle_loops.call(()),
             on_table: move |_| go_table.call(()),
             on_logs: move |_| go_logs.call(()),
@@ -2011,6 +2157,7 @@ fn Shell(
                             key: "{card.id}",
                             class: "card card-{card.kind.as_dir()} {card.bar}",
                             class: if zoom() == table::Zoom::Bodies { "bodies" },
+                            class: if card.dimmed { "dimmed" },
                             style: "left: {card.x}px; top: {card.y}px",
                             onmousedown: {
                                 let seed = (card.id.clone(), card.x, card.y);
@@ -2076,6 +2223,159 @@ fn Shell(
                         }
                     }
                 }
+                // the finders float in the palette's box, but live inside
+                // the table branch: the screen switch unmounts them and
+                // go_logs clears their state
+                // (adr/2026-08-filter-overlay-ctrl-f.md)
+                {
+                    match filter_picker() {
+                        Some(frozen) => {
+                            let rows: Vec<table::FilterEntry> =
+                                table::filter_rows(&filter_query.read(), &frozen.entries)
+                                    .into_iter()
+                                    .cloned()
+                                    .collect();
+                            let keys_rows = rows.clone();
+                            rsx! {
+                            div { class: "command-palette",
+                                div { class: "palette-head type-label", "filter" }
+                                input {
+                                    class: "picker-query",
+                                    placeholder: "tag or type…",
+                                    onmounted: move |event| async move {
+                                        let _ = event.set_focus(true).await;
+                                    },
+                                    oninput: move |event| {
+                                        filter_query.set(event.value());
+                                        filter_highlighted.set(0);
+                                    },
+                                    onkeydown: move |event: KeyboardEvent| {
+                                        let key = event.key();
+                                        let last = keys_rows.len().saturating_sub(1);
+                                        match key {
+                                            Key::Escape => close_filter.call(()),
+                                            Key::Enter => {
+                                                // an empty query clears the
+                                                // active filter — the
+                                                // re-summon-and-clear gesture
+                                                if filter_query.peek().is_empty() {
+                                                    apply_filter.call(None);
+                                                } else if let Some(entry) = keys_rows.get(filter_highlighted()) {
+                                                    apply_filter.call(Some(entry.filter.clone()));
+                                                }
+                                            }
+                                            Key::ArrowDown => {
+                                                filter_highlighted.set((filter_highlighted() + 1).min(last));
+                                            }
+                                            Key::ArrowUp => {
+                                                filter_highlighted.set(filter_highlighted().saturating_sub(1));
+                                            }
+                                            _ => {}
+                                        }
+                                        if !event.modifiers().ctrl() {
+                                            event.stop_propagation();
+                                        }
+                                    },
+                                }
+                                if rows.is_empty() {
+                                    div { class: "picker-empty", "no matching filter" }
+                                }
+                                for (rank, entry) in rows.into_iter().enumerate() {
+                                    {
+                                        let kind = match entry.filter {
+                                            table::Filter::Tag(_) => "tag",
+                                            table::Filter::Type(_) => "type",
+                                        };
+                                        rsx! {
+                                            div {
+                                                key: "{kind}-{entry.label}",
+                                                class: "picker-row",
+                                                class: if rank == filter_highlighted() { "selected" },
+                                                onclick: {
+                                                    let chosen = entry.filter.clone();
+                                                    move |_| apply_filter.call(Some(chosen.clone()))
+                                                },
+                                                span { class: "picker-id", "{entry.label}" }
+                                                span { class: "picker-title", "{kind}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                        }
+                        None => rsx! {},
+                    }
+                }
+                {
+                    match jump() {
+                        Some(frozen) => {
+                            let rows: Vec<links::Completion> =
+                                links::filter(&frozen.entries, &jump_query.read())
+                                    .into_iter()
+                                    .cloned()
+                                    .collect();
+                            let keys_rows = rows.clone();
+                            rsx! {
+                            div { class: "command-palette",
+                                div { class: "palette-head type-label", "jump" }
+                                input {
+                                    class: "picker-query",
+                                    placeholder: "note…",
+                                    onmounted: move |event| async move {
+                                        let _ = event.set_focus(true).await;
+                                    },
+                                    oninput: move |event| {
+                                        jump_query.set(event.value());
+                                        jump_highlighted.set(0);
+                                    },
+                                    onkeydown: move |event: KeyboardEvent| {
+                                        let key = event.key();
+                                        let last = keys_rows.len().saturating_sub(1);
+                                        match key {
+                                            Key::Escape => close_jump.call(()),
+                                            Key::Enter => {
+                                                if let Some(entry) = keys_rows.get(jump_highlighted()) {
+                                                    jump_to.call(entry.id.clone());
+                                                }
+                                            }
+                                            Key::ArrowDown => {
+                                                jump_highlighted.set((jump_highlighted() + 1).min(last));
+                                            }
+                                            Key::ArrowUp => {
+                                                jump_highlighted.set(jump_highlighted().saturating_sub(1));
+                                            }
+                                            _ => {}
+                                        }
+                                        if !event.modifiers().ctrl() {
+                                            event.stop_propagation();
+                                        }
+                                    },
+                                }
+                                if rows.is_empty() {
+                                    div { class: "picker-empty", "no matching note" }
+                                }
+                                for (rank, entry) in rows.into_iter().enumerate() {
+                                    div {
+                                        key: "{entry.id}",
+                                        class: "picker-row",
+                                        class: if rank == jump_highlighted() { "selected" },
+                                        onclick: {
+                                            let id = entry.id.clone();
+                                            move |_| jump_to.call(id.clone())
+                                        },
+                                        span { class: "picker-id", "{entry.id}" }
+                                        if let Some(title) = entry.title {
+                                            span { class: "picker-title", "{title}" }
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                        }
+                        None => rsx! {},
+                    }
+                }
             }
         }
     }
@@ -2130,6 +2430,7 @@ fn point(event: &MouseEvent, scale: f64) -> (f64, f64) {
 fn Chrome(
     screen: Screen,
     loops: usize,
+    filter: Option<String>,
     on_ember: EventHandler<()>,
     on_table: EventHandler<()>,
     on_logs: EventHandler<()>,
@@ -2156,6 +2457,12 @@ fn Chrome(
                 line { x1: "1.5", y1: "5.5", x2: "12.5", y2: "5.5", stroke: "currentColor" }
                 line { x1: "4.5", y1: "1", x2: "4.5", y2: "3.5", stroke: "currentColor" }
                 line { x1: "9.5", y1: "1", x2: "9.5", y2: "3.5", stroke: "currentColor" }
+            }
+            // the active filter, named: the map reads differently under
+            // one, and the chrome must say why
+            // (adr/2026-08-filter-overlay-ctrl-f.md)
+            if let Some(label) = filter {
+                span { class: "filter-label", "{label}" }
             }
             if loops > 0 {
                 span {
@@ -2405,6 +2712,28 @@ struct Palette {
 struct Creator {
     picked: Option<NoteType>,
     caret: Option<usize>,
+}
+
+/// The open filter overlay's fixed half: its vocabulary — every tag, then
+/// the eight types — frozen at open (adr/2026-08-filter-overlay-ctrl-f.md).
+#[derive(Clone, PartialEq)]
+struct FilterPicker {
+    entries: Vec<table::FilterEntry>,
+}
+
+/// The open jump overlay's fixed half — the `Picker` idiom without an
+/// anchor (adr/2026-08-jump-ctrl-o-centres-viewport.md).
+#[derive(Clone, PartialEq)]
+struct Jump {
+    entries: Vec<links::Completion>,
+}
+
+/// Every tag the filter can offer, read at the moment the overlay opens —
+/// the `completions` pattern.
+fn tag_names(root: &Path) -> Result<Vec<String>, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("filter: {err:?}"))?;
+    index.tag_names().map_err(|err| format!("filter: {err:?}"))
 }
 
 /// Everything the picker can offer, read at the moment it opens.
@@ -3807,7 +4136,7 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         // the raised card is now alpha's, on alpha's slot; beta went back
         assert!(
-            html.contains(r#"raised" style="left: 32px; top: 32px""#),
+            html.contains(r#"raised " style="left: 32px; top: 32px""#),
             "the sheets swapped: {html}"
         );
         assert!(html.contains(">beta</div>"), "{html}");
@@ -3857,7 +4186,7 @@ mod tests {
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(r#"raised" style="left: 608px; top: 32px""#),
+            html.contains(r#"raised " style="left: 608px; top: 32px""#),
             "gamma's sheet stayed put: {html}"
         );
     }
@@ -5884,6 +6213,321 @@ mod tests {
         assert!(html.contains("link-picker"), "{html}");
     }
 
+    // -- findability: the filter and the jump ---------------------------------
+
+    #[test]
+    fn ctrl_f_applies_the_highlighted_filter_and_dims_the_rest() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            tagged_note("beta", "method"),
+        )
+        .expect("the tagged note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let (input, filter_keys) = open_overlay(&mut dom, keys, ctrl_f());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">filter<"), "the head names it: {html}");
+        assert_eq!(
+            picker_ids(&dom).len(),
+            9,
+            "one tag, then the eight types: {html}"
+        );
+        // arrows move the highlight; an unhandled key is absorbed; a
+        // second Ctrl+F over the open overlay is inert
+        press(&mut dom, filter_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, filter_keys, Key::ArrowUp, Modifiers::empty());
+        press(
+            &mut dom,
+            filter_keys,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
+        press(&mut dom, filter_keys, ctrl_f(), Modifiers::CONTROL);
+        assert_eq!(picker_ids(&dom).len(), 9, "still the one overlay");
+
+        // a query no entry matches: enter guesses nothing, the overlay holds
+        type_into(&mut dom, input, "xyzzy");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching filter"), "{html}");
+        press(&mut dom, filter_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(">filter<"));
+
+        type_into(&mut dom, input, "method");
+        press(&mut dom, filter_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">filter<"), "the overlay closed: {html}");
+        assert!(
+            html.contains(r#"class="filter-label">tag · method<"#),
+            "the chrome names the filter: {html}"
+        );
+        // beta keeps its ink; everything else dims but stays drawn
+        assert!(html.contains(">beta</div>"), "{html}");
+        assert!(html.contains(">alpha</div>"), "{html}");
+        let dimmed = html.matches("dimmed").count();
+        assert_eq!(dimmed, 3, "alpha, the capture and the generated: {html}");
+        assert!(
+            !html
+                .split(">beta</div>")
+                .next()
+                .is_some_and(|before| before
+                    .rsplit("card card-")
+                    .next()
+                    .is_some_and(|card| card.contains("dimmed"))),
+            "beta itself is not dimmed: {html}"
+        );
+    }
+
+    #[test]
+    fn escape_leaves_the_filter_unchanged_and_empty_enter_clears_it() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            tagged_note("beta", "method"),
+        )
+        .expect("the tagged note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // apply the tag filter through a row click
+        let mutations =
+            press_for_mutations(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
+        let rows = listeners(&mutations, "click");
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        click(&mut dom, rows[0]);
+        assert!(dioxus_ssr::render(&dom).contains("filter-label"));
+
+        // escape leaves it standing
+        let (_, filter_keys) = open_overlay(&mut dom, keys, ctrl_f());
+        press(&mut dom, filter_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("filter-label"), "unchanged: {html}");
+        assert!(html.contains("dimmed"), "{html}");
+
+        // the re-summon-and-clear gesture: enter on an empty query
+        let (_, filter_keys) = open_overlay(&mut dom, keys, ctrl_f());
+        press(&mut dom, filter_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("filter-label"), "cleared: {html}");
+        assert!(!html.contains("dimmed"), "{html}");
+    }
+
+    #[test]
+    fn the_screen_switch_clears_an_open_finder() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_overlay(&mut dom, keys, ctrl_f());
+        assert!(dioxus_ssr::render(&dom).contains(">filter<"));
+
+        click(&mut dom, clicks[CHROME_LOGS]);
+        click(&mut dom, clicks[CHROME_TABLE]);
+        assert!(
+            !dioxus_ssr::render(&dom).contains(">filter<"),
+            "no overlay waits behind a screen"
+        );
+    }
+
+    #[test]
+    fn ctrl_o_jump_pans_the_card_to_centre_at_the_current_zoom() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
+        assert!(dioxus_ssr::render(&dom).contains(">jump<"));
+        type_into(&mut dom, input, "alpha");
+        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">jump<"), "the overlay closed: {html}");
+        // alpha's slot (32, 32): pan = (640−120, 400−60)
+        assert!(
+            html.contains("translate(520px, 340px)"),
+            "centred at titles zoom: {html}"
+        );
+
+        // the same jump at body zoom centres in canvas units
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
+        type_into(&mut dom, input, "alpha");
+        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("scale(3)"), "no zoom change: {html}");
+        assert!(
+            html.contains("translate(93.333") && html.contains(", 73.333"),
+            "centre/s − card centre: {html}"
+        );
+    }
+
+    #[test]
+    fn jump_offers_only_notes_with_cards() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
+        assert_eq!(
+            picker_ids(&dom),
+            vec!["alpha", "capture-idea", "digest"],
+            "time notes have no card to jump to"
+        );
+        // a time id finds nothing, and enter over nothing goes nowhere
+        type_into(&mut dom, input, "2026");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching note"), "{html}");
+        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(">jump<"), "still open");
+        // arrows and stray keys are absorbed like every overlay's
+        press(&mut dom, jump_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, jump_keys, Key::ArrowUp, Modifiers::empty());
+        press(
+            &mut dom,
+            jump_keys,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, keys, ctrl_o(), Modifiers::CONTROL);
+        press(&mut dom, jump_keys, ctrl_o(), Modifiers::CONTROL);
+        assert!(dioxus_ssr::render(&dom).contains(">jump<"));
+    }
+
+    #[test]
+    fn clicking_a_jump_row_jumps_too() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let mutations =
+            press_for_mutations(&mut dom, keys, ctrl_o(), Modifiers::CONTROL);
+        let rows = listeners(&mutations, "click");
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        // alpha is the first row
+        click(&mut dom, rows[0]);
+        assert!(
+            dioxus_ssr::render(&dom).contains("translate(520px, 340px)")
+        );
+    }
+
+    #[test]
+    fn a_finder_over_a_broken_index_reports_instead_of_opening() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // the tags table alone vanishes: the open succeeds, the query fails
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE tags")
+            .expect("the sabotage succeeds");
+        press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
+        assert!(!dioxus_ssr::render(&dom).contains(">filter<"));
+
+        // the database gone entirely: both finders decline to open
+        replace_database_with_a_directory(vault.path());
+        press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
+        press(&mut dom, keys, ctrl_o(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">filter<"), "{html}");
+        assert!(!html.contains(">jump<"), "{html}");
+    }
+
+    #[test]
+    fn a_jump_whose_card_left_meanwhile_pans_nowhere() {
+        let vault = temp_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
+        type_into(&mut dom, input, "alpha");
+
+        // the card leaves while the overlay holds its frozen entries
+        std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
+            .expect("the note is deleted");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Removed(PathBuf::from(
+                "permanent/alpha.typ",
+            ))],
+        );
+        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">jump<"), "the overlay still closed: {html}");
+        assert!(
+            html.contains("translate(0px, 0px)"),
+            "nowhere to pan to: {html}"
+        );
+    }
+
+    #[test]
+    fn escape_over_a_block_remounts_the_textarea_for_the_finders() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, _) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let blocks = listeners(&opened, "click");
+        let (_, block_keys) = activate_block(&mut dom, blocks[1]);
+        *caret.lock().expect("the probe cell never poisons") = Some(0);
+
+        // the filter, opened over the active block, escapes back into it
+        let (_, filter_keys) = open_overlay(&mut dom, block_keys, ctrl_f());
+        let mutations = press_for_mutations(
+            &mut dom,
+            filter_keys,
+            Key::Escape,
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains("block-active"));
+        // the escape remounted the textarea: the old keydown target is
+        // dead, the mutations carry the live one
+        let block_keys = listeners(&mutations, "keydown")[0];
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+
+        // and the jump the same way
+        let (_, jump_keys) = open_overlay(&mut dom, block_keys, ctrl_o());
+        let mutations = press_for_mutations(
+            &mut dom,
+            jump_keys,
+            Key::Escape,
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains("block-active"));
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+    }
+
+    #[test]
+    fn the_palette_runs_the_finders() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "filter cards");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">filter<"), "the overlay opened: {html}");
+
+        // the screen round trip clears it; then the jump runs the same way
+        click(&mut dom, clicks[CHROME_LOGS]);
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "jump");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(">jump<"));
+    }
+
     // -- semantic zoom: titles ⇄ bodies ---------------------------------------
 
     /// The zoom chords, spelled once.
@@ -7079,6 +7723,29 @@ mod tests {
         Key::Character("n".into())
     }
 
+    /// The finder chords, spelled once.
+    fn ctrl_f() -> Key {
+        Key::Character("f".into())
+    }
+    fn ctrl_o() -> Key {
+        Key::Character("o".into())
+    }
+
+    /// Opens whichever overlay the chord summons and returns its input's
+    /// (input, keydown) targets — `open_palette`, generalized.
+    fn open_overlay(
+        dom: &mut VirtualDom,
+        keys: ElementId,
+        chord: Key,
+    ) -> (ElementId, ElementId) {
+        let mutations =
+            press_for_mutations(dom, keys, chord, Modifiers::CONTROL);
+        let inputs = listeners(&mutations, "input");
+        let keydowns = listeners(&mutations, "keydown");
+        mount(dom, listeners(&mutations, "mounted")[0]);
+        (inputs[0], keydowns[0])
+    }
+
     /// Opens the create overlay with Ctrl+N and returns its input's (input,
     /// keydown) targets — `open_palette` for the third overlay. The input
     /// is controlled and survives the step transition, so these targets
@@ -7406,6 +8073,17 @@ mod tests {
         )
     }
 
+    /// A permanent note carrying one tag, for the filter tests.
+    fn tagged_note(id: &str, tag: &str) -> String {
+        format!(
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"{id}\", type: \"idea\", created: \"2026-07-01\", \
+             tags: (\"{tag}\",))\n\
+             \n= {id}\n"
+        )
+    }
+
     /// A resize whose observer answers nothing: every backing method keeps
     /// its NotSupported default — the refusal branch the onresize handler
     /// absorbs by keeping the current viewport.
@@ -7588,7 +8266,10 @@ mod tests {
             unreachable!("the shell never listens for this event")
         }
 
-        fn convert_resize_data(&self, event: &PlatformEventData) -> ResizeData {
+        fn convert_resize_data(
+            &self,
+            event: &PlatformEventData,
+        ) -> ResizeData {
             // two backings, the mounted converter's idiom: the serialized
             // size, or a bare observer whose refusal the handler absorbs
             match event.downcast::<SerializedResizeData>() {

@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use note_system::render::{
-    BodyCache, FragmentCache, RenderError, RenderTheme, VaultWorld,
-    render_svg,
+    BodyCache, FragmentCache, RenderError, RenderTheme, VaultWorld, render_svg,
 };
 use typst::World;
 use typst::diag::FileError;
@@ -444,7 +443,11 @@ fn an_unreadable_note_caches_its_error_until_invalidated() {
     // the error entry is served without rereading: the note appearing on
     // disk changes nothing until the watcher invalidates it
     write_note(&vault, "absent", NOTE_A);
-    assert!(cache.render(vault.path(), note, RenderTheme::Paper).is_err());
+    assert!(
+        cache
+            .render(vault.path(), note, RenderTheme::Paper)
+            .is_err()
+    );
     cache.invalidate(note);
     assert!(cache.render(vault.path(), note, RenderTheme::Paper).is_ok());
 }

@@ -25,6 +25,8 @@ pub enum CommandId {
     DeleteNote,
     ZoomToBodies,
     ZoomToTitles,
+    FilterCards,
+    JumpToNote,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -40,7 +42,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 15] = [
+pub const COMMANDS: [Command; 17] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -118,6 +120,16 @@ pub const COMMANDS: [Command; 15] = [
         label: "zoom to titles",
         chord: Some("ctrl+-"),
     },
+    Command {
+        id: CommandId::FilterCards,
+        label: "filter cards",
+        chord: Some("ctrl+f"),
+    },
+    Command {
+        id: CommandId::JumpToNote,
+        label: "jump to note",
+        chord: Some("ctrl+o"),
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
@@ -164,6 +176,8 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::DeleteNote => context.sheet_open,
         CommandId::ZoomToBodies => context.on_table && !context.at_bodies,
         CommandId::ZoomToTitles => context.on_table && context.at_bodies,
+        // the finders act on cards, which only the table shows
+        CommandId::FilterCards | CommandId::JumpToNote => context.on_table,
         _ => true,
     }
 }
@@ -231,6 +245,8 @@ mod tests {
                     *label != "go to logs"
                         && *label != "delete note"
                         && !label.starts_with("zoom")
+                        && *label != "filter cards"
+                        && *label != "jump to note"
                 })
                 .collect::<Vec<_>>()
         );
@@ -239,9 +255,17 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 6);
+        assert_eq!(visible.len(), COMMANDS.len() - 8);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
+    }
+
+    #[test]
+    fn the_finders_hide_off_the_table() {
+        assert_eq!(labels(&filter("filter", READING)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("jump", READING)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("filter", AT_TABLE)), vec!["filter cards"]);
+        assert_eq!(labels(&filter("jump", AT_TABLE)), vec!["jump to note"]);
     }
 
     #[test]
@@ -291,6 +315,8 @@ mod tests {
                 "ctrl+n",
                 "ctrl+=",
                 "ctrl+-",
+                "ctrl+f",
+                "ctrl+o",
             ]
         );
         let chordless: Vec<&str> = COMMANDS

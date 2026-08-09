@@ -129,6 +129,15 @@ body {
   color: var(--ink-bright);
 }
 
+/* the active filter's name, the type-label vocabulary
+   (adr/2026-08-filter-overlay-ctrl-f.md) */
+.filter-label {
+  font: 600 12px ui-monospace, monospace;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
 .ember {
   margin-left: auto;
   font: 16px Lato, sans-serif;
@@ -671,6 +680,12 @@ body {
 
 .card.bar-project {
   border-left-color: var(--type-project);
+}
+
+/* filtered out: dim, never gone — spatial memory is the point
+   (adr/2026-08-filter-overlay-ctrl-f.md); opacity, not a colour */
+.card.dimmed {
+  opacity: 0.25;
 }
 
 /* capture: dimmer fill, grey bar, muted title — second-class until promoted */

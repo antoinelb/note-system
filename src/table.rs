@@ -30,6 +30,9 @@ pub struct Card {
     /// The 3px bar's CSS class, one of a closed set — never minted from a
     /// type name, so an unknown type cannot invent a class no variable backs.
     pub bar: &'static str,
+    /// Filtered out: the card dims, never disappears — spatial memory is
+    /// the point (adr/2026-08-filter-overlay-ctrl-f.md).
+    pub dimmed: bool,
     pub x: f64,
     pub y: f64,
 }
@@ -62,11 +65,13 @@ impl Fallback {
 
 /// Resolve every table note against the store. Unplaced notes take a
 /// session-stable slot near the origin — dumb and honest until phase 8
-/// places them (roadmap-v1.md § Phase 2).
+/// places them (roadmap-v1.md § Phase 2). A filter dims, never drops
+/// (adr/2026-08-filter-overlay-ctrl-f.md).
 pub fn cards(
     notes: &[TableNote],
     positions: &Positions,
     fallback: &mut Fallback,
+    filter: Option<&Filter>,
     today: Date,
 ) -> Vec<Card> {
     notes
@@ -83,11 +88,90 @@ pub fn cards(
                 label: label(kind, note, today),
                 kind,
                 bar: bar_class(kind, note),
+                dimmed: filter.is_some_and(|filter| !matches(note, filter)),
                 x,
                 y,
             }
         })
         .collect()
+}
+
+/// One active filter — at most one at a time: applying replaces the last
+/// (adr/2026-08-filter-overlay-ctrl-f.md).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Filter {
+    Tag(String),
+    Type(NoteType),
+}
+
+/// The chrome's label for the active filter: the map reads differently
+/// under one, and the chrome must say why.
+pub fn filter_label(filter: &Filter) -> String {
+    match filter {
+        Filter::Tag(tag) => format!("tag · {tag}"),
+        Filter::Type(note_type) => {
+            format!("type · {}", note_type.as_name())
+        }
+    }
+}
+
+/// Whether the note survives the filter. Matching keys on the note's own
+/// meta, not the presented kind: a type filter dims captures, generated
+/// and the untyped too — they are not the type asked for.
+fn matches(note: &TableNote, filter: &Filter) -> bool {
+    match filter {
+        Filter::Tag(tag) => note.tags.iter().any(|own| own == tag),
+        Filter::Type(wanted) => note.note_type.as_ref() == Some(wanted),
+    }
+}
+
+/// One row the filter overlay offers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterEntry {
+    pub label: String,
+    pub filter: Filter,
+}
+
+/// The overlay's full vocabulary: every tag, then the eight permanent
+/// types — a closed list an empty query shows whole.
+pub fn filter_entries(tags: &[String]) -> Vec<FilterEntry> {
+    tags.iter()
+        .map(|tag| FilterEntry {
+            label: tag.clone(),
+            filter: Filter::Tag(tag.clone()),
+        })
+        .chain(crate::create::TYPES.iter().map(|note_type| FilterEntry {
+            label: note_type.as_name().to_string(),
+            filter: Filter::Type(note_type.clone()),
+        }))
+        .collect()
+}
+
+/// The rows a query leaves — the palette's contains rule.
+pub fn filter_rows<'entries>(
+    query: &str,
+    entries: &'entries [FilterEntry],
+) -> Vec<&'entries FilterEntry> {
+    let needle = query.to_lowercase();
+    entries
+        .iter()
+        .filter(|entry| entry.label.to_lowercase().contains(&needle))
+        .collect()
+}
+
+/// The pan that puts a card's nominal centre at the viewport centre at
+/// this zoom: pan = centre/s − card_centre
+/// (adr/2026-08-jump-ctrl-o-centres-viewport.md).
+pub fn centre_on(
+    card: &Card,
+    zoom: Zoom,
+    viewport: (f64, f64),
+) -> (f64, f64) {
+    let scale = zoom.scale();
+    (
+        viewport.0 / 2.0 / scale - (card.x + CARD_WIDTH / 2.0),
+        viewport.1 / 2.0 / scale - (card.y + TETHER_DROP),
+    )
 }
 
 /// The kind the card is drawn as. Presentation keys on the type: a capture
@@ -394,6 +478,7 @@ mod tests {
             note_type: None,
             title: None,
             created: None,
+            tags: Vec::new(),
         }
     }
 
@@ -426,6 +511,7 @@ mod tests {
                 &[typed("a", note_type)],
                 &empty_positions(),
                 &mut Fallback::default(),
+                None,
                 TODAY,
             );
             assert_eq!(drawn[0].bar, expected, "for type {name}");
@@ -442,6 +528,7 @@ mod tests {
             &[untyped, unknown, time_scale],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!(drawn[0].bar, "bar-untyped");
@@ -463,6 +550,7 @@ mod tests {
             &[fresh, old],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!(drawn[0].label, "capture · 0 d");
@@ -479,6 +567,7 @@ mod tests {
             &[dateless, garbled],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!(drawn[0].label, "capture");
@@ -493,6 +582,7 @@ mod tests {
             &[tomorrow],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!(drawn[0].label, "capture · 0 d");
@@ -504,6 +594,7 @@ mod tests {
             &[note("a", NoteCategory::Generated)],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!(drawn[0].label, "generated");
@@ -520,6 +611,7 @@ mod tests {
             &[titled, bare],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!(drawn[0].title, "A real title");
@@ -536,6 +628,7 @@ mod tests {
             &[note("a", NoteCategory::Permanent)],
             &positions,
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         assert_eq!((drawn[0].x, drawn[0].y), (340.0, -120.5));
@@ -548,7 +641,7 @@ mod tests {
             .map(|id| note(id, NoteCategory::Permanent))
             .collect();
         let drawn =
-            cards(&notes, &empty_positions(), &mut Fallback::default(), TODAY);
+            cards(&notes, &empty_positions(), &mut Fallback::default(), None, TODAY);
         let slots: Vec<(f64, f64)> =
             drawn.iter().map(|card| (card.x, card.y)).collect();
         assert_eq!(
@@ -565,7 +658,7 @@ mod tests {
         // deterministic: the same input stacks identically again
         assert_eq!(
             drawn,
-            cards(&notes, &empty_positions(), &mut Fallback::default(), TODAY)
+            cards(&notes, &empty_positions(), &mut Fallback::default(), None, TODAY)
         );
     }
 
@@ -576,14 +669,14 @@ mod tests {
             note("a", NoteCategory::Permanent),
             note("b", NoteCategory::Permanent),
         ];
-        let before = cards(&notes, &empty_positions(), &mut fallback, TODAY);
+        let before = cards(&notes, &empty_positions(), &mut fallback, None, TODAY);
         assert_eq!((before[1].x, before[1].y), (224.0, 32.0));
 
         // a gets dragged somewhere real; b must not compact into its slot
         let dir = tempfile::tempdir().expect("create tempdir");
         let mut positions = Positions::load(&dir.path().join("positions"));
         positions.set("a", 900.0, 900.0);
-        let after = cards(&notes, &positions, &mut fallback, TODAY);
+        let after = cards(&notes, &positions, &mut fallback, None, TODAY);
         assert_eq!((after[0].x, after[0].y), (900.0, 900.0));
         assert_eq!(
             (after[1].x, after[1].y),
@@ -658,6 +751,7 @@ mod tests {
             &[promoted],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         // the one kind switch carries the label, the bar and (through
@@ -676,6 +770,7 @@ mod tests {
             &[garbled],
             &empty_positions(),
             &mut Fallback::default(),
+            None,
             TODAY,
         );
         // an unrecognized type is not a promotion — the age stays visible debt
@@ -692,6 +787,112 @@ mod tests {
         assert!(!is_click((10.0, 10.0), (10.0, 15.0)));
     }
 
+    #[test]
+    fn a_tag_filter_dims_the_cards_without_that_tag() {
+        let mut tagged = typed("a", NoteType::Concept);
+        tagged.tags = vec!["method".to_string()];
+        let plain = typed("b", NoteType::Concept);
+        let filter = Filter::Tag("method".to_string());
+        let drawn = cards(
+            &[tagged, plain],
+            &empty_positions(),
+            &mut Fallback::default(),
+            Some(&filter),
+            TODAY,
+        );
+        assert!(!drawn[0].dimmed);
+        assert!(drawn[1].dimmed, "no tag, dimmed — but still drawn");
+    }
+
+    #[test]
+    fn a_type_filter_dims_captures_and_the_untyped_too() {
+        let wanted = typed("a", NoteType::Concept);
+        let other = typed("b", NoteType::Idea);
+        let untyped = note("c", NoteCategory::Permanent);
+        let capture = note("d", NoteCategory::Capture);
+        let generated = note("e", NoteCategory::Generated);
+        let filter = Filter::Type(NoteType::Concept);
+        let drawn = cards(
+            &[wanted, other, untyped, capture, generated],
+            &empty_positions(),
+            &mut Fallback::default(),
+            Some(&filter),
+            TODAY,
+        );
+        let dimmed: Vec<bool> =
+            drawn.iter().map(|card| card.dimmed).collect();
+        assert_eq!(dimmed, vec![false, true, true, true, true]);
+    }
+
+    #[test]
+    fn no_filter_dims_nothing() {
+        let drawn = cards(
+            &[note("a", NoteCategory::Permanent)],
+            &empty_positions(),
+            &mut Fallback::default(),
+            None,
+            TODAY,
+        );
+        assert!(!drawn[0].dimmed);
+    }
+
+    #[test]
+    fn filter_entries_list_every_tag_then_the_eight_types() {
+        let entries = filter_entries(&[
+            "method".to_string(),
+            "zettel".to_string(),
+        ]);
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries[0].label, "method");
+        assert_eq!(
+            entries[0].filter,
+            Filter::Tag("method".to_string())
+        );
+        assert_eq!(entries[2].label, "person");
+        assert_eq!(entries[2].filter, Filter::Type(NoteType::Person));
+        assert_eq!(entries[9].filter, Filter::Type(NoteType::Project));
+    }
+
+    #[test]
+    fn the_filter_query_narrows_tags_and_types_together() {
+        let entries = filter_entries(&["personnel".to_string()]);
+        let rows: Vec<&str> = filter_rows("PERSON", &entries)
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
+        // the tag and both matching types, ignoring case
+        assert_eq!(rows, vec!["personnel", "person", "personal"]);
+        assert_eq!(filter_rows("xyzzy", &entries), Vec::<&FilterEntry>::new());
+    }
+
+    #[test]
+    fn filter_label_names_its_kind() {
+        assert_eq!(
+            filter_label(&Filter::Tag("method".to_string())),
+            "tag · method"
+        );
+        assert_eq!(
+            filter_label(&Filter::Type(NoteType::Concept)),
+            "type · concept"
+        );
+    }
+
+    #[test]
+    fn centre_on_puts_the_card_centre_mid_viewport_at_both_zooms() {
+        let card = placed_card("a", 32.0, 32.0);
+        let vp = (1280.0, 800.0);
+        // titles: pan = centre − card centre (88 + 32, 28 + 32)
+        assert_eq!(
+            centre_on(&card, Zoom::Titles, vp),
+            (640.0 - 120.0, 400.0 - 60.0)
+        );
+        // bodies: the viewport centre lives at centre/s in canvas units
+        assert_eq!(
+            centre_on(&card, Zoom::Bodies, vp),
+            (640.0 / 3.0 - 120.0, 400.0 / 3.0 - 60.0)
+        );
+    }
+
     fn placed_card(id: &str, x: f64, y: f64) -> Card {
         Card {
             id: id.to_string(),
@@ -700,6 +901,7 @@ mod tests {
             label: "concept".to_string(),
             kind: NoteCategory::Permanent,
             bar: "bar-concept",
+            dimmed: false,
             x,
             y,
         }
@@ -838,7 +1040,7 @@ mod tests {
             note("a", NoteCategory::Permanent),
             note("b", NoteCategory::Permanent),
         ];
-        let drawn = cards(&notes, &positions, &mut Fallback::default(), TODAY);
+        let drawn = cards(&notes, &positions, &mut Fallback::default(), None, TODAY);
         // b is the first unplaced note, so it takes the grid's first slot
         assert_eq!((drawn[1].x, drawn[1].y), (32.0, 32.0));
     }

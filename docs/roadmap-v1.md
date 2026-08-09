@@ -122,10 +122,10 @@ Exit: toggling zoom over the fixture vault's densest cluster shows no visible ja
 
 Goal: any card in seconds — filter by tag and type, jump by name.
 
-- [ ] Filters by tag and by type; filtered-out cards **dim, not disappear** — spatial memory is the point, and holes would break the map.
-  - [ ] The summoning keystroke and the overlay's shape (link-picker pattern again). **→ ADR**
-- [ ] Jump-to-note: search over ids and titles (the v0 phase-9 autocomplete query), pan/zoom the viewport to the card.
-- [ ] Tests: the dimmed set matches the query, jump resolves and centres.
+- [x] Filters by tag and by type; filtered-out cards **dim, not disappear** — spatial memory is the point, and holes would break the map; the active filter names itself in the chrome.
+  - [x] The summoning keystroke (Ctrl+F) and the overlay's shape (one query over tags + the eight types; empty-Enter clears). **→ ADR** (`adr/2026-08-filter-overlay-ctrl-f.md`)
+- [x] Jump-to-note: Ctrl+O, search over ids and titles (the v0 phase-9 autocomplete query restricted to carded notes), pan the viewport to centre the card at the current zoom (`adr/2026-08-jump-ctrl-o-centres-viewport.md`).
+- [x] Tests: the dimmed set matches the query, jump resolves and centres.
 
 Exit: tag, type and name each reach any card without panning by hand.
 
@@ -148,7 +148,7 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 - [x] Canvas with persistent positions that survive index rebuilds (phases 1–2)
 - [x] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
 - [x] Tethered writing sheet on card click, dimmed table behind it (phase 3)
-- [ ] Tag & type filters, type colours, jump-to-note (phases 2, 7)
+- [x] Tag & type filters, type colours, jump-to-note (phases 2, 7)
 - [ ] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)
 - [x] Capture/generated visual treatment; `generated` type defined (phase 2)
 - [x] Permanent-note CRUD in the app; the vault grows without leaving it (phases 3–4)
