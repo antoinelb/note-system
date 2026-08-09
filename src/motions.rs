@@ -693,6 +693,71 @@ pub fn blank_prefix(body: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Where / lands and n and N walk: the pattern's occurrences over the
+/// visible lines — a match cannot straddle blocks or hide in a separator —
+/// with wrap-around, smartcase (an all-lowercase pattern matches any case,
+/// a capital anywhere makes it exact), and accents exact
+/// (adr/2026-08-search-lands-through-place.md).
+pub fn search(
+    text: &str,
+    lines: &Lines,
+    from: usize,
+    pattern: &str,
+    forward: bool,
+) -> Option<usize> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let smart = pattern.chars().all(|ch| !ch.is_uppercase());
+    let hits: Vec<usize> = (0..lines.rows())
+        .flat_map(|row| {
+            let line = lines.row(row);
+            let slice = text.get(line.clone()).unwrap_or_default();
+            slice
+                .char_indices()
+                .filter(|(offset, _)| {
+                    matches_at(slice, *offset, pattern, smart)
+                })
+                .map(|(offset, _)| line.start + offset)
+                .collect::<Vec<usize>>()
+        })
+        .collect();
+    if forward {
+        hits.iter()
+            .find(|&&hit| hit > from)
+            .or_else(|| hits.first())
+            .copied()
+    } else {
+        hits.iter()
+            .rev()
+            .find(|&&hit| hit < from)
+            .or_else(|| hits.last())
+            .copied()
+    }
+}
+
+/// Whether the pattern matches at this offset, char by char — folding the
+/// candidate's case when the pattern asked for smartcase.
+fn matches_at(slice: &str, offset: usize, pattern: &str, smart: bool) -> bool {
+    let candidate = slice.get(offset..).unwrap_or_default();
+    let mut wanted = pattern.chars();
+    let mut have = candidate.chars();
+    for expected in wanted.by_ref() {
+        let Some(found) = have.next() else {
+            return false;
+        };
+        let matched = if smart {
+            found.to_lowercase().eq(expected.to_lowercase())
+        } else {
+            found == expected
+        };
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
 /// What , repeats: the last find, the other way — public because the
 /// operator grammar normalizes , into the find it reverses.
 pub fn reverse(kind: FindKind) -> FindKind {
@@ -1042,6 +1107,27 @@ mod tests {
             object(text, &parsed, 12, ObjectKind::Quote('`'), false),
             Some(12..19),
         );
+    }
+
+    #[test]
+    fn search_walks_matches_with_wrap_and_smartcase() {
+        let text = "Un café.\n\nEncore un Café noir.\n";
+        let lines = table(text);
+        // smartcase: a lowercase pattern matches both cafés
+        let first = search(text, &lines, 0, "café", true);
+        assert_eq!(first, Some(3));
+        let second = search(text, &lines, 3, "café", true);
+        assert_eq!(second, Some(21));
+        // wrap-around forward and back
+        assert_eq!(search(text, &lines, 21, "café", true), Some(3));
+        assert_eq!(search(text, &lines, 3, "café", false), Some(21));
+        // a capital makes it exact
+        assert_eq!(search(text, &lines, 0, "Café", true), Some(21));
+        // no match, empty pattern: nothing
+        assert_eq!(search(text, &lines, 0, "thé", true), None);
+        assert_eq!(search(text, &lines, 0, "", true), None);
+        // a pattern longer than the line's tail cannot match past it
+        assert_eq!(search(text, &lines, 0, "noir.x", true), None);
     }
 
     #[test]

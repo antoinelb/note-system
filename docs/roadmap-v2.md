@@ -7,7 +7,7 @@ The seam this version fills was architected in v0 phase 5 and has held since: "t
 One editor serves every surface — the logs centre pane and the writing sheet mount the same machinery (`adr/2026-08-sheet-reuses-the-one-editor.md`) — so each phase below lands everywhere at once.
 **"Implemented incrementally as needed" is the design, not a disclaimer** (`plan.md` § Roadmap): every phase leaves the editor daily-drivable, and the *not in v2* list at the bottom is the ceiling — a key earns its way in through daily friction, never through completeness.
 
-**Next step → phase 5; or the v0/v1 polish backlogs.**
+**v2 is complete. Next → v3 (`plan.md` § Roadmap), or the polish backlogs.**
 
 ## How we work
 
@@ -91,10 +91,10 @@ Exit: v e d reads like the sentence it is.
 
 Goal: the finishing grammar — . and u and / are what make it vim rather than modal arrow keys.
 
-- [ ] Undo born at vim grain: one insert session or one change = one undo step, behind u and Ctrl+R — the editor's first undo, phase 0 having shipped without one (`adr/2026-08-no-stopgap-undo-in-phase-0.md`). **→ ADR**
-- [ ] `.` repeats the last change — operator applications and insert sessions replay.
-- [ ] / search within the note, n N to walk matches: a match may live in a rendered block, so landing activates it and places the caret — the offset-walking cousin of Ctrl+Enter's `links::link_at`.
-- [ ] Tests: undo grain over insert sessions and operators, dot after each change class, search landing across block boundaries.
+- [x] Undo born at vim grain: one insert session or one change = one undo step, behind u and Ctrl+R — the editor's first undo, whole-note snapshots per change intent (`adr/2026-08-undo-at-vim-grain.md`).
+- [x] `.` repeats the last change — operator applications, shorthands, pastes and insert sessions replay semantically; `[count].` overrides.
+- [x] / search within the note with smartcase and wrap-around, n N to walk matches: the landing is `Editor::place_at`, so a hit in a rendered block activates it (`adr/2026-08-search-lands-through-place.md`).
+- [x] Tests: undo grain over insert sessions and operators, dot after each change class, search landing across block boundaries.
 
 Exit: u undoes what one intent did, . repeats it, / finds it.
 
@@ -105,8 +105,8 @@ Anything above earns its way in through daily friction, queued in the polish bac
 
 ## v2 exit criteria (from `plan.md`)
 
-- [ ] The modal keymap sits between the widget and `Editor`, inserted without rewriting either — the invariant held from v0 phase 5 to its payoff (`plan.md` § Editor)
-- [ ] The owned-caret widget retired the textarea, and the v0 polish-backlog item with it; composition, clipboard and selection survived the move (phase 0; undo arrives with phase 5, `adr/2026-08-no-stopgap-undo-in-phase-0.md`)
-- [ ] Normal, insert and visual modes; note-scoped motions; operators and text objects; vim-grain undo, dot repeat, in-note search (phases 1–5)
-- [ ] `make test` green with 100% coverage; every note still compiles with vanilla typst (`make check-vault`)
-- [ ] The ceiling held: nothing shipped in v2 beyond this list
+- [x] The modal keymap sits between the widget and `Editor`, inserted without rewriting either — the invariant held from v0 phase 5 to its payoff (`plan.md` § Editor; `src/vim.rs` is the slot filled)
+- [x] The owned-caret widget retired the textarea, and the v0 polish-backlog item with it; composition, clipboard and selection survived the move (phase 0; undo arrived with phase 5, `adr/2026-08-no-stopgap-undo-in-phase-0.md`)
+- [x] Normal, insert and visual modes; note-scoped motions; operators and text objects; vim-grain undo, dot repeat, in-note search (phases 1–5)
+- [x] `make test` green with 100% coverage; every note still compiles with vanilla typst (`make check-vault`)
+- [x] The ceiling held: nothing shipped in v2 beyond this list

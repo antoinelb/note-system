@@ -21,8 +21,25 @@ pub struct Editor {
     /// The column a run of vertical moves holds through short lines,
     /// counted in grapheme clusters; any other move forgets it.
     goal: Option<usize>,
+    /// Vim-grain undo: whole-note snapshots, one per change intent —
+    /// checkpointed by the grammar, never per keystroke
+    /// (adr/2026-08-undo-at-vim-grain.md). Dies with the editor, so each
+    /// open note carries its own history.
+    history: Vec<Snapshot>,
+    undone: Vec<Snapshot>,
     notice: Option<String>,
 }
+
+/// One undo step: the whole note and where the caret stood — notes are
+/// small, and whole-text snapshots make undo trivially correct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Snapshot {
+    text: String,
+    head: usize,
+}
+
+/// A runaway grammar cannot eat the memory: the oldest steps fall off.
+const UNDO_DEPTH: usize = 100;
 
 /// The caret both ends of a selection describe: `head` is where it blinks
 /// and moves, `anchor` where the selection began. Collapsed when equal.
@@ -68,7 +85,8 @@ impl Editor {
         match Buffer::open(file.clone()) {
             Ok(note) => {
                 let blocks = blocks::segment(note.text());
-                let end = note.text().len();
+                let text = note.text().to_string();
+                let end = text.len();
                 Editor {
                     // an open note always has its cursor somewhere: the
                     // last block wakes active with the caret on its last
@@ -80,6 +98,12 @@ impl Editor {
                         anchor: end,
                         head: end,
                     },
+                    // the opened file is the first undo step: even a
+                    // session that never leaves insert can fall back to it
+                    history: vec![Snapshot {
+                        text: text.clone(),
+                        head: end,
+                    }],
                     ..Editor::default()
                 }
             }
@@ -302,6 +326,84 @@ impl Editor {
             head: end,
         };
         self.goal = None;
+    }
+
+    /// One change intent begins: the grammar checkpoints the state it is
+    /// about to change — before an operator's splice, once on entering
+    /// insert — never per keystroke (adr/2026-08-undo-at-vim-grain.md).
+    pub fn checkpoint(&mut self) {
+        let Some((_, text)) = self.note() else { return };
+        if self
+            .history
+            .last()
+            .is_some_and(|snapshot| snapshot.text == text)
+        {
+            return;
+        }
+        self.history.push(Snapshot {
+            text: text.to_string(),
+            head: self.caret.head,
+        });
+        if self.history.len() > UNDO_DEPTH {
+            self.history.remove(0);
+        }
+        self.undone.clear();
+    }
+
+    /// u: back one change intent. Checkpoints equal to the present are
+    /// stepped over, so an entered-then-abandoned insert session costs no
+    /// press.
+    pub fn undo(&mut self) {
+        let Some((_, current)) = self.note() else {
+            return;
+        };
+        let current = current.to_string();
+        let stale = self
+            .history
+            .iter()
+            .rev()
+            .take_while(|snapshot| snapshot.text == current)
+            .count();
+        self.history.truncate(self.history.len() - stale);
+        let Some(previous) = self.history.pop() else {
+            return;
+        };
+        self.undone.push(Snapshot {
+            text: current,
+            head: self.caret.head,
+        });
+        self.restore(previous);
+    }
+
+    /// Ctrl+R: forward again, until a new change intent clears the path.
+    pub fn redo(&mut self) {
+        let Some(next) = self.undone.pop() else {
+            return;
+        };
+        let Some((_, current)) = self.note() else {
+            return;
+        };
+        self.history.push(Snapshot {
+            text: current.to_string(),
+            head: self.caret.head,
+        });
+        self.restore(next);
+    }
+
+    /// The whole note becomes the snapshot: splice, resegment, wake the
+    /// caret's block — deactivation's mechanism, like every cross-block
+    /// change (adr/2026-08-editor-splice-cross-block.md). Undo and redo
+    /// proved the buffer is there, and a whole-range splice cannot refuse.
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.buffer = self.buffer.take().map(|mut note| {
+            let whole = 0..note.text().len();
+            let _ = note.replace_range(whole, &snapshot.text);
+            note
+        });
+        self.blocks = blocks::segment(&snapshot.text);
+        self.active = (!self.blocks.is_empty())
+            .then(|| blocks::block_at(&self.blocks, snapshot.head));
+        self.place(floor_boundary(&snapshot.text, snapshot.head));
     }
 
     /// p and P once the clipboard answered: `motions::paste_spec` decides
@@ -1353,6 +1455,109 @@ mod tests {
         assert_eq!(editor.active(), None, "nothing to activate");
         editor.deactivate();
         assert_eq!(editor.notice(), None, "nothing to save");
+    }
+
+    #[test]
+    fn undo_walks_change_intents_and_redo_returns() {
+        let (_dir, mut editor) = open_note("un\n");
+        editor.activate(0);
+        // intent one: type at the end
+        editor.checkpoint();
+        editor.place_at(2);
+        editor.insert_at_caret(" mot");
+        // intent two: another burst
+        editor.checkpoint();
+        editor.insert_at_caret(" bleu");
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un mot bleu\n");
+
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un mot\n", "one intent, one step");
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un\n", "back to the opened file");
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un\n", "the bottom holds");
+
+        editor.redo();
+        editor.redo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un mot bleu\n");
+        editor.redo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un mot bleu\n", "the top holds");
+
+        // a new intent clears the redo path
+        editor.undo();
+        editor.checkpoint();
+        editor.insert_at_caret("!");
+        editor.redo();
+        let (_, text) = editor.note().expect("open");
+        assert!(text.contains('!'), "redo found nothing to redo: {text}");
+    }
+
+    #[test]
+    fn abandoned_checkpoints_cost_no_press() {
+        let (_dir, mut editor) = open_note("un\n");
+        editor.activate(0);
+        editor.insert_at_caret("x");
+        // three entered-then-abandoned sessions checkpoint the same state
+        editor.checkpoint();
+        editor.checkpoint();
+        editor.checkpoint();
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un\n", "one press, straight past the noise");
+    }
+
+    #[test]
+    fn undo_restores_across_blocks_and_survives_the_edges() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[0].range.start);
+        editor.checkpoint();
+        editor.splice(0..NOTE.len(), "", 0);
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "");
+
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, NOTE, "the whole note came back");
+        assert!(editor.active().is_some(), "with a block awake");
+
+        // closed editors absorb everything
+        let mut closed = Editor::closed();
+        closed.checkpoint();
+        closed.undo();
+        closed.redo();
+        assert_eq!(closed.note(), None);
+
+        // a redo whose note vanished mid-flight declines
+        let (_dir, mut editor) = open_note("un\n");
+        editor.activate(0);
+        editor.checkpoint();
+        editor.insert_at_caret("x");
+        editor.undo();
+        editor.buffer = None;
+        editor.redo();
+        assert_eq!(editor.note(), None);
+    }
+
+    #[test]
+    fn the_history_depth_is_bounded() {
+        let (_dir, mut editor) = open_note("0\n");
+        editor.activate(0);
+        for step in 1..=120u32 {
+            editor.checkpoint();
+            editor.select_all();
+            editor.insert_at_caret(&format!("{step}\n"));
+        }
+        for _ in 0..200 {
+            editor.undo();
+        }
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "20\n", "the oldest steps fell off a hundred deep");
     }
 
     #[test]

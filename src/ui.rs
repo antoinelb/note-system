@@ -309,6 +309,10 @@ fn Shell(
     // and absent from the buffer until compositionend commits it
     // (adr/2026-08-hidden-ime-sink.md)
     let mut preview = use_signal(|| None::<String>);
+    // the one-line / prompt (adr/2026-08-search-lands-through-place.md):
+    // open-or-not plus its moving query, the overlay split as ever
+    let mut search_prompt = use_signal(|| false);
+    let mut search_query = use_signal(String::new);
     // a drag in flight, and whether a hit probe is already out — plain
     // cells, like QuitFlush: only the mouse handlers read them
     let dragging = use_hook(|| Rc::new(std::cell::Cell::new(false)));
@@ -767,7 +771,8 @@ fn Shell(
                 || creator.read().is_some()
                 || picker.read().is_some()
                 || filter_picker.read().is_some()
-                || jump.read().is_some();
+                || jump.read().is_some()
+                || search_prompt();
             let target = if editing && !listing {
                 sink.borrow().clone()
             } else {
@@ -1059,6 +1064,13 @@ fn Shell(
                     }
                     vim::Act::SwapEnds => {
                         editor.write().swap_ends();
+                    }
+                    vim::Act::Checkpoint => editor.write().checkpoint(),
+                    vim::Act::Undo => editor.write().undo(),
+                    vim::Act::Redo => editor.write().redo(),
+                    vim::Act::OpenSearch => {
+                        search_query.set(String::new());
+                        search_prompt.set(true);
                     }
                     // the one async act: read the clipboard, then the
                     // editor decides pure against the state the read found
@@ -1448,6 +1460,65 @@ fn Shell(
             None => rsx! {},
         }
     };
+    // the / prompt, the picker's little sibling: one input, Enter commits
+    // the pattern and jumps as n would, Escape backs out
+    // (adr/2026-08-search-lands-through-place.md)
+    let search_view = move || -> Element {
+        if !search_prompt() {
+            return rsx! {};
+        }
+        rsx! {
+            div { class: "link-picker",
+                input {
+                    class: "picker-query",
+                    placeholder: "/",
+                    onmounted: move |event| async move {
+                        let _ = event.set_focus(true).await;
+                    },
+                    oninput: move |event| search_query.set(event.value()),
+                    onkeydown: move |event: KeyboardEvent| {
+                        match event.key() {
+                            Key::Escape => search_prompt.set(false),
+                            Key::Enter => {
+                                let pattern = search_query.peek().clone();
+                                search_prompt.set(false);
+                                vim.write().commit_search(pattern);
+                                // the first jump is n's, synthesized
+                                let outcome = {
+                                    let snapshot = editor.peek();
+                                    snapshot.note().zip(snapshot.caret()).map_or(
+                                        vim::Outcome::Pass,
+                                        |((_, note_text), at)| {
+                                            vim.write().handle(
+                                                &Key::Character("n".to_string()),
+                                                Modifiers::empty(),
+                                                &vim::View {
+                                                    text: note_text,
+                                                    blocks: snapshot.blocks(),
+                                                    head: at.head,
+                                                    anchor: at.anchor,
+                                                },
+                                            )
+                                        },
+                                    )
+                                };
+                                if let vim::Outcome::Acts(acts) = outcome {
+                                    apply_vim.call(acts);
+                                }
+                            }
+                            _ => {}
+                        }
+                        // the prompt owns every plain key while it is
+                        // open; the ctrl chords still bubble
+                        if !event.modifiers().ctrl() {
+                            event.stop_propagation();
+                        }
+                    },
+                }
+            }
+        }
+    };
+
     // the palette's rows, cloned out the same way; which commands exist at
     // all was decided at open (adr/2026-08-palette-birth-command-list.md)
     let open_palette = palette().map(|frozen| {
@@ -2048,6 +2119,8 @@ fn Shell(
                         }
                     }
                     {picker_view()}
+                        {search_view()}
+                    {search_view()}
                     // the ember's destination: what the count is made of, and
                     // nothing else — no ages, no grouping, no per-item actions
                     // (adr/2026-07-debt-counter-then-list.md)
@@ -5156,6 +5229,182 @@ mod tests {
             !dioxus_ssr::render(&dom).contains(r#"class="sel""#),
             "and the selection collapsed"
         );
+    }
+
+    #[test]
+    fn u_undoes_one_intent_and_ctrl_r_returns_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        // one insert session is one intent
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        type_keys(&mut dom, sink, "songe ");
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        assert!(source_of(&dom).contains("songe"));
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("u".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(source_of(&dom), before, "one press undid the session");
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("r".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(
+            source_of(&dom).contains("songe"),
+            "ctrl+r brought it back: {}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn the_dot_repeats_through_the_widget() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // normal on the heading's first line, x then . . — three cuts
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let woken = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let sink = listeners(&woken, "keydown")[0];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character(".".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character(".".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            source_of(&dom).starts_with("port"),
+            "three cuts off #import: {}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn slash_searches_and_lands_in_a_rendered_block() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // / opens the one-line prompt over the active heading
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("/".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"placeholder="/""#), "{html}");
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+
+        // the pattern lives in the rendered preamble: enter jumps there,
+        // waking the block (adr/2026-08-search-lands-through-place.md)
+        type_into(&mut dom, prompt_input, "templates");
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"placeholder="/""#), "the prompt closed");
+        assert!(
+            source_of(&dom).contains("#import"),
+            "the preamble woke as source: {}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_search_prompt_untouched() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("/".into()),
+            Modifiers::empty(),
+        );
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        // the theme chord still answers over the open prompt
+        press(
+            &mut dom,
+            prompt_keys,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"data-theme="light""#));
+
+        press(&mut dom, prompt_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"placeholder="/""#), "{html}");
+        assert_eq!(source_of(&dom), before, "nothing moved");
+
+        // n walks on afterwards from the grammar's stored pattern — with
+        // none committed it stays quietly put
+        press(
+            &mut dom,
+            sink,
+            Key::Character("n".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(source_of(&dom), before);
+
+        // a committed pattern the note lacks jumps nowhere either
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("/".into()),
+            Modifiers::empty(),
+        );
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        type_into(&mut dom, prompt_input, "zzz");
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        assert_eq!(source_of(&dom), before);
     }
 
     #[test]

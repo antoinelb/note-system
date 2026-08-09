@@ -48,7 +48,7 @@ pub struct View<'a> {
 /// The editor-wide modal state, one signal beside the editor's: boundary
 /// slides and fresh activations keep the mode — and the pending grammar —
 /// you were in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Vim {
     pub mode: Mode,
     /// Digits swallowed before any operator; 0 means none.
@@ -64,6 +64,65 @@ pub struct Vim {
     goal: Option<usize>,
     /// What ; repeats and , reverses.
     last_find: Option<(FindKind, char)>,
+    /// What . replays: the last change, recorded semantically
+    /// (adr/2026-08-undo-at-vim-grain.md).
+    last_change: Option<Change>,
+    /// Where the open insert session began — what Escape captures as the
+    /// session's typed text.
+    insert_from: Option<usize>,
+    /// What n walks and N walks backward — the committed / pattern.
+    search: Option<String>,
+}
+
+/// One recorded change, semantic rather than keystrokes: . resolves it
+/// again at the caret it finds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Change {
+    Operate {
+        op: Operator,
+        noun: Noun,
+        count: usize,
+        /// What a c-change's insert session typed, captured at Escape.
+        typed: String,
+    },
+    Cut {
+        forward: bool,
+        count: usize,
+    },
+    Replace {
+        ch: char,
+        count: usize,
+    },
+    Toggle {
+        count: usize,
+    },
+    Paste {
+        before: bool,
+        count: usize,
+    },
+    Insert {
+        entry: InsertEntry,
+        typed: String,
+    },
+}
+
+/// An operator's recorded noun.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Noun {
+    Motion(Motion),
+    Object { kind: ObjectKind, around: bool },
+    Lines,
+}
+
+/// The six insert entries, recorded for replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InsertEntry {
+    Before,
+    After,
+    FirstNonBlank,
+    LineEnd,
+    Below,
+    Above,
 }
 
 /// The three verbs (adr/2026-08-one-register-the-clipboard.md).
@@ -107,11 +166,23 @@ pub enum Act {
     },
     /// p and P: async by nature — the executor reads the clipboard, then
     /// `paste_spec` decides pure.
-    Paste { before: bool, count: usize },
+    Paste {
+        before: bool,
+        count: usize,
+    },
     /// Visual's motion: the head moves, the anchor holds.
     Extend(usize),
     /// o in visual: the caret jumps to the selection's other end.
     SwapEnds,
+    /// One change intent begins: the editor snapshots itself
+    /// (adr/2026-08-undo-at-vim-grain.md).
+    Checkpoint,
+    /// u and Ctrl+R.
+    Undo,
+    Redo,
+    /// / — the widget opens its one-line prompt
+    /// (adr/2026-08-search-lands-through-place.md).
+    OpenSearch,
 }
 
 /// What the grammar decided about one keystroke.
@@ -147,6 +218,15 @@ impl Vim {
         view: &View,
     ) -> Outcome {
         if modifiers.ctrl() || modifiers.meta() {
+            // the one ctrl carve-out: redo, which no palette chord uses
+            // (adr/2026-08-undo-at-vim-grain.md)
+            if self.mode == Mode::Normal
+                && modifiers.ctrl()
+                && !modifiers.meta()
+                && *key == Key::Character("r".to_string())
+            {
+                return Outcome::Acts(vec![Act::Redo]);
+            }
             return Outcome::Pass;
         }
         match self.mode {
@@ -164,6 +244,24 @@ impl Vim {
             return Outcome::Pass;
         }
         self.mode = Mode::Normal;
+        // the session's typed text, for the dot to replay — empty when
+        // the caret wandered backward past its start
+        if let Some(from) = self.insert_from.take() {
+            let typed = view
+                .text
+                .get(from..view.head)
+                .unwrap_or_default()
+                .to_string();
+            match &mut self.last_change {
+                Some(Change::Insert { typed: slot, .. }) => *slot = typed,
+                Some(Change::Operate {
+                    op: Operator::Change,
+                    typed: slot,
+                    ..
+                }) => *slot = typed,
+                _ => {}
+            }
+        }
         let line = Lines::of(view.text, view.blocks).around(view.head);
         let target = if view.head > line.start {
             caret::prev_cluster(view.text, view.head).max(line.start)
@@ -256,35 +354,31 @@ impl Vim {
             "G" => self.run_motion(Motion::LastLine, view),
             ";" => self.run_motion(Motion::RepeatFind, view),
             "," => self.run_motion(Motion::RepeatFindBack, view),
-            "i" => self.enter_insert(vec![]),
-            // append: after the cluster under the caret, never past the
-            // line's end
-            "a" => {
-                let target =
-                    caret::next_cluster(view.text, view.head).min(line.end);
-                self.enter_insert(vec![Act::Place(target)])
-            }
+            "i" => self.begin_insert(InsertEntry::Before, view, &line),
+            "a" => self.begin_insert(InsertEntry::After, view, &line),
             "I" if self.operator.is_none() => {
-                self.enter_insert(vec![Act::Place(motions::first_non_blank(
-                    view.text, &line,
-                ))])
+                self.begin_insert(InsertEntry::FirstNonBlank, view, &line)
             }
             "A" if self.operator.is_none() => {
-                self.enter_insert(vec![Act::Place(line.end)])
+                self.begin_insert(InsertEntry::LineEnd, view, &line)
             }
-            // open a line below: a newline at the line's end, the caret
-            // riding past it onto the fresh line
-            "o" if self.operator.is_none() => self.enter_insert(vec![
-                Act::Place(line.end),
-                Act::Type("\n".to_string()),
-            ]),
-            // open a line above: a newline at the line's start, the caret
-            // stepping back onto the fresh line before it
-            "O" if self.operator.is_none() => self.enter_insert(vec![
-                Act::Place(line.start),
-                Act::Type("\n".to_string()),
-                Act::Place(line.start),
-            ]),
+            "o" if self.operator.is_none() => {
+                self.begin_insert(InsertEntry::Below, view, &line)
+            }
+            "O" if self.operator.is_none() => {
+                self.begin_insert(InsertEntry::Above, view, &line)
+            }
+            "u" if self.operator.is_none() => {
+                self.reset();
+                Outcome::Acts(vec![Act::Undo])
+            }
+            "." if self.operator.is_none() => self.repeat(view),
+            "/" if self.operator.is_none() => {
+                self.reset();
+                Outcome::Acts(vec![Act::OpenSearch])
+            }
+            "n" if self.operator.is_none() => self.search_jump(true, view),
+            "N" if self.operator.is_none() => self.search_jump(false, view),
             // see the span before choosing the verb
             "v" if self.operator.is_none() => {
                 self.reset();
@@ -528,6 +622,14 @@ impl Vim {
         let first = lines.row_of(view.head);
         let last = (first + total - 1).min(lines.rows() - 1);
         let span = motions::linewise_span(&lines, first, last);
+        if op != Operator::Yank {
+            self.record(Change::Operate {
+                op,
+                noun: Noun::Lines,
+                count: total,
+                typed: String::new(),
+            });
+        }
         self.finish_operator(op, span, true, view)
     }
 
@@ -622,6 +724,14 @@ impl Vim {
             self.reset();
             return Outcome::Swallow;
         };
+        if op != Operator::Yank {
+            self.record(Change::Operate {
+                op,
+                noun: Noun::Motion(motion),
+                count: total,
+                typed: String::new(),
+            });
+        }
         match span_kind(motion) {
             SpanKind::Linewise => {
                 let first = lines.row_of(view.head.min(target));
@@ -661,6 +771,14 @@ impl Vim {
         {
             Some(span) => {
                 let linewise = matches!(kind, ObjectKind::Block);
+                if op != Operator::Yank {
+                    self.record(Change::Operate {
+                        op,
+                        noun: Noun::Object { kind, around },
+                        count: 1,
+                        typed: String::new(),
+                    });
+                }
                 self.finish_operator(op, span, linewise, view)
             }
             None => {
@@ -690,6 +808,11 @@ impl Vim {
             yanked.push('\n');
         }
         let mut acts = Vec::new();
+        // a change intent begins here — yank changes nothing and
+        // checkpoints nothing (adr/2026-08-undo-at-vim-grain.md)
+        if op != Operator::Yank {
+            acts.push(Act::Checkpoint);
+        }
         // a charwise nothing yanks nothing; a linewise nothing is still a
         // line and its newline reaches the register, as vim's dd does
         if !yanked.is_empty() {
@@ -728,6 +851,8 @@ impl Vim {
                     span
                 };
                 let caret = span.start;
+                // the session's typed text starts here, for the dot
+                self.insert_from = Some(caret);
                 acts.push(Act::Splice {
                     span,
                     text: String::new(),
@@ -768,7 +893,12 @@ impl Vim {
         } else {
             span.start
         };
+        self.record(Change::Cut {
+            forward,
+            count: total,
+        });
         Outcome::Acts(vec![
+            Act::Checkpoint,
             Act::SetClipboard(cut),
             Act::Splice {
                 span,
@@ -805,11 +935,18 @@ impl Vim {
         }
         let text: String = (0..total).map(|_| wanted).collect();
         let caret = view.head + (total - 1) * wanted.len_utf8();
-        Outcome::Acts(vec![Act::Splice {
-            span: view.head..end,
-            text,
-            caret,
-        }])
+        self.record(Change::Replace {
+            ch: wanted,
+            count: total,
+        });
+        Outcome::Acts(vec![
+            Act::Checkpoint,
+            Act::Splice {
+                span: view.head..end,
+                text,
+                caret,
+            },
+        ])
     }
 
     /// ~: flip the case of [count] clusters and step past them.
@@ -841,26 +978,220 @@ impl Vim {
         } else {
             end
         };
-        Outcome::Acts(vec![Act::Splice {
-            span,
-            text: flipped,
-            caret,
-        }])
+        self.record(Change::Toggle { count: total });
+        Outcome::Acts(vec![
+            Act::Checkpoint,
+            Act::Splice {
+                span,
+                text: flipped,
+                caret,
+            },
+        ])
     }
 
     fn paste(&mut self, before: bool) -> Outcome {
         let total = self.count.max(1) as usize;
         self.reset();
-        Outcome::Acts(vec![Act::Paste {
+        self.record(Change::Paste {
             before,
             count: total,
-        }])
+        });
+        Outcome::Acts(vec![
+            Act::Checkpoint,
+            Act::Paste {
+                before,
+                count: total,
+            },
+        ])
     }
 
-    fn enter_insert(&mut self, acts: Vec<Act>) -> Outcome {
+    /// One insert entry: the landing acts, the checkpoint, the recording
+    /// for the dot, and where the session's typing will begin.
+    fn begin_insert(
+        &mut self,
+        entry: InsertEntry,
+        view: &View,
+        line: &Range<usize>,
+    ) -> Outcome {
         self.mode = Mode::Insert;
         self.reset();
+        let (mut acts, from) = entry_acts(view, line, entry);
+        acts.insert(0, Act::Checkpoint);
+        self.insert_from = Some(from);
+        self.last_change = Some(Change::Insert {
+            entry,
+            typed: String::new(),
+        });
         Outcome::Acts(acts)
+    }
+
+    /// n and N: the committed pattern's next occurrence, wrap-around; the
+    /// landing activates whichever block holds it
+    /// (adr/2026-08-search-lands-through-place.md).
+    fn search_jump(&mut self, forward: bool, view: &View) -> Outcome {
+        self.reset();
+        let Some(pattern) = self.search.clone() else {
+            return Outcome::Swallow;
+        };
+        let lines = Lines::of(view.text, view.blocks);
+        match motions::search(view.text, &lines, view.head, &pattern, forward)
+        {
+            Some(hit) => Outcome::Acts(vec![Act::Place(hit)]),
+            None => Outcome::Swallow,
+        }
+    }
+
+    /// The prompt's Enter: the pattern commits, and the first jump is the
+    /// n the widget synthesizes right after.
+    pub fn commit_search(&mut self, pattern: String) {
+        if !pattern.is_empty() {
+            self.search = Some(pattern);
+        }
+    }
+
+    /// . — the recorded change, resolved again at the caret it finds; a
+    /// count ahead of the dot overrides the recorded one, as vim's does.
+    fn repeat(&mut self, view: &View) -> Outcome {
+        let Some(change) = self.last_change.clone() else {
+            self.reset();
+            return Outcome::Swallow;
+        };
+        let over = (self.count > 0).then_some(self.count as usize);
+        self.count = 0;
+        let line = Lines::of(view.text, view.blocks).around(view.head);
+        match change {
+            Change::Operate {
+                op,
+                noun,
+                count,
+                typed,
+            } => self.repeat_operate(
+                op,
+                noun,
+                over.unwrap_or(count),
+                typed,
+                view,
+            ),
+            Change::Cut { forward, count } => {
+                self.count = over.unwrap_or(count) as u32;
+                self.cut_clusters(view, &line, forward)
+            }
+            Change::Replace { ch, count } => {
+                self.count = over.unwrap_or(count) as u32;
+                self.replace_clusters(&ch.to_string(), view)
+            }
+            Change::Toggle { count } => {
+                self.count = over.unwrap_or(count) as u32;
+                self.toggle_case(view, &line)
+            }
+            Change::Paste { before, count } => Outcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Paste {
+                    before,
+                    count: over.unwrap_or(count),
+                },
+            ]),
+            Change::Insert { entry, typed } => {
+                self.replay_insert(entry, &typed, view, &line)
+            }
+        }
+    }
+
+    /// Replaying an operator: motions and lines re-resolve through their
+    /// own paths; a change-verb replay applies its recorded text and stays
+    /// in normal — the dot never opens an insert session.
+    fn repeat_operate(
+        &mut self,
+        op: Operator,
+        noun: Noun,
+        count: usize,
+        typed: String,
+        view: &View,
+    ) -> Outcome {
+        let outcome = match noun {
+            Noun::Motion(motion) => {
+                self.count2 = count as u32;
+                self.operator = Some(op);
+                self.operator_motion(op, motion, view)
+            }
+            Noun::Lines => {
+                self.count = count as u32;
+                self.current_lines(op, view)
+            }
+            Noun::Object { kind, around } => match motions::object(
+                view.text,
+                view.blocks,
+                view.head,
+                kind,
+                around,
+            ) {
+                Some(span) => {
+                    let linewise = matches!(kind, ObjectKind::Block);
+                    self.record(Change::Operate {
+                        op,
+                        noun,
+                        count,
+                        typed: typed.clone(),
+                    });
+                    self.finish_operator(op, span, linewise, view)
+                }
+                None => {
+                    self.reset();
+                    Outcome::Swallow
+                }
+            },
+        };
+        if op != Operator::Change {
+            return outcome;
+        }
+        self.mode = Mode::Normal;
+        self.insert_from = None;
+        // re-record wholesale so the typed text survives for the next dot
+        // whatever the noun's re-resolution did
+        self.record(Change::Operate {
+            op,
+            noun,
+            count,
+            typed: typed.clone(),
+        });
+        let Outcome::Acts(mut acts) = outcome else {
+            return outcome;
+        };
+        let landing = acts.iter().find_map(|act| match act {
+            Act::Splice { caret, .. } => Some(*caret),
+            _ => None,
+        });
+        if let (Some(at), false) = (landing, typed.is_empty()) {
+            let back = caret::prev_cluster(&typed, typed.len());
+            acts.push(Act::Type(typed));
+            acts.push(Act::Place(at + back));
+        }
+        Outcome::Acts(acts)
+    }
+
+    /// Replaying an insert entry: the same landing, the recorded text,
+    /// the caret resting on its last cluster.
+    fn replay_insert(
+        &mut self,
+        entry: InsertEntry,
+        typed: &str,
+        view: &View,
+        line: &Range<usize>,
+    ) -> Outcome {
+        self.reset();
+        let (mut acts, from) = entry_acts(view, line, entry);
+        acts.insert(0, Act::Checkpoint);
+        if !typed.is_empty() {
+            acts.push(Act::Type(typed.to_string()));
+            acts.push(Act::Place(
+                from + caret::prev_cluster(typed, typed.len()),
+            ));
+        }
+        Outcome::Acts(acts)
+    }
+
+    fn record(&mut self, change: Change) {
+        self.last_change = Some(change);
     }
 
     fn pending(&self) -> bool {
@@ -944,6 +1275,45 @@ fn charwise_delete_caret(
 fn linewise_delete_caret(text: &str, span: &Range<usize>) -> usize {
     let following = text.get(span.end..).unwrap_or_default();
     span.start + motions::blank_prefix(following)
+}
+
+/// One insert entry's landing: the acts that place the caret, and the
+/// offset where the session's typing begins.
+fn entry_acts(
+    view: &View,
+    line: &Range<usize>,
+    entry: InsertEntry,
+) -> (Vec<Act>, usize) {
+    match entry {
+        InsertEntry::Before => (vec![], view.head),
+        // append: after the cluster under the caret, never past the line
+        InsertEntry::After => {
+            let target =
+                caret::next_cluster(view.text, view.head).min(line.end);
+            (vec![Act::Place(target)], target)
+        }
+        InsertEntry::FirstNonBlank => {
+            let target = motions::first_non_blank(view.text, line);
+            (vec![Act::Place(target)], target)
+        }
+        InsertEntry::LineEnd => (vec![Act::Place(line.end)], line.end),
+        // open a line below: a newline at the line's end, the caret
+        // riding past it onto the fresh line
+        InsertEntry::Below => (
+            vec![Act::Place(line.end), Act::Type("\n".to_string())],
+            line.end + 1,
+        ),
+        // open a line above: a newline at the line's start, the caret
+        // stepping back onto the fresh line before it
+        InsertEntry::Above => (
+            vec![
+                Act::Place(line.start),
+                Act::Type("\n".to_string()),
+                Act::Place(line.start),
+            ],
+            line.start,
+        ),
+    }
 }
 
 /// The nouns: word, the quote flavours, the bracket pairs — French
@@ -1096,7 +1466,7 @@ mod tests {
 
         let mut vim = normal();
         assert_eq!(
-            vim.handle(&character("i"), Modifiers::empty(), &sight),
+            stripped(vim.handle(&character("i"), Modifiers::empty(), &sight)),
             Outcome::Acts(vec![]),
             "i writes where the caret stands"
         );
@@ -1104,35 +1474,35 @@ mod tests {
 
         let mut vim = normal();
         assert_eq!(
-            vim.handle(&character("a"), Modifiers::empty(), &sight),
+            stripped(vim.handle(&character("a"), Modifiers::empty(), &sight)),
             Outcome::Acts(vec![Act::Place(35)]),
             "a appends after the é"
         );
 
         let mut vim = normal();
         assert_eq!(
-            vim.handle(&character("I"), Modifiers::empty(), &sight),
+            stripped(vim.handle(&character("I"), Modifiers::empty(), &sight)),
             Outcome::Acts(vec![Act::Place(23)]),
             "I lands on the first non-blank"
         );
 
         let mut vim = normal();
         assert_eq!(
-            vim.handle(&character("A"), Modifiers::empty(), &sight),
+            stripped(vim.handle(&character("A"), Modifiers::empty(), &sight)),
             Outcome::Acts(vec![Act::Place(36)]),
             "A lands at the line's end"
         );
 
         let mut vim = normal();
         assert_eq!(
-            vim.handle(&character("o"), Modifiers::empty(), &sight),
+            stripped(vim.handle(&character("o"), Modifiers::empty(), &sight)),
             Outcome::Acts(vec![Act::Place(36), Act::Type("\n".to_string())]),
             "o opens below"
         );
 
         let mut vim = normal();
         assert_eq!(
-            vim.handle(&character("O"), Modifiers::empty(), &sight),
+            stripped(vim.handle(&character("O"), Modifiers::empty(), &sight)),
             Outcome::Acts(vec![
                 Act::Place(23),
                 Act::Type("\n".to_string()),
@@ -1407,13 +1777,29 @@ mod tests {
 
     // -- phase 3: operators, objects, register, paste ------------------------
 
-    /// The acts of one fed key string, panicking on anything but Acts.
+    /// The acts of one fed key string, panicking on anything but Acts —
+    /// checkpoints stripped, since their emission has its own test.
     fn acts_of(keys: &str, text: &str, head: usize) -> Vec<Act> {
         let parsed = blocks::segment(text);
         let mut vim = normal();
         match feed(&mut vim, keys, &view(text, &parsed, head)) {
-            Outcome::Acts(acts) => acts,
+            Outcome::Acts(acts) => acts
+                .into_iter()
+                .filter(|act| *act != Act::Checkpoint)
+                .collect(),
             other => panic!("{keys}: expected acts, got {other:?}"),
+        }
+    }
+
+    /// An outcome with its checkpoints stripped, for the direct asserts.
+    fn stripped(outcome: Outcome) -> Outcome {
+        match outcome {
+            Outcome::Acts(acts) => Outcome::Acts(
+                acts.into_iter()
+                    .filter(|act| *act != Act::Checkpoint)
+                    .collect(),
+            ),
+            other => other,
         }
     }
 
@@ -1508,7 +1894,7 @@ mod tests {
         let mut vim = normal();
         let outcome = feed(&mut vim, "cw", &view(text, &parsed, 0));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("mot".into()),
                 Act::Splice {
@@ -1554,7 +1940,7 @@ mod tests {
         let mut vim = normal();
         let outcome = feed(&mut vim, "cc", &view(text, &parsed, 5));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("deux\n".into()),
                 Act::Splice {
@@ -1579,7 +1965,7 @@ mod tests {
         let mut vim = normal();
         let outcome = feed(&mut vim, "dd", &view(NOTE, &parsed, 2));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("= l'été\n".into()),
                 Act::Splice {
@@ -1612,7 +1998,7 @@ mod tests {
         let mut vim = normal();
         let outcome = feed(&mut vim, "C", &view(text, &parsed, 3));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café".into()),
                 Act::Splice {
@@ -1817,7 +2203,7 @@ mod tests {
         let mut vim = normal();
         let outcome = feed(&mut vim, "dip", &view(NOTE, &parsed, 25));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("- une idée\n- deux cafés\n".to_string()),
                 Act::Splice {
@@ -1831,7 +2217,7 @@ mod tests {
         let mut vim = normal();
         let outcome = feed(&mut vim, "dap", &view(NOTE, &parsed, 25));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("- une idée\n- deux cafés\n\n".to_string()),
                 Act::Splice {
@@ -1949,7 +2335,7 @@ mod tests {
         feed(&mut vim, "fc", &view(text, &parsed, 0));
         let outcome = feed(&mut vim, "d;", &view(text, &parsed, 3));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café, un c".into()),
                 Act::Splice {
@@ -1964,7 +2350,7 @@ mod tests {
         feed(&mut vim, "fc", &view(text, &parsed, 0));
         let outcome = feed(&mut vim, "d,", &view(text, &parsed, 8));
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café".into()),
                 Act::Splice {
@@ -1980,7 +2366,7 @@ mod tests {
             feed(&mut vim, "dFc", &view(text, &parsed, 8))
         };
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café".into()),
                 Act::Splice {
@@ -2004,7 +2390,7 @@ mod tests {
             feed(&mut vim, "dgg", &view(two, &parsed, 5))
         };
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("une\ndeux\n".into()),
                 Act::Splice {
@@ -2041,7 +2427,7 @@ mod tests {
         let parsed = blocks::segment(text);
         let mut vim = normal();
         assert_eq!(
-            feed(&mut vim, "~", &view(text, &parsed, 0)),
+            stripped(feed(&mut vim, "~", &view(text, &parsed, 0))),
             Outcome::Acts(vec![Act::Splice {
                 span: 0..2,
                 text: "é".into(),
@@ -2115,7 +2501,7 @@ mod tests {
             &spread(text, &parsed, 3, 6),
         );
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café".into()),
                 Act::Splice {
@@ -2137,7 +2523,7 @@ mod tests {
             &spread(text, &parsed, 6, 3),
         );
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café".into()),
                 Act::Splice {
@@ -2169,7 +2555,7 @@ mod tests {
             &spread(text, &parsed, 6, 3),
         );
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("café".into()),
                 Act::Place(3)
@@ -2191,7 +2577,7 @@ mod tests {
             &spread(text, &parsed, 1, 5),
         );
         assert_eq!(
-            outcome,
+            stripped(outcome),
             Outcome::Acts(vec![
                 Act::SetClipboard("une\ndeux\n".into()),
                 Act::Splice {
@@ -2301,7 +2687,7 @@ mod tests {
         let sight = view(NOTE, &parsed, 0);
         let mut vim = normal();
         assert_eq!(
-            feed(&mut vim, "p", &sight),
+            stripped(feed(&mut vim, "p", &sight)),
             Outcome::Acts(vec![Act::Paste {
                 before: false,
                 count: 1
@@ -2309,11 +2695,340 @@ mod tests {
         );
         let mut vim = normal();
         assert_eq!(
-            feed(&mut vim, "3P", &sight),
+            stripped(feed(&mut vim, "3P", &sight)),
             Outcome::Acts(vec![Act::Paste {
                 before: true,
                 count: 3
             }]),
+        );
+    }
+
+    // -- phase 5: undo keys, the dot, search ---------------------------------
+
+    #[test]
+    fn every_change_class_checkpoints_and_nothing_else_does() {
+        let text = "un mot\n";
+        let parsed = blocks::segment(text);
+        let first_act = |keys: &str| -> Option<Act> {
+            let mut vim = normal();
+            match feed(&mut vim, keys, &view(text, &parsed, 0)) {
+                Outcome::Acts(acts) => acts.into_iter().next(),
+                _ => None,
+            }
+        };
+        for keys in ["dw", "cw", "dd", "x", "rz", "~", "p", "i", "o"] {
+            assert_eq!(
+                first_act(keys),
+                Some(Act::Checkpoint),
+                "{keys} begins a change intent"
+            );
+        }
+        for keys in ["yy", "yw", "w", "$"] {
+            assert_ne!(
+                first_act(keys),
+                Some(Act::Checkpoint),
+                "{keys} changes nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn u_and_ctrl_r_reach_the_history() {
+        let parsed = blocks::segment(NOTE);
+        let sight = view(NOTE, &parsed, 0);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "u", &sight),
+            Outcome::Acts(vec![Act::Undo]),
+        );
+        assert_eq!(
+            vim.handle(&character("r"), Modifiers::CONTROL, &sight),
+            Outcome::Acts(vec![Act::Redo]),
+            "the one ctrl carve-out"
+        );
+        // in insert, Ctrl+R passes through like any chord
+        let mut vim = Vim::default();
+        assert_eq!(
+            vim.handle(&character("r"), Modifiers::CONTROL, &sight),
+            Outcome::Pass,
+        );
+    }
+
+    #[test]
+    fn the_dot_replays_each_change_class() {
+        let text = "un mot bleu\n";
+        let parsed = blocks::segment(text);
+        // dd then . — same spans re-resolved at the caret it finds
+        let mut vim = normal();
+        feed(&mut vim, "dd", &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("un mot bleu\n".into()),
+                Act::Splice {
+                    span: 0..12,
+                    text: String::new(),
+                    caret: 0
+                },
+            ]),
+        );
+        // x then 3. — the count ahead of the dot overrides
+        let mut vim = normal();
+        feed(&mut vim, "x", &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, "3.", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("un ".into()),
+                Act::Splice {
+                    span: 0..3,
+                    text: String::new(),
+                    caret: 0
+                },
+            ]),
+        );
+        // r and ~ and p replay too
+        let mut vim = normal();
+        feed(&mut vim, "rz", &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 3))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 3..4,
+                text: "z".into(),
+                caret: 3
+            }]),
+        );
+        let mut vim = normal();
+        feed(&mut vim, "~", &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 3))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 3..4,
+                text: "M".into(),
+                caret: 4
+            }]),
+        );
+        let mut vim = normal();
+        feed(&mut vim, "2p", &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Paste {
+                before: false,
+                count: 2
+            }]),
+        );
+        // an object replays at the new caret
+        let mut vim = normal();
+        feed(&mut vim, "diw", &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 3))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("mot".into()),
+                Act::Splice {
+                    span: 3..6,
+                    text: String::new(),
+                    caret: 3
+                },
+            ]),
+        );
+        // with nothing recorded the dot is inert
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, ".", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+    }
+
+    #[test]
+    fn the_dot_replays_insert_sessions_without_reopening_them() {
+        let text = "un mot\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        // a at 0 → typing begins at 1; the session typed "xy"
+        feed(&mut vim, "a", &view(text, &parsed, 0));
+        assert_eq!(vim.mode, Mode::Insert);
+        // escape captures text[1..3] as the session's text
+        let grown = "uxyn mot\n";
+        let grown_parsed = blocks::segment(grown);
+        vim.handle(
+            &Key::Escape,
+            Modifiers::empty(),
+            &view(grown, &grown_parsed, 3),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+        // the dot replays: land after the cluster, type, rest on the tail
+        let outcome =
+            stripped(feed(&mut vim, ".", &view(grown, &grown_parsed, 4)));
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::Place(5),
+                Act::Type("xy".into()),
+                Act::Place(6),
+            ]),
+        );
+        assert_eq!(vim.mode, Mode::Normal, "the dot never opens a session");
+    }
+
+    #[test]
+    fn the_dot_replays_a_change_with_its_typed_text() {
+        let text = "un mot bleu\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        // cw at 3 deletes "mot" and opens a session at 3
+        feed(&mut vim, "cw", &view(text, &parsed, 3));
+        assert_eq!(vim.mode, Mode::Insert);
+        // the session typed "champ"; escape captures text[3..8]
+        let grown = "un champ bleu\n";
+        let grown_parsed = blocks::segment(grown);
+        vim.handle(
+            &Key::Escape,
+            Modifiers::empty(),
+            &view(grown, &grown_parsed, 8),
+        );
+        // the dot at "bleu" changes it wholesale
+        let outcome =
+            stripped(feed(&mut vim, ".", &view(grown, &grown_parsed, 9)));
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::SetClipboard("bleu".into()),
+                Act::Splice {
+                    span: 9..13,
+                    text: String::new(),
+                    caret: 9
+                },
+                Act::Type("champ".into()),
+                Act::Place(13),
+            ]),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_visual_change_session_closes_without_a_recording() {
+        // visual c sets a session going but records nothing: escape's
+        // capture finds no slot and shrugs
+        let text = "un mot\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        vim.handle(
+            &character("c"),
+            Modifiers::empty(),
+            &spread(text, &parsed, 0, 1),
+        );
+        assert_eq!(vim.mode, Mode::Insert);
+        let outcome = vim.handle(
+            &Key::Escape,
+            Modifiers::empty(),
+            &view("mot\n", &blocks::segment("mot\n"), 0),
+        );
+        assert!(matches!(outcome, Outcome::Acts(_)));
+        assert_eq!(vim.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_dot_whose_noun_finds_nothing_stays_put() {
+        let parsed = blocks::segment(NOTE);
+        // diw recorded, then the dot on the empty last line: no word
+        let mut vim = normal();
+        feed(&mut vim, "diw", &view(NOTE, &parsed, 2));
+        assert_eq!(
+            feed(&mut vim, ".", &view(NOTE, &parsed, NOTE.len())),
+            Outcome::Swallow,
+        );
+        // and the change flavour declines the same way
+        let mut vim = normal();
+        feed(&mut vim, "ciw", &view(NOTE, &parsed, 2));
+        vim.handle(&Key::Escape, Modifiers::empty(), &view(NOTE, &parsed, 2));
+        assert_eq!(
+            feed(&mut vim, ".", &view(NOTE, &parsed, NOTE.len())),
+            Outcome::Swallow,
+        );
+    }
+
+    #[test]
+    fn yank_objects_record_nothing_and_empty_sessions_replay_bare() {
+        let text = "un mot bleu\n";
+        let parsed = blocks::segment(text);
+        // yiw is not a change: the dot after it finds nothing to repeat
+        let mut vim = normal();
+        assert!(matches!(
+            feed(&mut vim, "yiw", &view(text, &parsed, 0)),
+            Outcome::Acts(_)
+        ));
+        assert_eq!(
+            feed(&mut vim, ".", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+        // an abandoned cw replays its cut alone, typing nothing
+        let mut vim = normal();
+        feed(&mut vim, "cw", &view(text, &parsed, 0));
+        vim.handle(&Key::Escape, Modifiers::empty(), &view(text, &parsed, 0));
+        let outcome = stripped(feed(&mut vim, ".", &view(text, &parsed, 3)));
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::SetClipboard("mot".into()),
+                Act::Splice {
+                    span: 3..6,
+                    text: String::new(),
+                    caret: 3
+                },
+            ]),
+        );
+        // and an abandoned i replays as a bare landing
+        let mut vim = normal();
+        feed(&mut vim, "i", &view(text, &parsed, 0));
+        vim.handle(&Key::Escape, Modifiers::empty(), &view(text, &parsed, 0));
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 3))),
+            Outcome::Acts(vec![]),
+        );
+    }
+
+    #[test]
+    fn slash_opens_the_prompt_and_n_walks_the_pattern() {
+        let text = "Un café.\n\nEncore un Café noir.\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "/", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::OpenSearch]),
+        );
+        // n before any commit is inert
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+        vim.commit_search("café".to_string());
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(3)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 3)),
+            Outcome::Acts(vec![Act::Place(21)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "N", &view(text, &parsed, 3)),
+            Outcome::Acts(vec![Act::Place(21)]),
+            "N wraps backward"
+        );
+        // a pattern the note lost fails quietly
+        vim.commit_search("thé".to_string());
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+        // an empty commit changes nothing
+        vim.commit_search(String::new());
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+            "the earlier pattern was thé, still absent"
         );
     }
 
