@@ -52,7 +52,7 @@ vault/
 ```
 
 - Link syntax: `#l("note-id")` — valid typst, compiles standalone. Inserted via hotkey/autocomplete so it's cheap to type.
-- Canvas positions and AI suggestions live in `.index/`, never in note files. Positions live in their own file, separate from the index database, so the database stays disposable and rebuilding it cannot lose them (`adr/2026-07-positions-separate-file.md`).
+- Canvas positions and AI suggestions live in `.index/`, never in note files. Positions live in their own file, separate from the index database, so the database stays disposable and rebuilding it cannot lose them (`adr/2026-07-positions-separate-file.md`); suggestions and their dismissals follow the same rule in their own store (`adr/2026-08-suggestions-own-durable-store.md`).
 - Index is rebuilt by parsing files; file watcher keeps it live.
 
 ## Screens
@@ -109,12 +109,12 @@ Additional soft incentives can be layered later (e.g. counts on the canvas), but
 
 Two separate mechanisms:
 
-1. **In-app**: the app shells out to the `claude` CLI headlessly for tagging and link suggestion over the vault.
+1. **In-app**: the app shells out to the `claude` CLI headlessly for tagging and link suggestion — only on an explicit palette command, never ambiently (`adr/2026-08-suggestions-manual-trigger.md`).
 2. **Vault-as-context**: an MCP server exposing the vault (search, read, link graph) so any Claude Code session can use the notes for projects, study, research.
 
 ### Suggested links — the core friction design
 
-- Suggestions are stored in the sidecar index only. Discovery is free and ambient and never interrupts: dashed edges with a hollow star on the canvas, and — inside a note, on either screen — a single dashed line at the *end of the page* ("proposed · evergreen-notes → this note", with the app's only visible hint, "enter accept · x dismiss").
+- Suggestions are stored in the sidecar, never in note files — in their own durable store beside positions, so index rebuilds cannot lose them or resurrect a dismissal (`adr/2026-08-suggestions-own-durable-store.md`). Discovery is free and ambient and never interrupts: dashed edges with a hollow star on the canvas, and — inside a note, on either screen — a single dashed line at the *end of the page* ("proposed · evergreen-notes → this note", with the app's only visible hint, "enter accept · x dismiss").
 - **Accepting = writing.** No accept button that edits the file for you. While editing a note, a relevant suggestion appears as gray ghost text at the cursor — press Tab to insert the `#l(..)` (code-completion style). You are still the one writing, in your own sentence, at a place you chose.
 - Soft incentive (not requirement) to embed the link in a phrase saying *why* the connection exists — e.g. the ghost text nudges toward sentence context rather than bare link insertion. Exact mechanism TBD during implementation; must not add typing overhead beyond the Tab.
 - Writing a suggested link (by Tab or manually) clears the suggestion; dismissing it clears it too. Un-actioned suggestions accumulate as visible debt.
@@ -150,11 +150,11 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 - Modal keymap between the widget and `Editor`: normal/insert/visual modes, note-scoped motions, operators and text objects, vim-grain undo, dot repeat, in-note search — implemented incrementally as needed, each phase daily-drivable
 - The list is a ceiling like v1's: macros, marks, named registers, visual block and the ex line wait for demonstrated need
 
-**v3 — AI**
-- `claude` CLI integration: tag proposals, link suggestions
-- Dashed suggestion edges, ghost-text Tab-completion, suggestion debt in open-loops panel
-- MCP server exposing the vault to Claude Code
-- (later) generated-note pipeline
+**v3 — AI** (task breakdown and current state: `roadmap-v3.md`; ordering: `adr/2026-08-v3-mcp-first-order.md`)
+- MCP server exposing the vault, read-only, to any Claude Code session (first step — standalone value before the app gets smarter)
+- Durable suggestion store (suggestions + dismissals survive index rebuilds), then `claude` CLI integration on demand: link suggestions, tag proposals
+- Dashed suggestion edges, end-of-page proposed line, ghost-text Tab-completion (rides v2's owned-caret widget), suggestion debt in open-loops panel
+- The list is a ceiling like v1's and v2's: the generated-note pipeline stays "later", with background runs, vault-wide sweeps and MCP write tools
 
 **Later (unscheduled)**
 - Auto-rename: explicit action that re-derives the id from the current title, renames the file, and rewrites all inbound `#l` links via the index (ids stay frozen on ordinary title edits; see `adr/2026-07-id-scheme-kebab-frozen.md`)
