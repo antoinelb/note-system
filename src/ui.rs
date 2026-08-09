@@ -25,6 +25,7 @@ use crate::positions::Positions;
 use crate::render::{BodyCache, FragmentCache, RenderTheme};
 use crate::table;
 use crate::time;
+use crate::vim;
 use crate::watch;
 
 /// One idle timer drives the save (adr/2026-07-debounced-autosave.md);
@@ -300,6 +301,10 @@ fn Shell(
     let mut jump = use_signal(|| None::<Jump>);
     let mut jump_query = use_signal(String::new);
     let mut jump_highlighted = use_signal(|| 0usize);
+    // the modal layer, one signal beside the editor's so both mounts share
+    // the mode and it survives slides and activations
+    // (adr/2026-08-escape-ladder-editor-wide-mode.md)
+    let mut vim = use_signal(vim::Vim::default);
     // the live IME composition ("^" mid–dead-key), previewed at the caret
     // and absent from the buffer until compositionend commits it
     // (adr/2026-08-hidden-ime-sink.md)
@@ -1018,6 +1023,30 @@ fn Shell(
         }
     });
 
+    // the grammar's intents, applied in order — the executor never thinks
+    // (adr/2026-08-escape-ladder-editor-wide-mode.md)
+    let apply_vim = use_callback({
+        let fragments = fragments.clone();
+        move |acts: Vec<vim::Act>| {
+            for act in acts {
+                match act {
+                    vim::Act::Place(at) => {
+                        editor.write().place_in_block(at, 0, false);
+                    }
+                    vim::Act::Type(text) => {
+                        editor.write().insert_at_caret(&text);
+                    }
+                    vim::Act::Deactivate => {
+                        // the ladder's second rung: the block renders
+                        // again, and the cache drops its stale fragment
+                        editor.write().deactivate();
+                        fragments.borrow_mut().sweep();
+                    }
+                }
+            }
+        }
+    });
+
     // the block panes, one closure both screens mount: the logs centre pane
     // and the writing sheet show the one editor through the one widget
     // (adr/2026-08-sheet-reuses-the-one-editor.md)
@@ -1046,12 +1075,19 @@ fn Shell(
                                     // pieces around selection and caret
                                     // (adr/2026-08-caret-on-editor-note-bytes.md)
                                     let (anchor, head) = editor.read().caret_in_block();
+                                    // the caret is the mode indicator: a
+                                    // box thinking, a bar writing
+                                    // (adr/2026-08-caret-shape-is-the-mode-indicator.md)
+                                    let shape = match vim.read().mode {
+                                        vim::Mode::Normal => caret::Shape::Box,
+                                        vim::Mode::Insert => caret::Shape::Bar,
+                                    };
                                     let lines = caret::layout(
                                         &text,
                                         anchor,
                                         head,
                                         preview.read().as_deref(),
-                                        caret::Shape::Bar,
+                                        shape,
                                     );
                                     rsx! {
                                         div {
@@ -1182,30 +1218,70 @@ fn Shell(
                                                     {
                                                         return;
                                                     }
-                                                    // when the key is not ours (None), Escape and
-                                                    // the app chords bubble exactly as they always
-                                                    // did
-                                                    if let Some(action) = keymap::action(&event.key(), event.modifiers()) {
-                                                        // ours: keep the default out of the
-                                                        // sink and the key off the pane
-                                                        event.prevent_default();
-                                                        event.stop_propagation();
-                                                        apply_action.call(action);
+                                                    // the grammar speaks first (editor.rs
+                                                    // names this slot); Pass hands the key to
+                                                    // the phase-0 keymap unchanged
+                                                    let (source, head) = {
+                                                        let editor = editor.peek();
+                                                        let (_, head) = editor.caret_in_block();
+                                                        let source = editor
+                                                            .active_source()
+                                                            .unwrap_or("")
+                                                            .to_string();
+                                                        (source, head)
+                                                    };
+                                                    match vim.write().handle(
+                                                        &event.key(),
+                                                        event.modifiers(),
+                                                        &source,
+                                                        head,
+                                                    ) {
+                                                        vim::Outcome::Acts(acts) => {
+                                                            event.prevent_default();
+                                                            event.stop_propagation();
+                                                            apply_vim.call(acts);
+                                                        }
+                                                        // unbound normal-mode keys are inert:
+                                                        // consumed, never inserted
+                                                        vim::Outcome::Swallow => {
+                                                            event.prevent_default();
+                                                            event.stop_propagation();
+                                                        }
+                                                        vim::Outcome::Pass => {
+                                                            // not the grammar's: Escape and the
+                                                            // app chords bubble as they always did
+                                                            if let Some(action) = keymap::action(&event.key(), event.modifiers()) {
+                                                                // ours: keep the default out of the
+                                                                // sink and the key off the pane
+                                                                event.prevent_default();
+                                                                event.stop_propagation();
+                                                                apply_action.call(action);
+                                                            }
+                                                        }
                                                     }
                                                 },
                                                 oncompositionstart: move |_| {
-                                                    preview.set(Some(String::new()));
+                                                    // the IME writes; normal mode does not
+                                                    if vim.peek().mode == vim::Mode::Insert {
+                                                        preview.set(Some(String::new()));
+                                                    }
                                                 },
                                                 oncompositionupdate: move |event: Event<CompositionData>| {
-                                                    preview.set(Some(event.data().data()));
+                                                    if vim.peek().mode == vim::Mode::Insert {
+                                                        preview.set(Some(event.data().data()));
+                                                    }
                                                 },
                                                 oncompositionend: move |event: Event<CompositionData>| {
                                                     // WebKitGTK can fire an empty end before
                                                     // the real one (the spike's transcript);
-                                                    // only committed text lands
+                                                    // only committed text lands, and only in
+                                                    // insert — a composition a normal-mode key
+                                                    // started is discarded whole
                                                     preview.set(None);
                                                     let committed = event.data().data();
-                                                    if !committed.is_empty() {
+                                                    if !committed.is_empty()
+                                                        && vim.peek().mode == vim::Mode::Insert
+                                                    {
                                                         editor.write().insert_at_caret(&committed);
                                                     }
                                                 },
@@ -3729,7 +3805,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_in_a_sheet_block_closes_the_sheet_directly() {
+    fn escape_climbs_the_ladder_to_close_the_sheet() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -3738,20 +3814,34 @@ mod tests {
         let (_, block_keys) = sheet_block_targets(&opened);
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
 
-        // the block no longer swallows escape: one press bubbles to the
-        // pane and the sheet closes
-        // (adr/2026-08-cursor-always-in-the-note.md)
+        // rung one: insert → normal, the caret turning box; the sheet holds
+        // (adr/2026-08-escape-ladder-editor-wide-mode.md)
         press(&mut dom, block_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="caret-box""#), "{html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+
+        // rung two: normal → rendered, the block closing; the sheet holds
+        press(&mut dom, block_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("block-active"), "{html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+
+        // rung three: the pane's escape closes the sheet
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
         assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
 
-        // and the logs' note wakes with its own cursor
+        // and the logs' note wakes with its own cursor, still thinking —
+        // the mode survives the whole trip
         press(
             &mut dom,
             keys,
             Key::Character("2".into()),
             Modifiers::CONTROL,
         );
-        assert!(dioxus_ssr::render(&dom).contains("block-active"));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "{html}");
+        assert!(html.contains(r#"class="caret-box""#), "{html}");
     }
 
     #[test]
@@ -4692,6 +4782,109 @@ mod tests {
         press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "still the preamble: {html}");
+    }
+
+    #[test]
+    fn escape_thinks_and_i_writes() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        // the editor opens writing: a bar caret, and keys type
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="caret""#));
+
+        // escape turns the caret box and unbound keys inert
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="caret-box""#), "{html}");
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, sink, Key::Enter, Modifiers::empty());
+        assert_eq!(source_of(&dom), before, "normal mode never types");
+
+        // i writes again, where the caret stands
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"class="caret""#),
+            "the bar is back"
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        assert!(source_of(&dom).contains('x'), "{}", source_of(&dom));
+    }
+
+    #[test]
+    fn o_opens_a_line_below_through_the_widget() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // normal mode on the heading's last content line, then o
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("o".into()),
+            Modifiers::empty(),
+        );
+        type_keys(&mut dom, sink, "ouvert");
+        assert_eq!(
+            source_of(&dom),
+            "= 2026-07-23\n#l(\"2026-07-22\")\n\nouvert",
+            "the line opened below the caret's line"
+        );
+    }
+
+    #[test]
+    fn a_composition_in_normal_mode_is_discarded() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        compose(&mut dom, sink, "compositionstart", "");
+        compose(&mut dom, sink, "compositionupdate", "^");
+        assert!(
+            !dioxus_ssr::render(&dom).contains(r#"class="compose""#),
+            "no preview outside insert"
+        );
+        compose(&mut dom, sink, "compositionend", "ê");
+        assert_eq!(source_of(&dom), before, "the commit was discarded");
+    }
+
+    #[test]
+    fn the_mode_survives_a_boundary_slide() {
+        let vault = temp_vault();
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, sink) = activate_heading(&mut dom, &clicks);
+
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        place_caret(&mut dom, block, &hit, 0);
+        press(&mut dom, sink, Key::ArrowUp, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "slid into the preamble: {html}");
+        assert!(
+            html.contains(r#"class="caret-box""#),
+            "still thinking after the slide: {html}"
+        );
     }
 
     #[test]
@@ -8220,6 +8413,28 @@ mod tests {
                                 .map(|(_, rest)| rest)
                                 .unwrap_or("")
                                 .to_string()
+                        }
+                    })
+                    .collect();
+                // the box caret's end-of-line stand-in space is drawn but
+                // not buffer content; a real cluster under the box is
+                let line: String = line
+                    .split(r#"<span class="caret-box""#)
+                    .enumerate()
+                    .map(|(index, part)| {
+                        if index == 0 {
+                            return part.to_string();
+                        }
+                        let (boxed, rest) =
+                            part.split_once("</span>").unwrap_or((part, ""));
+                        let cluster = boxed
+                            .split_once('>')
+                            .map(|(_, inner)| inner)
+                            .unwrap_or("");
+                        if cluster == "\u{a0}" {
+                            rest.to_string()
+                        } else {
+                            format!("{cluster}{rest}")
                         }
                     })
                     .collect();

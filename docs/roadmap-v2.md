@@ -7,7 +7,7 @@ The seam this version fills was architected in v0 phase 5 and has held since: "t
 One editor serves every surface — the logs centre pane and the writing sheet mount the same machinery (`adr/2026-08-sheet-reuses-the-one-editor.md`) — so each phase below lands everywhere at once.
 **"Implemented incrementally as needed" is the design, not a disclaimer** (`plan.md` § Roadmap): every phase leaves the editor daily-drivable, and the *not in v2* list at the bottom is the ceiling — a key earns its way in through daily friction, never through completeness.
 
-**Next step → phase 1; or the v0/v1 polish backlogs.**
+**Next step → phase 2; or the v0/v1 polish backlogs.**
 
 ## How we work
 
@@ -45,12 +45,12 @@ Exit: days of daily writing in the homemade widget are indistinguishable from th
 
 Goal: normal and insert exist, and the caret announces which one you are in.
 
-- [ ] `Mode` lives in the keymap layer between the widget and `Editor` — the slot `editor.rs` names; the widget forwards keys, the layer translates them into `Editor` calls or swallows them.
-- [ ] The Escape ladder: insert → normal → rendered block — today's Escape becomes the second rung; the mode is editor-wide, so a boundary slide or a fresh activation keeps the mode you were in (suggestion; the alternative is a per-activation reset). **→ ADR**
-- [ ] Entering insert: i a I A o O (o and O open a line *inside* the block; a blank line splits it at the next resegmentation — the existing merge/split semantics, no new rules).
-- [ ] The caret is the mode indicator: bar in insert, box in normal — the design's one warm element does the announcing, and the one-line chrome gains nothing (`design/wireframes-v0.md` § Chrome). **→ ADR** (with the palette boundary: modal keys take no palette entries; chords keep theirs and answer in both modes)
-- [ ] Unbound normal-mode keys are inert — swallowed, never inserted as text.
-- [ ] Tests: every rung of the ladder, mode survival across slides, inert unbound keys, each insert entry places the caret where vim would.
+- [x] `Mode` lives in the keymap layer between the widget and `Editor` — the slot `editor.rs` names (`src/vim.rs`); the widget forwards keys, the layer translates them into `Editor` calls or swallows them.
+- [x] The Escape ladder: insert → normal → rendered block; the mode is editor-wide and survives slides and activations, and the editor opens writing — insert at launch (`adr/2026-08-escape-ladder-editor-wide-mode.md`).
+- [x] Entering insert: i a I A o O (o and O open a line *inside* the block; a blank line splits it at the next resegmentation — the existing merge/split semantics, no new rules).
+- [x] The caret is the mode indicator: bar in insert, box in normal (`adr/2026-08-caret-shape-is-the-mode-indicator.md`, with the palette boundary: modal keys take no palette entries; chords keep theirs and answer in both modes).
+- [x] Unbound normal-mode keys are inert — swallowed, never inserted as text; a normal-mode composition is discarded whole.
+- [x] Tests: every rung of the ladder, mode survival across slides, inert unbound keys, each insert entry places the caret where vim would.
 
 Exit: Escape thinks instead of closing, i writes, and phase 0's writing flow is unchanged inside insert mode.
 
