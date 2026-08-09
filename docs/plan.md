@@ -145,8 +145,10 @@ Type exists from v1 (directory, canvas styling, model rules). Actual generation 
 - Auto-placement of new notes near linked ones; on-demand cluster arrange
 - Capture/generated visual treatment; `generated` type defined
 
-**v2 — vim**
-- Modal editing layer on the existing buffer architecture, implemented incrementally as needed
+**v2 — vim** (task breakdown and current state: `roadmap-v2.md`; ordering: `adr/2026-08-v2-caret-first-order.md`)
+- Owned-caret block widget replacing the active block's textarea (composition, clipboard, selection, undo hand-rolled); the caret's shape becomes the mode indicator
+- Modal keymap between the widget and `Editor`: normal/insert/visual modes, note-scoped motions, operators and text objects, vim-grain undo, dot repeat, in-note search — implemented incrementally as needed, each phase daily-drivable
+- The list is a ceiling like v1's: macros, marks, named registers, visual block and the ex line wait for demonstrated need
 
 **v3 — AI**
 - `claude` CLI integration: tag proposals, link suggestions

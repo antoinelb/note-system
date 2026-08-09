@@ -7,6 +7,8 @@ UI direction: `design/wireframes-v0.md` § The table screen (states 6a–6b); on
 The vault starts from scratch — no migration, old notes are rewritten by hand when actually needed (`adr/2026-08-vault-starts-from-scratch.md`) — so the table begins nearly empty and fills through in-app creation.
 **The v1 list is the ceiling, not the floor** (`plan.md` § Known risks 4): the canvas is where feature ideas multiply, and anything not below waits for its own version or the polish backlog.
 
+**Next step → v2, vim (`roadmap-v2.md`); or the polish backlogs.**
+
 ## How we work
 
 The v0 loop, unchanged (`roadmap-v0.md` § How we work):
