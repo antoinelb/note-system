@@ -177,8 +177,8 @@ pub fn App() -> Element {
             },
             {
                 match loaded {
-                    Ok((root, notes, loops, table)) => {
-                        rsx! { Shell { root, notes, loops, table, today: today.0 } }
+                    Ok((root, notes, loops, table, edges)) => {
+                        rsx! { Shell { root, notes, loops, table, edges, today: today.0 } }
                     }
                     Err(msg) => rsx! { div { class: "vault-error", "{msg}" } },
                 }
@@ -196,6 +196,7 @@ fn Shell(
     notes: Vec<(String, NoteType)>,
     loops: Vec<String>,
     table: Vec<TableNote>,
+    edges: Vec<(String, String)>,
     today: Date,
 ) -> Element {
     // the editor opens today's note before the signal takes the notes list;
@@ -212,6 +213,9 @@ fn Shell(
     let mut loops = use_signal(|| loops);
     // the table's notes, third rider on the same survey the watcher refreshes
     let mut table_notes = use_signal(|| table);
+    // the link edges, the survey's fourth rider — the constellation redraws
+    // whenever the watcher redraws the cards (adr/2026-08-edges-svg-under-cards.md)
+    let mut edges = use_signal(|| edges);
     // canvas positions, read once here and touched by nothing but the user's
     // drag (adr/2026-07-positions-separate-file.md)
     let mut positions = use_signal({
@@ -319,10 +323,11 @@ fn Shell(
                         break;
                     };
                     match refresh(&root, &batch) {
-                        Ok((time_notes, open, table)) => {
+                        Ok((time_notes, open, table, links)) => {
                             notes.set(time_notes);
                             loops.set(open);
                             table_notes.set(table);
+                            edges.set(links);
                         }
                         Err(message) => editor.write().set_notice(message),
                     }
@@ -1889,6 +1894,25 @@ fn Shell(
                 div {
                     class: "canvas",
                     style: "transform: translate({pan().0}px, {pan().1}px)",
+                    // the constellation: first child, so DOM order paints
+                    // every edge under every card; inside the translated
+                    // canvas, so pan and drags carry it for free
+                    // (adr/2026-08-edges-svg-under-cards.md)
+                    svg { class: "edges",
+                        for edge in table::edges(&edges.read(), &placed) {
+                            g {
+                                key: "{edge.source}-{edge.target}",
+                                line {
+                                    x1: "{edge.x1}",
+                                    y1: "{edge.y1}",
+                                    x2: "{edge.x2}",
+                                    y2: "{edge.y2}",
+                                }
+                                circle { cx: "{edge.x1}", cy: "{edge.y1}", r: "2" }
+                                circle { cx: "{edge.x2}", cy: "{edge.y2}", r: "2" }
+                            }
+                        }
+                    }
                     // the origin card leaves the canvas while its sheet is
                     // open — it re-renders raised above the dim instead
                     for card in placed
@@ -2038,8 +2062,14 @@ fn Chrome(
 }
 
 /// What one look at the index yields: the rail's time notes, the open loops
-/// themselves rather than a count of them, and the table's cards-to-be.
-type Survey = (Vec<(String, NoteType)>, Vec<String>, Vec<TableNote>);
+/// themselves rather than a count of them, the table's cards-to-be, and the
+/// link edges the canvas draws between them.
+type Survey = (
+    Vec<(String, NoteType)>,
+    Vec<String>,
+    Vec<TableNote>,
+    Vec<(String, String)>,
+);
 
 /// What the shell mounts with: the vault root and that survey.
 type Loaded = (
@@ -2047,12 +2077,15 @@ type Loaded = (
     Vec<(String, NoteType)>,
     Vec<String>,
     Vec<TableNote>,
+    Vec<(String, String)>,
 );
 
 fn load(root: Option<PathBuf>) -> Result<Loaded, String> {
     match root {
         Some(root) => match load_notes(&root) {
-            Ok((notes, loops, table)) => Ok((root, notes, loops, table)),
+            Ok((notes, loops, table, edges)) => {
+                Ok((root, notes, loops, table, edges))
+            }
             Err(err) => Err(format!("the index could not be built: {err:?}")),
         },
         None => Err("no vault: define NOTE_VAULT or HOME".to_string()),
@@ -2077,6 +2110,7 @@ fn survey(index: &Index) -> Result<Survey, IndexError> {
         index.time_notes()?,
         open_loops(index)?,
         index.table_notes()?,
+        index.link_edges()?,
     ))
 }
 
@@ -4401,6 +4435,26 @@ mod tests {
     }
 
     #[test]
+    fn a_blob_link_source_fails_only_the_link_edges() {
+        // the one sabotage every earlier survey leg survives: a typeless
+        // time note is invisible to the rail and the table, its path
+        // decodes fine for the loops — only link_edges reads the blob id
+        let vault = temp_vault();
+        let index = sabotaged_index(
+            vault.path(),
+            "INSERT INTO notes (path, category, id) \
+             VALUES ('time/blob.typ', 'time', x'00'); \
+             INSERT INTO links (source_path, target_id) \
+             VALUES ('time/blob.typ', 'alpha');",
+        );
+        assert!(index.time_notes().is_ok());
+        assert!(open_loops(&index).is_ok());
+        assert!(index.table_notes().is_ok());
+        let error = survey(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
+    #[test]
     fn a_sabotaged_notes_table_shows_the_captured_error_after_open() {
         // Index::open succeeds (the version stamp survives), the captured
         // query is what fails — the second error edge of captured_lines
@@ -5720,6 +5774,113 @@ mod tests {
         assert!(html.contains("link-picker"), "{html}");
     }
 
+    // -- constellations: link edges under the cards --------------------------
+
+    #[test]
+    fn the_vaults_links_draw_as_edges_under_the_cards() {
+        let vault = temp_vault();
+        // beta links alpha; both sit on the fallback grid — (224, 32) and
+        // (32, 32) — so the edge runs border to border between the slots
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("the linking note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+
+        let drawn = edges_svg(&dom);
+        assert!(
+            drawn.contains(r#"<line x1="224" y1="60" x2="208" y2="60""#),
+            "beta's border to alpha's: {drawn}"
+        );
+        assert!(
+            drawn.contains(r#"<circle cx="224" cy="60" r="2""#),
+            "a node dot where the edge meets the card: {drawn}"
+        );
+        assert!(
+            drawn.contains(r#"<circle cx="208" cy="60" r="2""#),
+            "and one at the other end: {drawn}"
+        );
+        // DOM order is the stacking rule: the svg precedes every card
+        let html = dioxus_ssr::render(&dom);
+        let svg_at = html.find(r#"<svg class="edges""#).expect("the svg");
+        let card_at = html.find(r#"class="card "#).expect("a card");
+        assert!(svg_at < card_at, "edges paint under the cards: {html}");
+    }
+
+    #[test]
+    fn dragging_a_card_drags_its_edges() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("the linking note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        // beta is the second card in id order; drag it a card-width right
+        mouse(&mut dom, "mousedown", cards[1], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (276.0, 100.0));
+        mouse(&mut dom, "mouseup", pane, (276.0, 100.0));
+        let drawn = edges_svg(&dom);
+        assert!(
+            drawn.contains(r#"<line x1="400" y1="60" x2="208" y2="60""#),
+            "the moving end followed, the still end held: {drawn}"
+        );
+    }
+
+    #[test]
+    fn links_changing_in_the_files_redraw_the_edges_live() {
+        let vault = temp_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        assert!(
+            !edges_svg(&dom).contains("<line"),
+            "the base vault draws no permanent edges"
+        );
+
+        // a link written outside the app draws on the watcher batch
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("the linking note is written");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Permanent,
+                path: PathBuf::from("permanent/beta.typ"),
+            }],
+        );
+        assert!(edges_svg(&dom).contains("<line"), "the edge arrived");
+
+        // its target deleted, the link dangles — and draws nothing, the
+        // debt living in the loops list instead of on the canvas
+        std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
+            .expect("the target is deleted");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Removed(PathBuf::from(
+                "permanent/alpha.typ",
+            ))],
+        );
+        assert!(
+            !edges_svg(&dom).contains("<line"),
+            "a dangling link draws nothing"
+        );
+        assert!(
+            dioxus_ssr::render(&dom).contains("ember"),
+            "the debt went to the loops count instead"
+        );
+    }
+
     // -- ctrl+n: creation, and the sheet's delete ----------------------------
 
     #[test]
@@ -6627,6 +6788,17 @@ mod tests {
         let keydowns = listeners(&mutations, "keydown");
         mount(dom, listeners(&mutations, "mounted")[0]);
         (inputs[0], keydowns[0])
+    }
+
+    /// The constellation svg's inner markup — the chrome icons also hold
+    /// `<line>` elements, so edge assertions must stay inside the one svg.
+    fn edges_svg(dom: &VirtualDom) -> String {
+        dioxus_ssr::render(dom)
+            .split(r#"<svg class="edges""#)
+            .nth(1)
+            .and_then(|rest| rest.split("</svg>").next())
+            .unwrap_or_default()
+            .to_string()
     }
 
     /// The palette's rows, in order — `picker_ids` for the other overlay.

@@ -212,6 +212,74 @@ pub fn is_click(down: (f64, f64), up: (f64, f64)) -> bool {
     (up.0 - down.0).abs() <= CLICK_SLOP && (up.1 - down.1).abs() <= CLICK_SLOP
 }
 
+/// One drawn edge in canvas coordinates, endpoints already clipped to the
+/// card borders — where the line runs and where its node dots sit
+/// (adr/2026-08-edges-svg-under-cards.md).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edge {
+    pub source: String,
+    pub target: String,
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
+/// The card's nominal half-extents: half a card wide, the tether's drop
+/// tall — the one card height the layout declares.
+const EDGE_HALF_WIDTH: f64 = CARD_WIDTH / 2.0;
+const EDGE_HALF_HEIGHT: f64 = TETHER_DROP;
+
+/// The link index resolved against the drawn cards: an edge for every pair
+/// whose ends both stand on the table, centre to centre, clipped to each
+/// card's border. A lookup miss — dangling, a time note, an id the table
+/// does not host — draws nothing, as does a self-link or an overlapping
+/// pair (the tether's zero-width idiom).
+pub fn edges(links: &[(String, String)], cards: &[Card]) -> Vec<Edge> {
+    let by_id: HashMap<&str, &Card> =
+        cards.iter().map(|card| (card.id.as_str(), card)).collect();
+    links
+        .iter()
+        .filter_map(|(source, target)| {
+            let from = by_id.get(source.as_str())?;
+            let to = by_id.get(target.as_str())?;
+            let (x1, y1, x2, y2) = clip(from, to)?;
+            Some(Edge {
+                source: source.clone(),
+                target: target.clone(),
+                x1,
+                y1,
+                x2,
+                y2,
+            })
+        })
+        .collect()
+}
+
+/// Centre to centre, each end pulled in to its card's border: the exit
+/// parameter from the source rectangle mirrors the entry into the target's
+/// along the one segment, both cards being the same size. Crossed clips
+/// mean the cards overlap — nothing to draw. Zero-length axes need no
+/// branch: dividing by zero yields infinity, which loses every `min`, and
+/// a self-link's two infinities cross like any other overlap.
+fn clip(from: &Card, to: &Card) -> Option<(f64, f64, f64, f64)> {
+    let (x1, y1) = (from.x + EDGE_HALF_WIDTH, from.y + EDGE_HALF_HEIGHT);
+    let (x2, y2) = (to.x + EDGE_HALF_WIDTH, to.y + EDGE_HALF_HEIGHT);
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let reach =
+        (EDGE_HALF_WIDTH / dx.abs()).min(EDGE_HALF_HEIGHT / dy.abs());
+    let entry = 1.0 - reach;
+    if reach >= entry {
+        return None;
+    }
+    Some((
+        x1 + reach * dx,
+        y1 + reach * dy,
+        x1 + entry * dx,
+        y1 + entry * dy,
+    ))
+}
+
 /// The 3px bar, keyed on the presented kind: eight permanent hues;
 /// everything else — captures, unknown or time-scale types, no type at all
 /// — is the grey of visible debt, and generated notes keep their own dashed
@@ -546,6 +614,87 @@ mod tests {
         assert!(is_click((10.0, 10.0), (14.0, 6.0)));
         assert!(!is_click((10.0, 10.0), (14.1, 10.0)));
         assert!(!is_click((10.0, 10.0), (10.0, 15.0)));
+    }
+
+    fn placed_card(id: &str, x: f64, y: f64) -> Card {
+        Card {
+            id: id.to_string(),
+            title: id.to_string(),
+            label: "concept".to_string(),
+            kind: NoteCategory::Permanent,
+            bar: "bar-concept",
+            x,
+            y,
+        }
+    }
+
+    fn link(source: &str, target: &str) -> (String, String) {
+        (source.to_string(), target.to_string())
+    }
+
+    #[test]
+    fn an_edge_runs_border_to_border_between_placed_cards() {
+        // side by side: the line is horizontal, so each end sits on a
+        // vertical border — the card's edge, not its centre
+        let cards = [placed_card("a", 0.0, 0.0), placed_card("b", 400.0, 0.0)];
+        let drawn = edges(&[link("a", "b")], &cards);
+        assert_eq!(drawn.len(), 1);
+        assert_eq!((drawn[0].x1, drawn[0].y1), (CARD_WIDTH, TETHER_DROP));
+        assert_eq!((drawn[0].x2, drawn[0].y2), (400.0, TETHER_DROP));
+
+        // stacked: the vertical borders take over — the other min arm
+        let cards = [placed_card("a", 0.0, 0.0), placed_card("b", 0.0, 200.0)];
+        let drawn = edges(&[link("a", "b")], &cards);
+        assert_eq!(
+            (drawn[0].x1, drawn[0].y1),
+            (CARD_WIDTH / 2.0, 2.0 * TETHER_DROP),
+            "out through the bottom border"
+        );
+        assert_eq!(
+            (drawn[0].x2, drawn[0].y2),
+            (CARD_WIDTH / 2.0, 200.0),
+            "in through the top border"
+        );
+    }
+
+    #[test]
+    fn a_link_to_an_absent_or_unhosted_id_draws_nothing() {
+        let cards = [placed_card("a", 0.0, 0.0)];
+        // dangling target, and a source the table does not host
+        assert_eq!(edges(&[link("a", "ghost")], &cards), vec![]);
+        assert_eq!(edges(&[link("2026-07-23", "a")], &cards), vec![]);
+    }
+
+    #[test]
+    fn a_self_link_draws_nothing() {
+        let cards = [placed_card("a", 0.0, 0.0)];
+        assert_eq!(edges(&[link("a", "a")], &cards), vec![]);
+    }
+
+    #[test]
+    fn overlapping_cards_draw_no_edge() {
+        // b starts inside a's nominal rectangle: the clips cross
+        let cards = [placed_card("a", 0.0, 0.0), placed_card("b", 100.0, 10.0)];
+        assert_eq!(edges(&[link("a", "b")], &cards), vec![]);
+    }
+
+    #[test]
+    fn moving_a_card_moves_its_edge_endpoints() {
+        let links = [link("a", "b")];
+        let before = edges(
+            &links,
+            &[placed_card("a", 0.0, 0.0), placed_card("b", 400.0, 0.0)],
+        );
+        let after = edges(
+            &links,
+            &[placed_card("a", 0.0, 0.0), placed_card("b", 480.0, 0.0)],
+        );
+        assert_eq!(before[0].x1, after[0].x1, "the still end held");
+        assert_eq!(
+            after[0].x2,
+            before[0].x2 + 80.0,
+            "the dragged end followed"
+        );
     }
 
     #[test]

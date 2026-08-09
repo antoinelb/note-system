@@ -186,6 +186,26 @@ impl Index {
         )
     }
 
+    /// Every link whose source has an id, as (source_id, target_id) pairs,
+    /// deduplicated. Whether the target exists, stands on the table or
+    /// dangles is the canvas geometry's lookup to miss, not SQL's — dangling
+    /// stays queryable debt for the loops list
+    /// (adr/2026-08-edges-svg-under-cards.md).
+    pub fn link_edges(&self) -> Result<Vec<(String, String)>, IndexError> {
+        query_rows(
+            &self.connection,
+            concat!(
+                "SELECT DISTINCT sources.id, links.target_id ",
+                "FROM links ",
+                "JOIN notes AS sources ON sources.path = links.source_path ",
+                "WHERE sources.id IS NOT NULL ",
+                "ORDER BY sources.id, links.target_id"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
     /// Every note the link picker can offer, as (id, title). An id-less note
     /// cannot be a link target, so it is not a completion — it is open-loops
     /// debt instead. Duplicate ids are not deduplicated: a collision is an
@@ -842,6 +862,76 @@ mod tests {
                 index.backlinks(&NoteId("target".to_string())),
                 Err(IndexError::Sqlite(_))
             ));
+        }
+    }
+
+    #[test]
+    fn link_edges_lists_deduplicated_id_pairs_without_idless_sources() {
+        let (dir, mut index) = temp_index();
+        let notes = scan_vault(&fixture_vault()).expect("scan fixture");
+        index.rebuild(&notes).expect("rebuild");
+        // debt rows stay invisible or collapse: a link from the id-less
+        // note, and a duplicate of a pair the vault already has
+        let raw = Connection::open(dir.path().join("index.sqlite"))
+            .expect("raw open");
+        raw.execute_batch(concat!(
+            "INSERT INTO links (source_path, target_id) ",
+            "VALUES ('permanent/missing-meta.typ', 'zettelkasten');",
+            "INSERT INTO links (source_path, target_id) ",
+            "VALUES ('permanent/luhmann.typ', 'zettelkasten');",
+        ))
+        .expect("plant the debt rows");
+
+        let pair = |source: &str, target: &str| {
+            (source.to_string(), target.to_string())
+        };
+        assert_eq!(
+            index.link_edges().expect("query"),
+            vec![
+                pair("2026-07-21", "2026-07-22"),
+                pair("2026-07-21", "zettelkasten"),
+                pair("2026-07-22", "2026-07-21"),
+                pair("2026-07-22", "2026-07-23"),
+                pair("2026-07-23", "2026-07-22"),
+                pair("2026-07-23", "smart-notes"),
+                pair("2026-w30", "2026-07-21"),
+                // the dangling target rides along — the canvas geometry,
+                // not SQL, is what draws nothing for it
+                pair("atomic-notes", "evergreen-notes"),
+                pair("atomic-notes", "zettelkasten"),
+                pair("capture-idea-canvas", "note-system"),
+                pair("digest-smart-notes", "smart-notes"),
+                pair("link-traps", "zettelkasten"),
+                pair("luhmann", "zettelkasten"),
+                pair("note-system", "plain-files"),
+                pair("note-system", "zettelkasten"),
+                pair("plain-files", "note-system"),
+                pair("smart-notes", "luhmann"),
+                pair("zettelkasten", "atomic-notes"),
+                pair("zettelkasten", "luhmann"),
+            ]
+        );
+    }
+
+    #[test]
+    fn link_edges_report_rows_that_will_not_decode() {
+        // one blob per column read, so each `?` in the closure fires; a
+        // blob id passes IS NOT NULL, which is exactly the decode to catch
+        for plant in [
+            "INSERT INTO notes (path, category, id)
+             VALUES ('permanent/blob-id.typ', 'permanent', x'00');
+             INSERT INTO links (source_path, target_id)
+             VALUES ('permanent/blob-id.typ', 'target');",
+            "INSERT INTO notes (path, category, id)
+             VALUES ('permanent/source.typ', 'permanent', 'source');
+             INSERT INTO links (source_path, target_id)
+             VALUES ('permanent/source.typ', x'00');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(index.link_edges(), Err(IndexError::Sqlite(_))));
         }
     }
 

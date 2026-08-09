@@ -36,6 +36,9 @@
   --bar-generated: #6f6a8c;
   --star-bright: #3d3660;
   --star-dim: #332c52;
+  /* real link edges, solid (design § Palette); the node dots where an edge
+     meets a card are the --selection role below */
+  --edge: #332c52;
   /* the writing sheet (design § The table screen, state 6b): fill, glow,
      the selection border the raised card and the tether share — one
      wireframe role ("edge node dots / selection border"), one variable */
@@ -75,6 +78,9 @@
   --bar-generated: #8b87a0;
   --star-bright: #c8c4de;
   --star-dim: #d4d1e6;
+  /* the light sibling the deck left undrawn: same constellation lines "in
+     silverpoint" (turn 4c) — hue kept, value inverted */
+  --edge: #cdc9e0;
   /* the sheet's light siblings, same derivation: hue kept, value inverted
      against the light ground; the glow deepens a touch because a pale
      shadow vanishes on a pale ground */
@@ -595,6 +601,29 @@ body {
 .canvas {
   position: absolute;
   inset: 0;
+}
+
+/* the constellation (adr/2026-08-edges-svg-under-cards.md): a 1×1 box whose
+   overflow carries lines to unbounded canvas coordinates; under the cards
+   by DOM order, and never the target of a press — edges are the void's */
+.edges {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.edges line {
+  stroke: var(--edge);
+}
+
+/* "a node star where edges meet a card" — the wireframes' one
+   dots-and-selection role, one variable */
+.edges circle {
+  fill: var(--selection);
 }
 
 /* mockup 170–180 wide, padding 9px 11px — normalized to ×4 */

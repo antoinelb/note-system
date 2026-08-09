@@ -100,10 +100,10 @@ Exit: a new permanent note goes from keystroke to written note without touching 
 
 Goal: real links drawn as solid edges with star nodes — the vault becomes legible as a graph.
 
-- [ ] Solid edges between placed cards from the link index; small node dots where an edge meets a card; edges drawn under cards, straight lines, no routing.
-- [ ] Edges follow drags live; the watcher refresh redraws them when links change in the files.
-- [ ] Links to unplaced or nonexistent notes draw nothing — dangling debt stays in the loops list, off the canvas; dashed proposed edges are v3 and need only the drawing layer to leave room, not code.
-- [ ] Tests: edge set mirrors the link index, endpoints track a drag, dangling draws nothing.
+- [x] Solid edges between placed cards from the link index; small node dots where an edge meets a card; edges drawn under cards, straight lines, no routing (`adr/2026-08-edges-svg-under-cards.md`).
+- [x] Edges follow drags live; the watcher refresh redraws them when links change in the files.
+- [x] Links to unplaced or nonexistent notes draw nothing — dangling debt stays in the loops list, off the canvas; dashed proposed edges are v3 and need only the drawing layer to leave room, not code.
+- [x] Tests: edge set mirrors the link index, endpoints track a drag, dangling draws nothing.
 
 Exit: the table reads as a constellation, and dragging a card drags its edges.
 
