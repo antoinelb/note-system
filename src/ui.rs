@@ -1027,6 +1027,8 @@ fn Shell(
     // (adr/2026-08-escape-ladder-editor-wide-mode.md)
     let apply_vim = use_callback({
         let fragments = fragments.clone();
+        let clipboard = clipboard.clone();
+        let clipboard_write = clipboard_write.clone();
         move |acts: Vec<vim::Act>| {
             let before = editor.peek().active();
             for act in acts {
@@ -1041,6 +1043,35 @@ fn Shell(
                         // the ladder's second rung: the block renders
                         // again, and the cache drops its stale fragment
                         editor.write().deactivate();
+                    }
+                    // the one register is the system clipboard
+                    // (adr/2026-08-one-register-the-clipboard.md)
+                    vim::Act::SetClipboard(text) => {
+                        if let Some(write) = clipboard_write.clone() {
+                            spawn(async move { (write.0)(text).await });
+                        }
+                    }
+                    vim::Act::Splice { span, text, caret } => {
+                        editor.write().splice(span, &text, caret);
+                    }
+                    // the one async act: read the clipboard, then the
+                    // editor decides pure against the state the read found
+                    vim::Act::Paste { before, count } => {
+                        let Some(clipboard) = clipboard.clone() else {
+                            continue;
+                        };
+                        spawn(async move {
+                            let Some(clip) = (clipboard.0)().await else {
+                                return;
+                            };
+                            if clip.is_empty() {
+                                return;
+                            }
+                            // a paste is always an insertion inside the
+                            // active block: no other block can wake, so no
+                            // fragment goes stale
+                            editor.write().paste(&clip, before, count);
+                        });
                     }
                 }
             }
@@ -4905,6 +4936,143 @@ mod tests {
             "the heading woke again: {}",
             source_of(&dom)
         );
+    }
+
+    #[test]
+    fn dd_cuts_to_the_clipboard_and_p_pastes_what_it_reads() {
+        let vault = temp_vault();
+        let (mut dom, clicks, written) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Some("collée\n".to_string()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // normal mode on the link line, then dd: the line leaves for the
+        // register (adr/2026-08-one-register-the-clipboard.md)
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(
+            !source_of(&dom).contains("#l"),
+            "the line went: {}",
+            source_of(&dom)
+        );
+        assert_eq!(
+            *written.lock().expect("the write cell"),
+            vec!["#l(\"2026-07-22\")\n".to_string()],
+            "linewise, newline carried"
+        );
+
+        // p pastes whatever the read seam answers, linewise below
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(source_of(&dom).contains("collée"), "{}", source_of(&dom));
+    }
+
+    #[test]
+    fn dg_crosses_blocks_and_paste_declines_without_a_readable_clip() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // gg to the preamble, then dG: the whole note goes in one splice
+        // across every block (adr/2026-08-editor-splice-cross-block.md)
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let woken = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let sink = listeners(&woken, "keydown")[0];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(source_of(&dom), "", "the note emptied whole");
+        assert!(!dioxus_ssr::render(&dom).contains("render-error"));
+
+        // p without any clipboard seam quietly declines
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), "", "nothing to paste, nothing pasted");
+
+        // and with a seam whose read answers emptiness, the same
+        let (mut dom, clicks, _) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Some(String::new()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before);
+    }
+
+    #[test]
+    fn a_clipboard_read_answering_nothing_pastes_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _) =
+            clipboard_app(Some(vault.path().to_path_buf()), None);
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before);
     }
 
     #[test]

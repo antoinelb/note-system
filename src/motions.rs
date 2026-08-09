@@ -38,6 +38,21 @@ impl Lines {
         self.get(self.index_of(offset))
     }
 
+    /// The row index holding `offset` — the operators' linewise arithmetic.
+    pub fn row_of(&self, offset: usize) -> usize {
+        self.index_of(offset)
+    }
+
+    /// The row's range, clamped onto the table.
+    pub fn row(&self, index: usize) -> Range<usize> {
+        self.get(index)
+    }
+
+    /// How many visible lines the note has.
+    pub fn rows(&self) -> usize {
+        self.len()
+    }
+
     /// The index of the line holding `offset` — the last line starting at
     /// or before it, so an offset inside a separator answers the line the
     /// separator trails.
@@ -392,8 +407,295 @@ fn find(
     }
 }
 
-/// What , repeats: the last find, the other way.
-fn reverse(kind: FindKind) -> FindKind {
+/// A linewise span over rows `first..=last`: whole lines, each trailing
+/// newline included only when it is block content — the newline after a
+/// block's final line is the separator's, and deleting up to it leaves the
+/// bare separator to merge at the next resegmentation
+/// (adr/2026-08-editor-splice-cross-block.md).
+pub fn linewise_span(
+    lines: &Lines,
+    first: usize,
+    last: usize,
+) -> Range<usize> {
+    let start = lines.row(first).start;
+    let ending = lines.row(last);
+    let next = last + 1;
+    let end = if next < lines.rows() && lines.row(next).start == ending.end + 1
+    {
+        ending.end + 1
+    } else {
+        ending.end
+    };
+    start..end
+}
+
+/// One text object — what an operator's noun names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectKind {
+    /// iw aw: the run of same-class clusters around the caret.
+    Word,
+    /// i" a" and the sibling quotes: a same-character pair on the line.
+    Quote(char),
+    /// i( a) and the sibling pairs: a nested pair inside the block.
+    Pair(char, char),
+    /// ip ap, the house meaning: the paragraph *is* the block, so the
+    /// object comes from the block map, not a scan
+    /// (adr/2026-08-one-register-the-clipboard.md).
+    Block,
+}
+
+/// The span a text object names around `at`, or `None` when nothing does.
+/// `around` widens: the word takes its trailing (else leading) blanks, the
+/// quotes and pairs take their delimiters, the block takes its separator.
+pub fn object(
+    text: &str,
+    blocks: &[Block],
+    at: usize,
+    kind: ObjectKind,
+    around: bool,
+) -> Option<Range<usize>> {
+    let block = blocks.get(crate::blocks::block_at(blocks, at))?;
+    let content = block.content();
+    match kind {
+        ObjectKind::Word => {
+            word_object(text, &Lines::of(text, blocks).around(at), at, around)
+        }
+        ObjectKind::Quote(quote) => quote_object(
+            text,
+            &Lines::of(text, blocks).around(at),
+            at,
+            quote,
+            around,
+        ),
+        ObjectKind::Pair(open, close) => {
+            pair_object(text, &content, at, open, close, around)
+        }
+        ObjectKind::Block => {
+            Some(if around { block.range.clone() } else { content })
+        }
+    }
+}
+
+/// iw / aw: the same-class run under the caret, widened by its trailing
+/// (else leading) blanks for `around`. Line-scoped, as vim's word is.
+fn word_object(
+    text: &str,
+    line: &Range<usize>,
+    at: usize,
+    around: bool,
+) -> Option<Range<usize>> {
+    let slice = text.get(line.clone()).unwrap_or_default();
+    if slice.is_empty() {
+        return None;
+    }
+    let rel = at.saturating_sub(line.start).min(slice.len());
+    let anchor = if rel >= slice.len() {
+        caret::prev_cluster(slice, slice.len())
+    } else {
+        rel
+    };
+    // the slice is non-empty and the anchor rests on a cluster, so a
+    // char is always there
+    let wanted = slice[anchor..]
+        .chars()
+        .next()
+        .map(class)
+        .unwrap_or(Class::Blank);
+    let start = slice[..anchor]
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| class(*ch) == wanted)
+        .last()
+        .map(|(offset, _)| offset)
+        .unwrap_or(anchor);
+    let end = slice[anchor..]
+        .char_indices()
+        .find(|(_, ch)| class(*ch) != wanted)
+        .map(|(offset, _)| anchor + offset)
+        .unwrap_or(slice.len());
+    let mut span = start..end;
+    if around && wanted != Class::Blank {
+        let trailed = slice[end..]
+            .char_indices()
+            .find(|(_, ch)| class(*ch) != Class::Blank)
+            .map(|(offset, _)| end + offset)
+            .unwrap_or(slice.len());
+        if trailed > end {
+            span.end = trailed;
+        } else {
+            let led = slice[..start]
+                .char_indices()
+                .rev()
+                .take_while(|(_, ch)| class(*ch) == Class::Blank)
+                .last()
+                .map(|(offset, _)| offset)
+                .unwrap_or(start);
+            span.start = led;
+        }
+    }
+    Some(line.start + span.start..line.start + span.end)
+}
+
+/// i" / a": the quoted span the caret stands in or before, paired left to
+/// right along the line, as vim pairs them.
+fn quote_object(
+    text: &str,
+    line: &Range<usize>,
+    at: usize,
+    quote: char,
+    around: bool,
+) -> Option<Range<usize>> {
+    let slice = text.get(line.clone()).unwrap_or_default();
+    let rel = at.saturating_sub(line.start).min(slice.len());
+    let marks: Vec<usize> = slice
+        .char_indices()
+        .filter(|(_, ch)| *ch == quote)
+        .map(|(offset, _)| offset)
+        .collect();
+    let hit = marks.chunks(2).find_map(|pair| match pair {
+        [open, close] if rel <= *close => Some((*open, *close)),
+        _ => None,
+    })?;
+    let (open, close) = hit;
+    let span = if around {
+        open..close + quote.len_utf8()
+    } else {
+        open + quote.len_utf8()..close
+    };
+    Some(line.start + span.start..line.start + span.end)
+}
+
+/// i( / a): the innermost pair around the caret, nesting respected,
+/// scanned within the block's content — vim semantics are textual, and a
+/// pair straddling blocks is not a real sentence.
+fn pair_object(
+    text: &str,
+    content: &Range<usize>,
+    at: usize,
+    open: char,
+    close: char,
+    around: bool,
+) -> Option<Range<usize>> {
+    let slice = text.get(content.clone()).unwrap_or_default();
+    let rel = at.saturating_sub(content.start).min(slice.len());
+    let opened = open_before(slice, rel, open, close)?;
+    let closed = close_after(slice, rel, open, close)?;
+    let span = if around {
+        opened..closed + close.len_utf8()
+    } else {
+        opened + open.len_utf8()..closed
+    };
+    Some(content.start + span.start..content.start + span.end)
+}
+
+/// The unmatched opener at or before `rel`, depth counted right to left.
+fn open_before(
+    slice: &str,
+    rel: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
+    let mut depth = 0i32;
+    let scan = slice.get(..rel.min(slice.len())).unwrap_or_default();
+    if slice.get(rel..).unwrap_or_default().starts_with(open) {
+        return Some(rel);
+    }
+    for (offset, ch) in scan.char_indices().rev() {
+        if ch == close {
+            depth += 1;
+        } else if ch == open {
+            if depth == 0 {
+                return Some(offset);
+            }
+            depth -= 1;
+        }
+    }
+    None
+}
+
+/// The matching closer after `rel`, depth counted left to right.
+fn close_after(
+    slice: &str,
+    rel: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
+    let mut depth = 0i32;
+    let from = rel.min(slice.len());
+    for (offset, ch) in slice.get(from..).unwrap_or_default().char_indices() {
+        if ch == open && offset > 0 {
+            depth += 1;
+        } else if ch == close {
+            if depth == 0 {
+                return Some(from + offset);
+            }
+            depth -= 1;
+        }
+    }
+    None
+}
+
+/// What p and P splice once the executor has read the clipboard: the
+/// insertion span, its text and the caret landing — pure, so the paste
+/// grammar tests headlessly. A clip ending in a newline is linewise (vim's
+/// register kind cannot ride through the OS, so the trailing newline is
+/// the heuristic — adr/2026-08-one-register-the-clipboard.md).
+pub fn paste_spec(
+    text: &str,
+    blocks: &[Block],
+    head: usize,
+    clip: &str,
+    before: bool,
+    count: usize,
+) -> (Range<usize>, String, usize) {
+    let lines = Lines::of(text, blocks);
+    let line = lines.around(head);
+    let body = clip.repeat(count.max(1));
+    if clip.ends_with('\n') {
+        if before {
+            let caret = line.start + blank_prefix(&body);
+            return (line.start..line.start, body, caret);
+        }
+        let row = lines.row_of(head);
+        let next = row + 1;
+        if next < lines.rows() && lines.row(next).start == line.end + 1 {
+            let at = line.end + 1;
+            let caret = at + blank_prefix(&body);
+            (at..at, body, caret)
+        } else {
+            // the line's newline is the separator's (or the note's end):
+            // open the line with the break the body carried
+            let opened =
+                format!("\n{}", body.strip_suffix('\n').unwrap_or(&body));
+            let caret = line.end + 1 + blank_prefix(&opened[1..]);
+            (line.end..line.end, opened, caret)
+        }
+    } else {
+        let at = if before {
+            head
+        } else {
+            caret::next_cluster(text, head).min(line.end)
+        };
+        // vim lands on the last pasted cluster
+        let caret = at + caret::prev_cluster(&body, body.len());
+        (at..at, body, caret)
+    }
+}
+
+/// How far into its first line the pasted body's first non-blank sits —
+/// the linewise paste's caret landing, and the linewise delete's.
+pub fn blank_prefix(body: &str) -> usize {
+    let first = body.split('\n').next().unwrap_or_default();
+    first
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(offset, _)| offset)
+        .unwrap_or(0)
+}
+
+/// What , repeats: the last find, the other way — public because the
+/// operator grammar normalizes , into the find it reverses.
+pub fn reverse(kind: FindKind) -> FindKind {
     match kind {
         FindKind::ForwardOn => FindKind::BackwardOn,
         FindKind::BackwardOn => FindKind::ForwardOn,
@@ -657,6 +959,88 @@ mod tests {
         assert_eq!(
             motion(text, &lines, 0, Motion::RepeatFindBack, 1, None, None),
             None
+        );
+    }
+
+    #[test]
+    fn word_objects_take_runs_blanks_and_edges() {
+        let text = "un  mot final\n";
+        let parsed = blocks::segment(text);
+        // iw on the blank run is the blanks themselves
+        assert_eq!(
+            object(text, &parsed, 2, ObjectKind::Word, false),
+            Some(2..4),
+        );
+        // aw on the last word has no trailing blanks: the leading ones come
+        assert_eq!(
+            object(text, &parsed, 8, ObjectKind::Word, true),
+            Some(7..13),
+        );
+        // a caret resting past the line's last cluster still names it
+        assert_eq!(
+            object(text, &parsed, 13, ObjectKind::Word, false),
+            Some(8..13),
+        );
+        // an empty line names nothing
+        assert_eq!(object(text, &parsed, 14, ObjectKind::Word, false), None);
+    }
+
+    #[test]
+    fn pair_objects_work_from_their_delimiters_and_respect_nesting() {
+        let text = "a (b (c) d) e\n";
+        let parsed = blocks::segment(text);
+        let pair = ObjectKind::Pair('(', ')');
+        // from inside the inner pair, the inner pair answers
+        assert_eq!(object(text, &parsed, 6, pair, false), Some(6..7));
+        // from between the pairs, the outer one answers
+        assert_eq!(object(text, &parsed, 9, pair, true), Some(2..11));
+        // standing on the opener names its own pair
+        assert_eq!(object(text, &parsed, 5, pair, false), Some(6..7));
+        // standing on the closer too
+        assert_eq!(object(text, &parsed, 7, pair, false), Some(6..7));
+        // from before the inner pair, the closer walk nests through it
+        assert_eq!(object(text, &parsed, 3, pair, false), Some(3..10));
+        // an unclosed pair names nothing
+        let broken = "a (b\n";
+        let parsed = blocks::segment(broken);
+        assert_eq!(object(broken, &parsed, 3, pair, false), None);
+        let unopened = "a b) c\n";
+        let parsed = blocks::segment(unopened);
+        assert_eq!(object(unopened, &parsed, 1, pair, false), None);
+    }
+
+    #[test]
+    fn block_objects_read_the_map_not_a_scan() {
+        let parsed = blocks::segment(NOTE);
+        // ip on the list block is its content; ap rides the separator
+        assert_eq!(
+            object(NOTE, &parsed, 25, ObjectKind::Block, false),
+            Some(11..36),
+        );
+        assert_eq!(
+            object(NOTE, &parsed, 25, ObjectKind::Block, true),
+            Some(11..38),
+        );
+        // the last block's around runs to the note's end
+        assert_eq!(
+            object(NOTE, &parsed, 40, ObjectKind::Block, true),
+            Some(38..NOTE.len()),
+        );
+    }
+
+    #[test]
+    fn objects_over_nothing_answer_none_and_other_quotes_answer() {
+        assert_eq!(object("", &[], 0, ObjectKind::Word, false), None);
+        let text = "l'idée et `du code`\n";
+        let parsed = blocks::segment(text);
+        assert_eq!(
+            object(text, &parsed, 3, ObjectKind::Quote('\''), false),
+            None,
+            "a lone apostrophe pairs with nothing"
+        );
+        assert_eq!(
+            object(text, &parsed, 12, ObjectKind::Quote('`'), false),
+            Some(12..19),
         );
     }
 

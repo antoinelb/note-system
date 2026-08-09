@@ -304,6 +304,81 @@ impl Editor {
         self.goal = None;
     }
 
+    /// p and P once the clipboard answered: `motions::paste_spec` decides
+    /// the insertion pure, and the splice lands it — an insertion inside
+    /// the active block, always (adr/2026-08-one-register-the-clipboard.md).
+    pub fn paste(&mut self, clip: &str, before: bool, count: usize) {
+        let Some(at) = self.caret() else { return };
+        let (span, body, caret) = {
+            let Some((_, text)) = self.note() else { return };
+            crate::motions::paste_spec(
+                text,
+                &self.blocks,
+                at.head,
+                clip,
+                before,
+                count,
+            )
+        };
+        self.splice(span, &body, caret);
+    }
+
+    /// A grammar change, note-global: a span inside the active block's
+    /// content routes through `edit` — the typing path, no resegment, so a
+    /// blank line still splits at the next resegmentation — while a span
+    /// that crosses the block splices the whole buffer and resegments, the
+    /// deactivation mechanism (adr/2026-08-editor-splice-cross-block.md).
+    /// The caret lands at `caret`, a post-splice coordinate.
+    pub fn splice(
+        &mut self,
+        span: Range<usize>,
+        replacement: &str,
+        caret: usize,
+    ) {
+        let Some(content) = self.active_content() else {
+            self.notice = Some(STALE_EDIT.to_string());
+            return;
+        };
+        if span.start <= span.end
+            && span.start >= content.start
+            && span.end <= content.end
+        {
+            let Some(source) = self.active_source().map(str::to_string) else {
+                self.notice = Some(STALE_EDIT.to_string());
+                return;
+            };
+            let rel = span.start - content.start..span.end - content.start;
+            if !source.is_char_boundary(rel.start)
+                || !source.is_char_boundary(rel.end)
+            {
+                self.notice = Some(STALE_EDIT.to_string());
+                return;
+            }
+            let mut value = source;
+            value.replace_range(rel, replacement);
+            self.edit(&value);
+            self.place(caret);
+            return;
+        }
+        let Some(note) = self.buffer.as_mut() else {
+            self.notice = Some(STALE_EDIT.to_string());
+            return;
+        };
+        if !note.replace_range(span, replacement) {
+            self.notice = Some(STALE_EDIT.to_string());
+            return;
+        }
+        let text = self
+            .buffer
+            .as_ref()
+            .map(|note| note.text().to_string())
+            .unwrap_or_default();
+        self.blocks = blocks::segment(&text);
+        self.active = (!self.blocks.is_empty())
+            .then(|| blocks::block_at(&self.blocks, caret));
+        self.place(floor_boundary(&text, caret));
+    }
+
     /// A motion's landing: the caret collapses to a note-global offset,
     /// waking the block that owns it when it lies outside the active one —
     /// the same flush-and-resegment path as a click, with the coordinate
@@ -1076,6 +1151,107 @@ mod tests {
         // a probe miss lands at the block's end
         editor.place_in_block(usize::MAX, 0, false);
         assert_eq!(editor.caret_in_block().1, 5, "the end of été");
+    }
+
+    #[test]
+    fn splice_within_the_block_rides_the_typing_path() {
+        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        let content = editor.blocks()[1].content();
+
+        // replace "title" with "titre": no resegment, later blocks shift
+        let start = content.start + 2;
+        editor.splice(start..start + 5, "titre", start);
+        let (_, text) = editor.note().expect("still open");
+        assert!(text.contains("= titre"), "{text}");
+        assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
+        assert_eq!(editor.active(), Some(1), "the block held");
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(start));
+    }
+
+    #[test]
+    fn splice_across_blocks_resegments_and_wakes_the_carets_block() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+
+        // delete from the title through the whole prose block
+        let start = editor.blocks()[1].range.start;
+        editor.splice(start..NOTE.len(), "", start);
+        let (_, text) = editor.note().expect("still open");
+        assert!(!text.contains("title"), "{text}");
+        assert!(!text.contains("prose"), "{text}");
+        let woken = editor.active().expect("a block woke");
+        assert_eq!(
+            editor.blocks().len() - 1,
+            woken,
+            "the caret's block is the last one now"
+        );
+    }
+
+    #[test]
+    fn splice_guards_stay_loud() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
+        editor.splice(0..1, "x", 0);
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+
+        // a span off a char boundary, inside the block
+        let (_dir, mut editor) = open_note("été\n");
+        editor.activate(0);
+        editor.splice(1..3, "x", 0);
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+
+        // and across: a reversed span the buffer refuses
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.splice(NOTE.len()..0, "x", 0);
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, NOTE, "a refused splice changes nothing");
+    }
+
+    #[test]
+    fn splice_survives_a_block_map_that_outgrew_its_note() {
+        // within-shaped span over a content_end past the buffer
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.blocks[0].content_end = NOTE.len() + 40;
+        editor.splice(2..4, "x", 2);
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+
+        // across-shaped span with the buffer gone from under the blocks
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(0);
+        editor.buffer = None;
+        editor.splice(0..NOTE.len(), "", 0);
+        assert_eq!(editor.notice(), Some(STALE_EDIT));
+    }
+
+    #[test]
+    fn paste_lands_the_clip_and_declines_when_closed() {
+        let (_dir, mut editor) = open_note("un mot\n");
+        editor.activate(0);
+        editor.place_at(3);
+        editor.paste("beau ", true, 1);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "un beau mot\n");
+
+        // a paste with nothing under it is inert, twice over
+        let mut closed = Editor::closed();
+        closed.paste("x", false, 1);
+        assert_eq!(closed.notice(), None);
+        let (_dir, mut editor) = open_note("un mot\n");
+        editor.deactivate();
+        editor.paste("x", false, 1);
+        assert_eq!(editor.caret(), None);
+
+        // and a note vanished from under its blocks declines too
+        let (_dir, mut editor) = open_note("un mot\n");
+        editor.activate(0);
+        editor.buffer = None;
+        editor.paste("x", false, 1);
+        assert_eq!(editor.note(), None);
     }
 
     #[test]

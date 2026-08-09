@@ -7,7 +7,7 @@ The seam this version fills was architected in v0 phase 5 and has held since: "t
 One editor serves every surface — the logs centre pane and the writing sheet mount the same machinery (`adr/2026-08-sheet-reuses-the-one-editor.md`) — so each phase below lands everywhere at once.
 **"Implemented incrementally as needed" is the design, not a disclaimer** (`plan.md` § Roadmap): every phase leaves the editor daily-drivable, and the *not in v2* list at the bottom is the ceiling — a key earns its way in through daily friction, never through completeness.
 
-**Next step → phase 3; or the v0/v1 polish backlogs.**
+**Next step → phase 4; or the v0/v1 polish backlogs.**
 
 ## How we work
 
@@ -69,11 +69,11 @@ Exit: h j k l w b $ gg carry you anywhere in the note; the arrows are nostalgia.
 
 Goal: editing becomes grammar — verb, count, noun.
 
-- [ ] Operators d c y over the phase-2 motions; the doubled line forms dd cc yy; the shorthands D C Y x X r ~; paste with p P; counts compose (d2w, 3dd); c ends in insert.
-- [ ] Text objects: iw aw, i" a", i( a) and the sibling pairs — and ip ap have a house meaning: the paragraph *is* the block, so the object comes from the block map, not a scan.
-- [ ] One register, and it is the system clipboard (vim's `clipboard=unnamedplus` as the only behaviour): y and p interop with the OS through the phase-0 seam; named registers wait for demonstrated need. **→ ADR**
-- [ ] A change whose span crosses the active block (dG, dj on a block's last line): `Buffer::replace_range` already spans the whole note — the mechanism is splice then resegment, as deactivation does; the decision is the shape of the `Editor` entry point beside block-scoped `edit`. **→ ADR**
-- [ ] Tests: the operator × motion matrix on fixture text, objects at edges and under nesting, clipboard round-trip, cross-block changes resegment and save.
+- [x] Operators d c y over the phase-2 motions; the doubled line forms dd cc yy; the shorthands D C Y x X r ~; paste with p P; counts compose (d2w, 3dd, 2d3w); c ends in insert.
+- [x] Text objects: iw aw, i" a" i' a' i` a`, i( a) and the sibling pairs — « » included — and ip ap have the house meaning: the paragraph *is* the block, read off the block map, not a scan.
+- [x] One register, and it is the system clipboard; linewise-ness rides the trailing newline (`adr/2026-08-one-register-the-clipboard.md`); named registers wait for demonstrated need.
+- [x] Cross-block changes go through `Editor::splice`: within-block spans ride the typing path, crossing spans splice-then-resegment (`adr/2026-08-editor-splice-cross-block.md`).
+- [x] Tests: the operator × motion matrix on fixture text, objects at edges and under nesting, clipboard round-trip, cross-block changes resegment and save.
 
 Exit: diw, ci", yy then p — no mouse selection survives in the writing flow.
 
