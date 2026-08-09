@@ -22,6 +22,16 @@ pub enum Mode {
     Normal,
     #[default]
     Insert,
+    /// See the span before choosing the verb
+    /// (adr/2026-08-visual-selection-is-the-anchor.md).
+    Visual(VisualKind),
+}
+
+/// v extends by clusters, V by whole lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualKind {
+    Char,
+    Line,
 }
 
 /// What one keystroke sees: the note's text, its block map and the caret's
@@ -30,6 +40,9 @@ pub struct View<'a> {
     pub text: &'a str,
     pub blocks: &'a [Block],
     pub head: usize,
+    /// The selection's far end — phase 0's anchor, which visual mode rides
+    /// (adr/2026-08-visual-selection-is-the-anchor.md).
+    pub anchor: usize,
 }
 
 /// The editor-wide modal state, one signal beside the editor's: boundary
@@ -95,6 +108,10 @@ pub enum Act {
     /// p and P: async by nature — the executor reads the clipboard, then
     /// `paste_spec` decides pure.
     Paste { before: bool, count: usize },
+    /// Visual's motion: the head moves, the anchor holds.
+    Extend(usize),
+    /// o in visual: the caret jumps to the selection's other end.
+    SwapEnds,
 }
 
 /// What the grammar decided about one keystroke.
@@ -135,6 +152,7 @@ impl Vim {
         match self.mode {
             Mode::Insert => self.insert_key(key, view),
             Mode::Normal => self.normal_key(key, view),
+            Mode::Visual(kind) => self.visual_key(kind, key, view),
         }
     }
 
@@ -267,6 +285,17 @@ impl Vim {
                 Act::Type("\n".to_string()),
                 Act::Place(line.start),
             ]),
+            // see the span before choosing the verb
+            "v" if self.operator.is_none() => {
+                self.reset();
+                self.mode = Mode::Visual(VisualKind::Char);
+                Outcome::Acts(vec![])
+            }
+            "V" if self.operator.is_none() => {
+                self.reset();
+                self.mode = Mode::Visual(VisualKind::Line);
+                Outcome::Acts(vec![])
+            }
             // the shorthands, spelled as themselves rather than rewritten:
             // their edge behaviour (x at a line's last cluster) is exact
             "D" if self.operator.is_none() => self.finish_operator(
@@ -299,6 +328,137 @@ impl Vim {
             _ => {
                 self.reset();
                 Outcome::Swallow
+            }
+        }
+    }
+
+    /// Visual mode: motions extend, o swaps the ends, the verbs apply to
+    /// the selection, Escape returns to normal with the caret at the head.
+    fn visual_key(
+        &mut self,
+        kind: VisualKind,
+        key: &Key,
+        view: &View,
+    ) -> Outcome {
+        if let Some(prefix) = self.prefix.take() {
+            return self.finish_prefix(prefix, key, view);
+        }
+        match key {
+            Key::Escape => {
+                self.reset();
+                self.mode = Mode::Normal;
+                Outcome::Acts(vec![Act::Place(view.head)])
+            }
+            // the arrows extend too — collapsing mid-visual would be the
+            // one thing no one means
+            Key::ArrowLeft => self.run_motion(Motion::Left, view),
+            Key::ArrowRight => self.run_motion(Motion::Right, view),
+            Key::ArrowUp => self.run_motion(Motion::Up, view),
+            Key::ArrowDown => self.run_motion(Motion::Down, view),
+            Key::Home => self.run_motion(Motion::LineStart, view),
+            Key::End => self.run_motion(Motion::LineEnd, view),
+            Key::Character(character) => {
+                self.visual_character(kind, character, view)
+            }
+            _ => Outcome::Swallow,
+        }
+    }
+
+    fn visual_character(
+        &mut self,
+        kind: VisualKind,
+        character: &str,
+        view: &View,
+    ) -> Outcome {
+        match character {
+            digit if self.is_count_digit(digit) => {
+                let value =
+                    digit.chars().next().and_then(|ch| ch.to_digit(10));
+                self.count = self
+                    .count
+                    .saturating_mul(10)
+                    .saturating_add(value.unwrap_or(0));
+                Outcome::Swallow
+            }
+            // the same kind toggles out; the other switches in place
+            "v" => {
+                self.mode = if kind == VisualKind::Char {
+                    Mode::Normal
+                } else {
+                    Mode::Visual(VisualKind::Char)
+                };
+                if self.mode == Mode::Normal {
+                    Outcome::Acts(vec![Act::Place(view.head)])
+                } else {
+                    Outcome::Acts(vec![])
+                }
+            }
+            "V" => {
+                self.mode = if kind == VisualKind::Line {
+                    Mode::Normal
+                } else {
+                    Mode::Visual(VisualKind::Line)
+                };
+                if self.mode == Mode::Normal {
+                    Outcome::Acts(vec![Act::Place(view.head)])
+                } else {
+                    Outcome::Acts(vec![])
+                }
+            }
+            "o" => Outcome::Acts(vec![Act::SwapEnds]),
+            "d" | "x" => self.visual_operate(Operator::Delete, kind, view),
+            "c" => self.visual_operate(Operator::Change, kind, view),
+            "y" => self.visual_operate(Operator::Yank, kind, view),
+            "g" => {
+                self.prefix = Some(Prefix::Go);
+                Outcome::Swallow
+            }
+            "f" => self.await_prefix(Prefix::Find(FindKind::ForwardOn)),
+            "F" => self.await_prefix(Prefix::Find(FindKind::BackwardOn)),
+            "t" => self.await_prefix(Prefix::Find(FindKind::ForwardBefore)),
+            "T" => self.await_prefix(Prefix::Find(FindKind::BackwardBefore)),
+            "h" => self.run_motion(Motion::Left, view),
+            "l" => self.run_motion(Motion::Right, view),
+            "j" => self.run_motion(Motion::Down, view),
+            "k" => self.run_motion(Motion::Up, view),
+            "w" => self.run_motion(Motion::WordForward, view),
+            "b" => self.run_motion(Motion::WordBack, view),
+            "e" => self.run_motion(Motion::WordEnd, view),
+            "0" => self.run_motion(Motion::LineStart, view),
+            "^" => self.run_motion(Motion::FirstNonBlank, view),
+            "$" => self.run_motion(Motion::LineEnd, view),
+            "G" => self.run_motion(Motion::LastLine, view),
+            ";" => self.run_motion(Motion::RepeatFind, view),
+            "," => self.run_motion(Motion::RepeatFindBack, view),
+            _ => Outcome::Swallow,
+        }
+    }
+
+    /// A verb over the selection: char-wise takes both end clusters, as
+    /// vim's visual does; line-wise takes the whole lines. The mode falls
+    /// back to normal — or into insert, when the verb was c.
+    fn visual_operate(
+        &mut self,
+        op: Operator,
+        kind: VisualKind,
+        view: &View,
+    ) -> Outcome {
+        let low = view.head.min(view.anchor);
+        let high = view.head.max(view.anchor);
+        self.mode = Mode::Normal;
+        match kind {
+            VisualKind::Char => {
+                let span = low..caret::next_cluster(view.text, high);
+                self.finish_operator(op, span, false, view)
+            }
+            VisualKind::Line => {
+                let lines = Lines::of(view.text, view.blocks);
+                let span = motions::linewise_span(
+                    &lines,
+                    lines.row_of(low),
+                    lines.row_of(high),
+                );
+                self.finish_operator(op, span, true, view)
             }
         }
     }
@@ -392,7 +552,14 @@ impl Vim {
                 match landed {
                     Some((target, goal)) => {
                         self.goal = goal;
-                        Outcome::Acts(vec![Act::Place(target)])
+                        // in visual the anchor holds; everywhere else the
+                        // landing collapses
+                        let act = if matches!(self.mode, Mode::Visual(_)) {
+                            Act::Extend(target)
+                        } else {
+                            Act::Place(target)
+                        };
+                        Outcome::Acts(vec![act])
                     }
                     None => {
                         self.goal = None;
@@ -831,7 +998,27 @@ mod tests {
     }
 
     fn view<'a>(text: &'a str, blocks: &'a [Block], head: usize) -> View<'a> {
-        View { text, blocks, head }
+        // collapsed by default: visual tests build their own anchor
+        View {
+            text,
+            blocks,
+            head,
+            anchor: head,
+        }
+    }
+
+    fn spread<'a>(
+        text: &'a str,
+        blocks: &'a [Block],
+        anchor: usize,
+        head: usize,
+    ) -> View<'a> {
+        View {
+            text,
+            blocks,
+            head,
+            anchor,
+        }
     }
 
     // -- phases 1 and 2, unchanged -------------------------------------------
@@ -1861,6 +2048,251 @@ mod tests {
                 caret: 2
             }]),
         );
+    }
+
+    // -- phase 4: visual mode ------------------------------------------------
+
+    #[test]
+    fn v_extends_by_motions_and_escape_returns_to_normal() {
+        let parsed = blocks::segment(NOTE);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "v", &view(NOTE, &parsed, 2)),
+            Outcome::Acts(vec![]),
+        );
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Char));
+        // motions extend rather than collapse — arrows included
+        assert_eq!(
+            feed(&mut vim, "e", &spread(NOTE, &parsed, 2, 2)),
+            Outcome::Acts(vec![Act::Extend(3)]),
+        );
+        assert_eq!(
+            vim.handle(
+                &Key::ArrowRight,
+                Modifiers::empty(),
+                &spread(NOTE, &parsed, 2, 3)
+            ),
+            Outcome::Acts(vec![Act::Extend(4)]),
+        );
+        // counts still compose
+        assert_eq!(
+            feed(&mut vim, "2j", &spread(NOTE, &parsed, 2, 4)),
+            Outcome::Acts(vec![Act::Extend(27)]),
+        );
+        // o swaps the ends, unbound keys stay inert
+        assert_eq!(
+            feed(&mut vim, "o", &spread(NOTE, &parsed, 2, 27)),
+            Outcome::Acts(vec![Act::SwapEnds]),
+        );
+        assert_eq!(
+            feed(&mut vim, "z", &spread(NOTE, &parsed, 27, 2)),
+            Outcome::Swallow,
+        );
+        // escape returns to normal with the caret at the head
+        assert_eq!(
+            vim.handle(
+                &Key::Escape,
+                Modifiers::empty(),
+                &spread(NOTE, &parsed, 27, 2)
+            ),
+            Outcome::Acts(vec![Act::Place(2)]),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn visual_operators_take_the_selection() {
+        let text = "un café noir\n";
+        let parsed = blocks::segment(text);
+        // v..d over "café": both end clusters included
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        let outcome = vim.handle(
+            &character("d"),
+            Modifiers::empty(),
+            &spread(text, &parsed, 3, 6),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::SetClipboard("café".into()),
+                Act::Splice {
+                    span: 3..8,
+                    text: String::new(),
+                    caret: 3
+                },
+            ]),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+        // x is d; a backward selection spans the same
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        let outcome = vim.handle(
+            &character("x"),
+            Modifiers::empty(),
+            &spread(text, &parsed, 6, 3),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::SetClipboard("café".into()),
+                Act::Splice {
+                    span: 3..8,
+                    text: String::new(),
+                    caret: 3
+                },
+            ]),
+        );
+        // c ends in insert
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        vim.handle(
+            &character("c"),
+            Modifiers::empty(),
+            &spread(text, &parsed, 3, 6),
+        );
+        assert_eq!(vim.mode, Mode::Insert);
+        // y fills the register and lands at the span's start
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        let outcome = vim.handle(
+            &character("y"),
+            Modifiers::empty(),
+            &spread(text, &parsed, 6, 3),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::SetClipboard("café".into()),
+                Act::Place(3)
+            ]),
+        );
+    }
+
+    #[test]
+    fn line_visual_takes_whole_lines_and_the_kinds_toggle() {
+        let text = "une\ndeux\ntrois\n";
+        let parsed = blocks::segment(text);
+        // V then j then d: both lines and their newlines
+        let mut vim = normal();
+        feed(&mut vim, "V", &view(text, &parsed, 1));
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Line));
+        let outcome = vim.handle(
+            &character("d"),
+            Modifiers::empty(),
+            &spread(text, &parsed, 1, 5),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![
+                Act::SetClipboard("une\ndeux\n".into()),
+                Act::Splice {
+                    span: 0..9,
+                    text: String::new(),
+                    caret: 0
+                },
+            ]),
+        );
+        // v inside V switches kind; V again toggles out
+        let mut vim = normal();
+        feed(&mut vim, "V", &view(text, &parsed, 1));
+        assert_eq!(
+            feed(&mut vim, "v", &view(text, &parsed, 1)),
+            Outcome::Acts(vec![]),
+        );
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Char));
+        assert_eq!(
+            feed(&mut vim, "V", &view(text, &parsed, 1)),
+            Outcome::Acts(vec![]),
+        );
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Line));
+        let outcome = feed(&mut vim, "V", &view(text, &parsed, 1));
+        assert_eq!(outcome, Outcome::Acts(vec![Act::Place(1)]));
+        assert_eq!(vim.mode, Mode::Normal);
+        // and v toggles itself out too
+        let mut vim = normal();
+        feed(&mut vim, "v", &view(text, &parsed, 1));
+        let outcome = feed(&mut vim, "v", &view(text, &parsed, 1));
+        assert_eq!(outcome, Outcome::Acts(vec![Act::Place(1)]));
+        assert_eq!(vim.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn visual_finds_and_counts_still_answer() {
+        let text = "un café, un café noir\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        feed(&mut vim, "v", &view(text, &parsed, 0));
+        assert_eq!(
+            feed(&mut vim, "fc", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Extend(3)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "2l", &spread(text, &parsed, 0, 3)),
+            Outcome::Acts(vec![Act::Extend(5)]),
+        );
+        // a non-character key stays inert in visual
+        assert_eq!(
+            vim.handle(&Key::Tab, Modifiers::empty(), &view(text, &parsed, 5)),
+            Outcome::Swallow,
+        );
+    }
+
+    #[test]
+    fn every_visual_motion_key_extends() {
+        let text = "un café, un café noir\nposé là\n";
+        let parsed = blocks::segment(text);
+        // spot checks…
+        let mut vim = normal();
+        feed(&mut vim, "v", &view(text, &parsed, 10));
+        assert_eq!(
+            feed(&mut vim, "h", &spread(text, &parsed, 10, 10)),
+            Outcome::Acts(vec![Act::Extend(9)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "k", &spread(text, &parsed, 10, 25)),
+            Outcome::Acts(vec![Act::Extend(1)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "$", &spread(text, &parsed, 10, 0)),
+            Outcome::Acts(vec![Act::Extend(22)]),
+        );
+        // …and the whole vocabulary answers without ever passing through
+        for keys in ["w", "b", "0", "^", "G", ";", ",", "Fc", "Tc", "tc", "gg"]
+        {
+            let mut vim = normal();
+            feed(&mut vim, "v", &view(text, &parsed, 10));
+            let outcome = feed(&mut vim, keys, &spread(text, &parsed, 10, 10));
+            assert_ne!(outcome, Outcome::Pass, "{keys}");
+            assert!(matches!(vim.mode, Mode::Visual(_)), "{keys} left visual");
+        }
+        for key in [
+            Key::ArrowLeft,
+            Key::ArrowUp,
+            Key::ArrowDown,
+            Key::Home,
+            Key::End,
+        ] {
+            let mut vim = normal();
+            feed(&mut vim, "v", &view(text, &parsed, 10));
+            let outcome = vim.handle(
+                &key,
+                Modifiers::empty(),
+                &spread(text, &parsed, 10, 10),
+            );
+            assert!(
+                matches!(outcome, Outcome::Acts(_)),
+                "{key:?}: {outcome:?}"
+            );
+        }
     }
 
     #[test]

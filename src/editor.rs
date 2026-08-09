@@ -386,7 +386,40 @@ impl Editor {
     /// (adr/2026-08-caret-on-editor-note-bytes.md). Phase 5's search lands
     /// through this too.
     pub fn place_at(&mut self, offset: usize) {
-        let Some((_, text)) = self.note() else { return };
+        let offset = self.land(offset);
+        self.place(offset);
+    }
+
+    /// Visual mode's motion: the head moves — waking blocks exactly as a
+    /// landing does — while the anchor holds the selection's far end
+    /// (adr/2026-08-visual-selection-is-the-anchor.md).
+    pub fn extend_to(&mut self, offset: usize) {
+        let anchor = self.caret.anchor;
+        let offset = self.land(offset);
+        self.caret = Caret {
+            anchor,
+            head: offset,
+        };
+        self.goal = None;
+    }
+
+    /// o in visual mode: the caret jumps to the selection's other end.
+    pub fn swap_ends(&mut self) {
+        let Caret { anchor, head } = self.caret;
+        let landed = self.land(anchor);
+        self.caret = Caret {
+            anchor: head,
+            head: landed,
+        };
+        self.goal = None;
+    }
+
+    /// The shared landing: floor the coordinate onto a boundary and wake
+    /// the block owning it when the caret leaves the active one.
+    fn land(&mut self, offset: usize) -> usize {
+        let Some((_, text)) = self.note() else {
+            return offset;
+        };
         let offset = floor_boundary(text, offset);
         let inside = self.active_content().is_some_and(|content| {
             offset >= content.start && offset <= content.end
@@ -394,7 +427,7 @@ impl Editor {
         if !inside {
             self.activate(offset);
         }
-        self.place(offset);
+        offset
     }
 
     /// A vertical move leaving the block: the neighbouring block wakes
@@ -1282,6 +1315,35 @@ mod tests {
         let mut editor = Editor::closed();
         editor.place_at(3);
         assert_eq!(editor.caret(), None);
+    }
+
+    #[test]
+    fn extend_and_swap_keep_the_anchor_across_blocks() {
+        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        let start = editor.blocks()[1].content().start;
+        editor.place_at(start);
+
+        // extending into another block wakes it, the anchor holding
+        editor.extend_to(NOTE.len() - 2);
+        assert_eq!(editor.active(), Some(2), "the prose block woke");
+        let caret = editor.caret().expect("a caret");
+        assert_eq!(caret.anchor, start, "the far end held");
+        assert_eq!(caret.head, NOTE.len() - 2);
+
+        // o jumps back to the far end, waking its block again
+        editor.swap_ends();
+        assert_eq!(editor.active(), Some(1));
+        let caret = editor.caret().expect("a caret");
+        assert_eq!(caret.head, start);
+        assert_eq!(caret.anchor, NOTE.len() - 2);
+
+        // closed editors absorb both
+        let mut closed = Editor::closed();
+        closed.extend_to(5);
+        closed.swap_ends();
+        assert_eq!(closed.caret(), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ The seam this version fills was architected in v0 phase 5 and has held since: "t
 One editor serves every surface — the logs centre pane and the writing sheet mount the same machinery (`adr/2026-08-sheet-reuses-the-one-editor.md`) — so each phase below lands everywhere at once.
 **"Implemented incrementally as needed" is the design, not a disclaimer** (`plan.md` § Roadmap): every phase leaves the editor daily-drivable, and the *not in v2* list at the bottom is the ceiling — a key earns its way in through daily friction, never through completeness.
 
-**Next step → phase 4; or the v0/v1 polish backlogs.**
+**Next step → phase 5; or the v0/v1 polish backlogs.**
 
 ## How we work
 
@@ -81,9 +81,9 @@ Exit: diw, ci", yy then p — no mouse selection survives in the writing flow.
 
 Goal: see the span before choosing the verb.
 
-- [ ] v (character-wise) and V (line-wise): motions extend the selection, o swaps its ends, Escape returns to normal.
-- [ ] The phase-3 operators apply to the selection; the drawing is phase 0's selection highlight.
-- [ ] Tests: extension by each motion class, o, operator application, Escape restores normal with the caret where vim leaves it.
+- [x] v (character-wise) and V (line-wise): motions extend the selection, o swaps its ends, Escape returns to normal (`adr/2026-08-visual-selection-is-the-anchor.md`).
+- [x] The phase-3 operators apply to the selection; the drawing is phase 0's selection highlight, riding the same anchor.
+- [x] Tests: extension by each motion class, o, operator application, Escape restores normal with the caret where vim leaves it.
 
 Exit: v e d reads like the sentence it is.
 

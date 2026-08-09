@@ -1054,6 +1054,12 @@ fn Shell(
                     vim::Act::Splice { span, text, caret } => {
                         editor.write().splice(span, &text, caret);
                     }
+                    vim::Act::Extend(at) => {
+                        editor.write().extend_to(at);
+                    }
+                    vim::Act::SwapEnds => {
+                        editor.write().swap_ends();
+                    }
                     // the one async act: read the clipboard, then the
                     // editor decides pure against the state the read found
                     vim::Act::Paste { before, count } => {
@@ -1115,7 +1121,10 @@ fn Shell(
                                     // box thinking, a bar writing
                                     // (adr/2026-08-caret-shape-is-the-mode-indicator.md)
                                     let shape = match vim.read().mode {
-                                        vim::Mode::Normal => caret::Shape::Box,
+                                        vim::Mode::Normal
+                                        | vim::Mode::Visual(_) => {
+                                            caret::Shape::Box
+                                        }
                                         vim::Mode::Insert => caret::Shape::Bar,
                                     };
                                     let lines = caret::layout(
@@ -1271,6 +1280,7 @@ fn Shell(
                                                                         text: note_text,
                                                                         blocks: snapshot.blocks(),
                                                                         head: at.head,
+                                                                        anchor: at.anchor,
                                                                     },
                                                                 )
                                                             },
@@ -5073,6 +5083,79 @@ mod tests {
         );
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before);
+    }
+
+    #[test]
+    fn v_e_d_reads_like_the_sentence_it_is() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // normal, to the line's start, then v e: the first word lights up
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let woken = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        // gg woke another block: the widget remounted with a fresh sink
+        let sink = listeners(&woken, "keydown")[0];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("e".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"class="sel""#),
+            "the span shows before the verb: {}",
+            dioxus_ssr::render(&dom)
+        );
+
+        // o hops to the other end and back, the span holding
+        press(
+            &mut dom,
+            sink,
+            Key::Character("o".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("o".into()),
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="sel""#));
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            !source_of(&dom).starts_with("#import"),
+            "the word went: {}",
+            source_of(&dom)
+        );
+        assert!(
+            !dioxus_ssr::render(&dom).contains(r#"class="sel""#),
+            "and the selection collapsed"
+        );
     }
 
     #[test]
