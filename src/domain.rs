@@ -68,6 +68,23 @@ impl NoteType {
         }
     }
 
+    /// Whether this is one of the eight types a permanent note can carry —
+    /// the closed set the type bars, the create picker and the promotion
+    /// treatment all key on (adr/2026-08-typed-capture-wears-its-hue.md).
+    pub fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            NoteType::Person
+                | NoteType::Organisation
+                | NoteType::Source
+                | NoteType::Concept
+                | NoteType::Claim
+                | NoteType::Idea
+                | NoteType::Personal
+                | NoteType::Project
+        )
+    }
+
     pub fn as_name(&self) -> &str {
         match self {
             NoteType::Person => "person",

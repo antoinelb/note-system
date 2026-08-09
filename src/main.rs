@@ -35,6 +35,15 @@ fn main() {
         .with_context(ui::Closer(std::sync::Arc::new(|| {
             dioxus::desktop::window().close()
         })))
+        // read when a note is created, from the overlay's handler — the same
+        // window() context note as the Closer
+        // (adr/2026-08-new-card-lands-at-viewport-centre.md)
+        .with_context(ui::Viewport(std::sync::Arc::new(|| {
+            let window = dioxus::desktop::window();
+            let size =
+                window.inner_size().to_logical::<f64>(window.scale_factor());
+            (size.width, size.height)
+        })))
         // the app's single clock read
         // (adr/2026-07-today-injected-root-context.md)
         .with_context(ui::Today(time::today()))

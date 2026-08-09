@@ -2,6 +2,7 @@
 
 pub mod blocks;
 pub mod capture;
+pub mod create;
 pub mod domain;
 pub mod editor;
 pub mod index;

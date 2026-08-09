@@ -41,6 +41,13 @@ pub struct VaultRoot(pub Option<PathBuf>);
 #[derive(Clone)]
 pub struct Closer(pub Arc<dyn Fn() + Send + Sync>);
 
+/// How a new card learns where the viewport's centre is: `main` injects the
+/// real window's logical inner size, the headless tests inject a fixed one —
+/// the `Closer` pattern; absent entirely, `table::DEFAULT_VIEWPORT` stands
+/// in (adr/2026-08-new-card-lands-at-viewport-centre.md).
+#[derive(Clone)]
+pub struct Viewport(pub Arc<dyn Fn() -> (f64, f64) + Send + Sync>);
+
 /// How a boundary arrow reads the active textarea's caret: `main` injects a
 /// JS `selectionStart` probe (UTF-16 code units; None when nothing
 /// applies), the headless tests inject scripted fakes — the `Closer`
@@ -238,6 +245,7 @@ fn Shell(
     let writer = try_consume_context::<CaretWriter>();
     let clipboard = try_consume_context::<Clipboard>();
     let now = try_consume_context::<Now>();
+    let window_size = try_consume_context::<Viewport>();
     // always provided by App above; the palette dispatches through it
     let root_commands = use_context::<RootCommands>();
 
@@ -258,6 +266,15 @@ fn Shell(
     let mut palette = use_signal(|| None::<Palette>);
     let mut palette_query = use_signal(String::new);
     let mut palette_highlighted = use_signal(|| 0usize);
+
+    // the Ctrl+N create overlay, the same split again — its frozen half also
+    // remembers which step it stands in (adr/2026-08-ctrl-n-two-step-create-overlay.md);
+    // the notice is overlay-local because on a bare table no editor notice
+    // line is visible
+    let mut creator = use_signal(|| None::<Creator>);
+    let mut creator_query = use_signal(String::new);
+    let mut creator_highlighted = use_signal(|| 0usize);
+    let mut creator_notice = use_signal(|| None::<String>);
     // the uncontrolled textarea only shows a spliced-in link if it remounts,
     // and it remounts when its key changes — keystrokes never touch this
     let mut epoch = use_signal(|| 0u32);
@@ -377,22 +394,31 @@ fn Shell(
     // (adr/2026-08-sheet-reuses-the-one-editor.md), so autosave, flush and
     // the notice line keep holding untouched. The buffer reaches disk
     // before it is replaced — a failed save keeps the current note open
-    // with its error rather than dropping the text.
-    let open_sheet = use_callback({
-        let root = root.clone();
+    // with its error rather than dropping the text. The landing half takes
+    // the editor already built: creation hands the file it just wrote, where
+    // the index lookup would still be a watcher debounce behind
+    // (adr/2026-08-ctrl-n-two-step-create-overlay.md).
+    let show_sheet = use_callback({
         let fragments = fragments.clone();
-        move |id: String| {
-            if sheet.peek().as_deref() == Some(id.as_str()) {
-                return;
-            }
+        move |(id, opened): (String, Editor)| {
             if !editor.write().flush() {
                 return;
             }
             picker.set(None);
-            editor.set(open_sheet_note(&root, &id));
+            editor.set(opened);
             fragments.borrow_mut().sweep();
             screen.set(Screen::Table);
             sheet.set(Some(id));
+        }
+    });
+    let open_sheet = use_callback({
+        let root = root.clone();
+        move |id: String| {
+            if sheet.peek().as_deref() == Some(id.as_str()) {
+                return;
+            }
+            let opened = open_sheet_note(&root, &id);
+            show_sheet.call((id, opened));
         }
     });
 
@@ -413,6 +439,115 @@ fn Shell(
                 notes.peek().iter().any(|(existing, _)| existing == &id);
             editor.set(open_selected(&root, exists, &id));
             fragments.borrow_mut().sweep();
+        }
+    });
+
+    // the sheet's delete (adr/2026-08-delete-note-palette-only-from-sheet.md):
+    // unconfirmed, no trash. Deliberately not `close_sheet` — its flush
+    // would rewrite the just-deleted file from the buffer. The landing half
+    // is close_sheet's minus the flush: card and position go optimistically,
+    // the watcher converges the index, and the dangling links the deletion
+    // causes surface in the loops list as designed.
+    let delete_note = use_callback({
+        let root = root.clone();
+        let fragments = fragments.clone();
+        move |()| {
+            let Some(own) = sheet.peek().clone() else {
+                return;
+            };
+            // an error sheet holds a closed editor: nothing on disk to
+            // remove, the sheet still deserves to close
+            let file =
+                editor.peek().note().map(|(file, _)| file.to_path_buf());
+            if let Some(file) = file
+                && let Err(error) = std::fs::remove_file(&file)
+            {
+                editor.write().set_notice(format!("delete: {error}"));
+                return;
+            }
+            sheet.set(None);
+            positions.write().remove(&own);
+            table_notes.with_mut(|list| list.retain(|note| note.id != own));
+            let id = selected.peek().1.clone();
+            let exists =
+                notes.peek().iter().any(|(existing, _)| existing == &id);
+            editor.set(open_selected(&root, exists, &id));
+            fragments.borrow_mut().sweep();
+        }
+    });
+
+    // the create overlay's opening half — summon_palette's twin: what is
+    // true now is frozen now, because the overlay's input is about to own
+    // the focus (adr/2026-08-ctrl-n-two-step-create-overlay.md)
+    let open_creator = use_callback({
+        let probe = probe.clone();
+        move |()| {
+            let probe = probe.clone();
+            spawn(async move {
+                let block_active = editor.peek().active().is_some();
+                let caret = match probe {
+                    Some(probe) if block_active => (probe.0)().await,
+                    _ => None,
+                };
+                creator_query.set(String::new());
+                creator_highlighted.set(0);
+                creator_notice.set(None);
+                creator.set(Some(Creator {
+                    picked: None,
+                    caret,
+                }));
+            });
+        }
+    });
+
+    // close_palette's twin, focus restoration and all
+    let close_creator = use_callback({
+        let pending_caret = pending_caret.clone();
+        move |restore: bool| {
+            let caret = creator.peek().as_ref().and_then(|open| open.caret);
+            creator.set(None);
+            if restore && editor.peek().active().is_some() {
+                pending_caret.set(caret);
+                epoch += 1;
+            }
+        }
+    });
+
+    // the overlay's final Enter: the note exists before the sheet opens on
+    // it, and the card lands centred in the viewport with its position
+    // persisted through the store's own debounce
+    // (adr/2026-08-new-card-lands-at-viewport-centre.md). A refused
+    // creation stays in the overlay, amendable.
+    let create_note = use_callback({
+        let root = root.clone();
+        let window_size = window_size.clone();
+        move |(picked, title): (NoteType, String)| {
+            let created = today.to_string();
+            match crate::create::permanent(&root, &picked, &title, &created) {
+                Ok((id, path)) => {
+                    creator.set(None);
+                    let viewport = window_size
+                        .as_ref()
+                        .map_or(table::DEFAULT_VIEWPORT, |size| (size.0)());
+                    let (x, y) = table::spawn_position(viewport, *pan.peek());
+                    positions.write().set(&id, x, y);
+                    // optimistic, the time-note idiom: the watcher batch
+                    // converges the same row ~200 ms later
+                    table_notes.with_mut(|list| {
+                        list.push(TableNote {
+                            id: id.clone(),
+                            kind: NoteCategory::Permanent,
+                            note_type: Some(picked),
+                            title: Some(title.clone()),
+                            created: Some(created),
+                        });
+                    });
+                    show_sheet.call((id, Editor::open(path)));
+                }
+                Err(error) => {
+                    creator_notice.set(Some(crate::create::notice(&error)));
+                }
+            }
         }
     });
 
@@ -468,10 +603,12 @@ fn Shell(
             let editing = editor.read().active().is_some();
             let listing = loops_open();
             let summoned = palette.read().is_some();
+            let creating = creator.read().is_some();
             let handle = pane.borrow().clone();
             if let Some(handle) = handle
                 && (!editing || listing)
                 && !summoned
+                && !creating
             {
                 // a headless refusal has no one to tell; the caret simply
                 // stays where it was
@@ -646,6 +783,7 @@ fn Shell(
                     block_active,
                     caret,
                     on_table: *screen.peek() == Screen::Table,
+                    sheet_open: sheet.peek().is_some(),
                 }));
             });
         }
@@ -662,8 +800,13 @@ fn Shell(
         use_callback(move |(frozen, id): (Palette, palette::CommandId)| {
             let restores = !matches!(
                 id,
+                // the picker and the creator own the focus they just took;
+                // delete replaces the editor wholesale, follow-link's
+                // stale-caret rationale
                 palette::CommandId::InsertLink
                     | palette::CommandId::FollowLink
+                    | palette::CommandId::NewNote
+                    | palette::CommandId::DeleteNote
             );
             close_palette.call(restores);
             match id {
@@ -693,6 +836,8 @@ fn Shell(
                 palette::CommandId::GoToToday => go_today.call(()),
                 palette::CommandId::GoToTable => go_table.call(()),
                 palette::CommandId::GoToLogs => go_logs.call(()),
+                palette::CommandId::NewNote => open_creator.call(()),
+                palette::CommandId::DeleteNote => delete_note.call(()),
             }
         });
 
@@ -945,9 +1090,16 @@ fn Shell(
             palette::Context {
                 block_active: frozen.block_active,
                 on_table: frozen.on_table,
+                sheet_open: frozen.sheet_open,
             },
         );
         (frozen, matches)
+    });
+    // the creator's rows, the same clone-out; only step 1 has rows to filter
+    let open_creator_view = creator().map(|frozen| {
+        let matches = crate::create::filter(&creator_query.read());
+        let notice = creator_notice();
+        (frozen, matches, notice)
     });
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
@@ -1068,11 +1220,26 @@ fn Shell(
                     if character == "p"
                         && event.modifiers().ctrl()
                         && palette.peek().is_none()
-                        && picker.peek().is_none() =>
+                        && picker.peek().is_none()
+                        && creator.peek().is_none() =>
                 {
                     // the webview answers a bare Ctrl+P with a print dialog
                     event.prevent_default();
                     summon_palette.call(());
+                }
+                // the create overlay
+                // (adr/2026-08-ctrl-n-two-step-create-overlay.md), guarded
+                // like the palette: overlays never stack
+                Key::Character(ref character)
+                    if character == "n"
+                        && event.modifiers().ctrl()
+                        && creator.peek().is_none()
+                        && palette.peek().is_none()
+                        && picker.peek().is_none() =>
+                {
+                    // the webview's own Ctrl+N would open a window
+                    event.prevent_default();
+                    open_creator.call(());
                 }
                 // the screen chords (adr/2026-08-screen-switch-gesture.md);
                 // ordinals in chrome-icon order
@@ -1161,11 +1328,25 @@ fn Shell(
                 if character == "p"
                     && event.modifiers().ctrl()
                     && palette.peek().is_none()
-                    && picker.peek().is_none() =>
+                    && picker.peek().is_none()
+                    && creator.peek().is_none() =>
             {
                 // the webview answers a bare Ctrl+P with a print dialog
                 event.prevent_default();
                 summon_palette.call(());
+            }
+            // the create overlay, the logs arm's twin
+            // (adr/2026-08-ctrl-n-two-step-create-overlay.md)
+            Key::Character(ref character)
+                if character == "n"
+                    && event.modifiers().ctrl()
+                    && creator.peek().is_none()
+                    && palette.peek().is_none()
+                    && picker.peek().is_none() =>
+            {
+                // the webview's own Ctrl+N would open a window
+                event.prevent_default();
+                open_creator.call(());
             }
             Key::Character(ref character)
                 if character == "1" && event.modifiers().ctrl() =>
@@ -1256,6 +1437,124 @@ fn Shell(
                                 if let Some(chord) = command.chord {
                                     span { class: "palette-chord", "{chord}" }
                                 }
+                            }
+                        }
+                    }
+                    }
+                }
+                None => rsx! {},
+            }
+        }
+        // the create overlay floats in the palette's exact box — the same
+        // grammar, one more step (adr/2026-08-ctrl-n-two-step-create-overlay.md)
+        {
+            match open_creator_view {
+                Some((frozen, matches, notice)) => {
+                    let head = frozen.picked.as_ref().map_or_else(
+                        || "new note".to_string(),
+                        |picked| format!("new {}", picked.as_name()),
+                    );
+                    let step_two = frozen.picked.is_some();
+                    let hint = if step_two { "title…" } else { "type…" };
+                    let rows = if step_two { Vec::new() } else { matches.clone() };
+                    let keydown_frozen = frozen.clone();
+                    rsx! {
+                    div { class: "command-palette",
+                        div { class: "palette-head type-label", "{head}" }
+                        input {
+                            // controlled, unlike the palette's: the step
+                            // transition clears the query signal, and the
+                            // input must follow it — text left behind would
+                            // become a title no one typed
+                            value: "{creator_query}",
+                            class: "picker-query",
+                            placeholder: "{hint}",
+                            onmounted: move |event| async move {
+                                let _ = event.set_focus(true).await;
+                            },
+                            oninput: move |event| {
+                                creator_query.set(event.value());
+                                creator_highlighted.set(0);
+                                creator_notice.set(None);
+                            },
+                            onkeydown: move |event: KeyboardEvent| {
+                                let key = event.key();
+                                let last = matches.len().saturating_sub(1);
+                                match key {
+                                    // escape backs out step by step:
+                                    // title → type list → closed
+                                    Key::Escape => {
+                                        if keydown_frozen.picked.is_some() {
+                                            creator_query.set(String::new());
+                                            creator_highlighted.set(0);
+                                            creator_notice.set(None);
+                                            creator.set(Some(Creator {
+                                                picked: None,
+                                                ..keydown_frozen.clone()
+                                            }));
+                                        } else {
+                                            close_creator.call(true);
+                                        }
+                                    }
+                                    Key::Enter => match &keydown_frozen.picked {
+                                        // step 2: the input is the title
+                                        Some(picked) => {
+                                            create_note.call((
+                                                picked.clone(),
+                                                creator_query.peek().clone(),
+                                            ));
+                                        }
+                                        // step 1: no matches, no guess
+                                        None => {
+                                            if let Some(picked) = matches.get(creator_highlighted()) {
+                                                creator_query.set(String::new());
+                                                creator_highlighted.set(0);
+                                                creator.set(Some(Creator {
+                                                    picked: Some(picked.clone()),
+                                                    ..keydown_frozen.clone()
+                                                }));
+                                            }
+                                        }
+                                    },
+                                    Key::ArrowDown => {
+                                        creator_highlighted.set((creator_highlighted() + 1).min(last));
+                                    }
+                                    Key::ArrowUp => {
+                                        creator_highlighted.set(creator_highlighted().saturating_sub(1));
+                                    }
+                                    _ => {}
+                                }
+                                // the overlay owns every plain key while it
+                                // is open; the ctrl chords still bubble
+                                if !event.modifiers().ctrl() {
+                                    event.stop_propagation();
+                                }
+                            },
+                        }
+                        if let Some(message) = notice {
+                            p { class: "render-error", "{message}" }
+                        }
+                        if !step_two && rows.is_empty() {
+                            div { class: "picker-empty", "no matching type" }
+                        }
+                        for (rank, entry) in rows.into_iter().enumerate() {
+                            div {
+                                key: "{entry.as_name()}",
+                                class: "picker-row",
+                                class: if rank == creator_highlighted() { "selected" },
+                                onclick: {
+                                    let picked = entry.clone();
+                                    let frozen = frozen.clone();
+                                    move |_| {
+                                        creator_query.set(String::new());
+                                        creator_highlighted.set(0);
+                                        creator.set(Some(Creator {
+                                            picked: Some(picked.clone()),
+                                            ..frozen.clone()
+                                        }));
+                                    }
+                                },
+                                span { class: "picker-id", "{entry.as_name()}" }
                             }
                         }
                     }
@@ -1948,6 +2247,20 @@ struct Palette {
     /// Which screen the palette opened over: the screen commands hide where
     /// they already stand (adr/2026-08-screen-switch-gesture.md).
     on_table: bool,
+    /// Whether a sheet was open: delete exists only over one
+    /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
+    sheet_open: bool,
+}
+
+/// The open create overlay's fixed half — the `Palette` idiom with one more
+/// fact: which step it stands in. `picked: None` is step 1 (the type list);
+/// `Some` is step 2, where the same input is the title prompt
+/// (adr/2026-08-ctrl-n-two-step-create-overlay.md). `caret` is the offset
+/// the final Escape restores, frozen at open for the palette's reason.
+#[derive(Clone, PartialEq)]
+struct Creator {
+    picked: Option<NoteType>,
+    caret: Option<usize>,
 }
 
 /// Everything the picker can offer, read at the moment it opens.
@@ -5017,9 +5330,10 @@ mod tests {
                 "open loops",
                 "go to today",
                 "go to table",
+                "new note",
             ],
-            "no block active: the caret commands are hidden, and the \
-             screen already stood on is not offered"
+            "no block active: the caret commands are hidden, the screen \
+             already stood on is not offered, and no sheet backs a delete"
         );
 
         type_into(&mut dom, input, "THEME");
@@ -5039,7 +5353,7 @@ mod tests {
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 10, "{labels:?}");
+        assert_eq!(labels.len(), 11, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -5404,6 +5718,398 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("command-palette"), "{html}");
         assert!(html.contains("link-picker"), "{html}");
+    }
+
+    // -- ctrl+n: creation, and the sheet's delete ----------------------------
+
+    #[test]
+    fn ctrl_n_lists_the_eight_types_and_typing_narrows() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new note<"), "the head names it: {html}");
+        assert_eq!(
+            picker_ids(&dom),
+            vec![
+                "person",
+                "organisation",
+                "source",
+                "concept",
+                "claim",
+                "idea",
+                "personal",
+                "project"
+            ]
+        );
+
+        // a second Ctrl+N and a Ctrl+P over the open overlay are inert —
+        // whether they land on the pane or bubble from the overlay's own
+        // input, which passes ctrl chords through
+        press(&mut dom, keys[LOGS_KEYS], ctrl_n(), Modifiers::CONTROL);
+        press(&mut dom, keys[LOGS_KEYS], ctrl_p(), Modifiers::CONTROL);
+        press(&mut dom, creator_keys, ctrl_n(), Modifiers::CONTROL);
+        assert_eq!(picker_ids(&dom).len(), 8, "still the one overlay");
+        assert!(!dioxus_ssr::render(&dom).contains("palette-label"));
+
+        // arrows move the highlight and hold at both ends
+        let selected = |dom: &VirtualDom| {
+            let html = dioxus_ssr::render(dom);
+            html.split("picker-row selected")
+                .nth(1)
+                .and_then(|rest| rest.split(r#"picker-id">"#).nth(1))
+                .and_then(|rest| rest.split('<').next())
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no highlighted row: {html}"))
+        };
+        press(&mut dom, creator_keys, Key::ArrowDown, Modifiers::empty());
+        assert_eq!(selected(&dom), "organisation");
+        press(&mut dom, creator_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, creator_keys, Key::ArrowUp, Modifiers::empty());
+        assert_eq!(selected(&dom), "person", "the first row holds");
+
+        type_into(&mut dom, input, "CON");
+        assert_eq!(picker_ids(&dom), vec!["concept"], "narrowed, any case");
+        type_into(&mut dom, input, "xyzzy");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching type"), "{html}");
+        // enter over no match guesses nothing, and an unhandled key inside
+        // the overlay is absorbed, not acted on
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        press(
+            &mut dom,
+            creator_keys,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains("no matching type"));
+    }
+
+    #[test]
+    fn enter_picks_the_type_and_the_input_becomes_the_title() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new concept<"), "the head shows it: {html}");
+        assert!(html.contains("title…"), "the input prompts for one: {html}");
+        assert!(picker_ids(&dom).is_empty(), "no rows in step 2: {html}");
+        // the controlled input emptied with its signal
+        assert!(!html.contains(r#"value="concept""#), "{html}");
+    }
+
+    #[test]
+    fn clicking_a_type_row_picks_it_too() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let mutations = press_for_mutations(
+            &mut dom,
+            keys[LOGS_KEYS],
+            ctrl_n(),
+            Modifiers::CONTROL,
+        );
+        let rows = listeners(&mutations, "click");
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        // the eight types in picker order: concept is the fourth row
+        click(&mut dom, rows[3]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new concept<"), "{html}");
+    }
+
+    #[test]
+    fn a_titled_enter_writes_the_file_and_opens_the_new_sheet() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        type_into(&mut dom, input, "Deep Modules");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+
+        let written = vault.path().join("permanent/deep-modules.typ");
+        assert!(written.exists(), "the note reached the vault");
+        let text = std::fs::read_to_string(&written).expect("the note reads");
+        assert!(text.contains("= Deep Modules"), "{text}");
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("command-palette"), "overlay closed: {html}");
+        assert!(html.contains(r#"class="sheet""#), "sheet opened: {html}");
+        assert!(html.contains(RENDERED_NOTE), "on the new note: {html}");
+        assert!(html.contains(">Deep Modules</div>"), "its card: {html}");
+        assert!(html.contains("bar-concept"), "with its hue: {html}");
+        // no viewport injected: the deterministic default centres it —
+        // (1280/2 − 88, 800/2 − 28), carried by the raised card at pan 0
+        assert!(html.contains("left: 552px; top: 372px"), "{html}");
+    }
+
+    #[test]
+    fn the_new_card_lands_at_the_injected_viewport_centre() {
+        let vault = temp_vault();
+        let (mut dom, _, keys) =
+            viewport_app(Some(vault.path().to_path_buf()), (800.0, 600.0));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        type_into(&mut dom, input, "Deep Modules");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+
+        // 800×600: centre (400, 300) → card corner (400−88, 300−28)
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 312px; top: 272px"), "{html}");
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert!(saved.contains("deep-modules 312 272"), "{saved}");
+    }
+
+    #[test]
+    fn escape_backs_out_title_to_types_to_closed() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(">new concept<"));
+
+        // first escape: back to the type list, whole again
+        press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new note<"), "step 1 again: {html}");
+        assert_eq!(picker_ids(&dom).len(), 8, "the full list is back");
+
+        // second escape: closed
+        press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains("command-palette"));
+    }
+
+    #[test]
+    fn escape_over_a_block_remounts_the_textarea_with_the_creators_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, caret, written) =
+            probe_and_writer_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        *caret.lock().expect("the probe cell never poisons") = Some(4);
+
+        let (_, creator_keys) = open_creator(&mut dom, keys);
+        let mutations = press_for_mutations(
+            &mut dom,
+            creator_keys,
+            Key::Escape,
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains("block-active"));
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        assert_eq!(
+            *written.lock().expect("the writer cell never poisons"),
+            vec![4],
+            "the caret went back where Ctrl+N found it"
+        );
+    }
+
+    #[test]
+    fn a_refused_title_keeps_the_overlay_open_with_its_notice() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+
+        // "Alpha" kebabs to the id the vault already holds
+        type_into(&mut dom, input, "Alpha");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("already exists"), "{html}");
+        assert!(html.contains("command-palette"), "still open: {html}");
+        assert!(vault.path().join("permanent/alpha.typ").exists());
+
+        // amended to nothing usable: the other refusal, same place
+        type_into(&mut dom, input, "???");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("at least one letter or digit"), "{html}");
+
+        // typing again clears the notice
+        type_into(&mut dom, input, "?!");
+        assert!(!dioxus_ssr::render(&dom).contains("at least one letter"));
+    }
+
+    #[test]
+    fn ctrl_n_answers_on_the_table_too() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_creator(&mut dom, keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new note<"), "{html}");
+    }
+
+    #[test]
+    fn the_palette_runs_new_note_and_offers_delete_only_over_a_sheet() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // on the logs, no sheet: new note is offered, delete note is not
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        assert!(!palette_labels(&dom).contains(&"delete note".to_string()));
+        type_into(&mut dom, input, "new note");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new note<"), "the creator opened: {html}");
+        assert_eq!(picker_ids(&dom).len(), 8, "{html}");
+    }
+
+    #[test]
+    fn delete_from_the_sheet_removes_file_position_and_card() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // a jittered click: the position writes and the sheet opens
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (103.0, 98.0));
+        mouse(&mut dom, "mouseup", pane, (103.0, 98.0));
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        assert!(palette_labels(&dom).contains(&"delete note".to_string()));
+        type_into(&mut dom, input, "delete");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            !vault.path().join("permanent/alpha.typ").exists(),
+            "no confirmation, no trash"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+        assert!(!html.contains(">alpha</div>"), "the card left: {html}");
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert!(!saved.contains("alpha"), "the position dropped: {saved}");
+    }
+
+    #[test]
+    fn a_delete_the_filesystem_refuses_keeps_the_sheet_with_the_error() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        // the category directory refuses the unlink
+        use std::os::unix::fs::PermissionsExt;
+        let dir = vault.path().join("permanent");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("the sabotage takes");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("the sabotage lifts");
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "still open: {html}");
+        assert!(html.contains("delete:"), "the error surfaced: {html}");
+        assert!(vault.path().join("permanent/alpha.typ").exists());
+    }
+
+    #[test]
+    fn deleting_an_error_sheet_just_closes_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        replace_database_with_a_directory(vault.path());
+        open_sheet_on(&mut dom, pane, cards[0]);
+        assert!(dioxus_ssr::render(&dom).contains("sheet:"));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        // a closed editor holds no file: nothing to delete, and the sheet
+        // simply closes
+        assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+        assert!(vault.path().join("permanent/alpha.typ").exists());
+    }
+
+    #[test]
+    fn a_delete_whose_sheet_left_meanwhile_does_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        // the palette freezes "a sheet is open"…
+        let mutations =
+            press_for_mutations(&mut dom, keys, ctrl_p(), Modifiers::CONTROL);
+        let rows = listeners(&mutations, "click");
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        // …then the chrome, still clickable beside it, leaves for the logs
+        // and closes the sheet under it
+        click(&mut dom, clicks[CHROME_LOGS]);
+        assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+        // the frozen "delete note" row is the palette's last; running it
+        // now finds no sheet and deletes nothing
+        click(&mut dom, rows[rows.len() - 1]);
+        assert!(vault.path().join("permanent/alpha.typ").exists());
+    }
+
+    // -- promotion: a capture typed in the editor recolours ------------------
+
+    #[test]
+    fn promotion_recolours_through_the_watcher() {
+        let vault = temp_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("card card-capture bar-untyped"), "{html}");
+        assert_eq!(html.matches("bar-concept").count(), 1, "alpha's: {html}");
+
+        // promotion is editing, nothing more: the type lands in #meta, the
+        // summary below (adr/2026-08-typed-capture-wears-its-hue.md); the
+        // autosave's disk write flows through this same watcher path
+        std::fs::write(
+            vault.path().join("capture/capture-idea.typ"),
+            format!(
+                "#import \"/templates/template.typ\": *\n\
+                 #show: note\n\
+                 #meta(id: \"capture-idea\", type: \"concept\", \
+                 created: \"{TODAY}\")\n\
+                 \n= capture-idea\n\
+                 \n== Summary\n\nce que ça disait\n"
+            ),
+        )
+        .expect("the promotion is written");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Capture,
+                path: PathBuf::from("capture/capture-idea.typ"),
+            }],
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("card-capture"), "the dim fill left: {html}");
+        assert_eq!(
+            html.matches("card card-permanent bar-concept").count(),
+            2,
+            "the capture wears the hue and full fill now: {html}"
+        );
     }
 
     // -- harness -------------------------------------------------------------
@@ -5864,6 +6570,51 @@ mod tests {
         Key::Character("p".into())
     }
 
+    /// The create chord, spelled once.
+    fn ctrl_n() -> Key {
+        Key::Character("n".into())
+    }
+
+    /// Opens the create overlay with Ctrl+N and returns its input's (input,
+    /// keydown) targets — `open_palette` for the third overlay. The input
+    /// is controlled and survives the step transition, so these targets
+    /// serve both steps.
+    fn open_creator(
+        dom: &mut VirtualDom,
+        keys: ElementId,
+    ) -> (ElementId, ElementId) {
+        let mutations =
+            press_for_mutations(dom, keys, ctrl_n(), Modifiers::CONTROL);
+        let inputs = listeners(&mutations, "input");
+        let keydowns = listeners(&mutations, "keydown");
+        mount(dom, listeners(&mutations, "mounted")[0]);
+        (inputs[0], keydowns[0])
+    }
+
+    /// `rendered_app` with a fixed viewport injected — the harness for the
+    /// tests that prove the injection is read
+    /// (adr/2026-08-new-card-lands-at-viewport-centre.md).
+    fn viewport_app(
+        root: Option<PathBuf>,
+        size: (f64, f64),
+    ) -> (VirtualDom, Vec<ElementId>, Vec<ElementId>) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(Viewport(Arc::new(move || {
+            size
+        }))));
+        let mutations = dom.rebuild_to_vec();
+        (
+            dom,
+            listeners(&mutations, "click"),
+            listeners(&mutations, "keydown"),
+        )
+    }
+
     /// Opens the palette with Ctrl+P and returns its input's (input,
     /// keydown) targets — `open_picker`, one overlay over.
     fn open_palette(
@@ -6031,6 +6782,7 @@ mod tests {
             ("templates/daily.typ", time_template("daily")),
             ("templates/weekly.typ", time_template("weekly")),
             ("templates/seasonal.typ", time_template("seasonal")),
+            ("templates/concept.typ", permanent_template("concept")),
             ("permanent/alpha.typ", note("alpha")),
             (
                 "time/2026-07-21.typ",
@@ -6099,6 +6851,18 @@ mod tests {
              #meta(id: \"{{{{id}}}}\", type: \"{type_name}\", \
              created: \"{{{{created}}}}\")\n\
              \n= {{{{id}}}}\n"
+        )
+    }
+
+    /// A permanent type's template, mirroring the real fixtures: the title,
+    /// not the id, heads the note.
+    fn permanent_template(type_name: &str) -> String {
+        format!(
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"{{{{id}}}}\", type: \"{type_name}\", \
+             created: \"{{{{created}}}}\")\n\
+             \n= {{{{title}}}}\n"
         )
     }
 

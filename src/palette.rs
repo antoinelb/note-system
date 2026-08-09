@@ -21,6 +21,8 @@ pub enum CommandId {
     GoToToday,
     GoToTable,
     GoToLogs,
+    NewNote,
+    DeleteNote,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -36,7 +38,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 11] = [
+pub const COMMANDS: [Command; 13] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -92,6 +94,18 @@ pub const COMMANDS: [Command; 11] = [
         label: "go to logs",
         chord: Some("ctrl+2"),
     },
+    Command {
+        id: CommandId::NewNote,
+        label: "new note",
+        chord: Some("ctrl+n"),
+    },
+    // deliberately chordless: destruction earns a summon-and-name, never a
+    // keystroke (adr/2026-08-delete-note-palette-only-from-sheet.md)
+    Command {
+        id: CommandId::DeleteNote,
+        label: "delete note",
+        chord: None,
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
@@ -102,6 +116,10 @@ pub const COMMANDS: [Command; 11] = [
 pub struct Context {
     pub block_active: bool,
     pub on_table: bool,
+    /// Whether a sheet is open: delete acts on the note the sheet shows,
+    /// so without one there is nothing to name
+    /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
+    pub sheet_open: bool,
 }
 
 /// The rows a query leaves: the available commands whose label contains the
@@ -127,6 +145,7 @@ fn available(id: CommandId, context: Context) -> bool {
         // going where you stand is not a command
         CommandId::GoToTable => !context.on_table,
         CommandId::GoToLogs => context.on_table,
+        CommandId::DeleteNote => context.sheet_open,
         _ => true,
     }
 }
@@ -139,14 +158,22 @@ mod tests {
     const EDITING: Context = Context {
         block_active: true,
         on_table: false,
+        sheet_open: false,
     };
     const READING: Context = Context {
         block_active: false,
         on_table: false,
+        sheet_open: false,
     };
     const AT_TABLE: Context = Context {
         block_active: false,
         on_table: true,
+        sheet_open: false,
+    };
+    const AT_SHEET: Context = Context {
+        block_active: false,
+        on_table: true,
+        sheet_open: true,
     };
 
     fn labels(rows: &[&Command]) -> Vec<&'static str> {
@@ -165,13 +192,16 @@ mod tests {
 
     #[test]
     fn an_empty_query_is_the_whole_registry_in_order() {
-        // the whole vocabulary minus the one place already stood in
+        // the whole vocabulary minus the place already stood in and the
+        // sheet-bound command no sheet backs
         assert_eq!(
             labels(&filter("", EDITING)),
             COMMANDS
                 .iter()
                 .map(|c| c.label)
-                .filter(|label| *label != "go to logs")
+                .filter(|label| {
+                    *label != "go to logs" && *label != "delete note"
+                })
                 .collect::<Vec<_>>()
         );
     }
@@ -179,9 +209,15 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 3);
+        assert_eq!(visible.len(), COMMANDS.len() - 4);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
+    }
+
+    #[test]
+    fn delete_note_exists_only_over_an_open_sheet() {
+        assert!(!labels(&filter("delete", AT_TABLE)).contains(&"delete note"));
+        assert_eq!(labels(&filter("delete", AT_SHEET)), vec!["delete note"]);
     }
 
     #[test]
@@ -215,6 +251,7 @@ mod tests {
                 "→",
                 "ctrl+1",
                 "ctrl+2",
+                "ctrl+n",
             ]
         );
         let chordless: Vec<&str> = COMMANDS
@@ -222,7 +259,10 @@ mod tests {
             .filter(|command| command.chord.is_none())
             .map(|command| command.label)
             .collect();
-        assert_eq!(chordless, vec!["open loops", "go to today"]);
+        assert_eq!(
+            chordless,
+            vec!["open loops", "go to today", "delete note"]
+        );
         let mut names: Vec<&str> =
             COMMANDS.iter().map(|command| command.label).collect();
         names.sort_unstable();

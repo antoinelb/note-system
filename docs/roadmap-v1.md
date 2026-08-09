@@ -74,7 +74,7 @@ Goal: click a card, write at the size of a page — permanent notes become edita
 Spec: wireframe state 6b. The editor itself is done (v0 phase 8) — this phase is the surface around it.
 
 - [x] The sheet: a tall panel beside its card with the sheet fill, border and soft glow; the table dims under an overlay; the origin card keeps a brighter border and a lit tether edge runs card → sheet — the tether keeps place legible (`adr/2026-08-sheet-stacking-dom-order.md`; every card kind opens one, `adr/2026-08-every-card-opens-the-sheet.md`; click vs drag, `adr/2026-08-click-opens-drag-moves.md`).
-  - [ ] `sheetW` and `dimOpacity` are the deck's open knobs — pick by feel once it runs, then freeze. **→ ADR** (running at the deck defaults: sheet 440+620 wide, dim 0.4 — the feel pass and the freeze remain)
+  - [x] `sheetW` and `dimOpacity` are the deck's open knobs — frozen at the deck defaults (sheet 440+620 wide, dim 0.4): no feel signal exists before daily-driving, and reopening is a one-line change. **→ ADR** (`adr/2026-08-sheet-knobs-frozen-at-deck-defaults.md`)
 - [x] Sheet content, top to bottom: the note's rendered meta line, the hybrid block editor (the same `Editor`/blocks machinery the logs centre pane mounts — literally the same signal, `adr/2026-08-sheet-reuses-the-one-editor.md`), the backlinks-only footer ("← 2").
 - [x] The links footer and Ctrl+Enter stop being inert for permanent targets: a backlink or an `#l` under the caret opens that card's sheet (the "wait for v1's table" branches from v0 phase 9 end here; extends `adr/2026-08-ctrl-enter-opens-time-links.md` via `adr/2026-08-permanent-links-open-sheets.md`).
 - [x] Escape closes the sheet and puts the card back; autosave and the Ctrl+Q flush already live below the widget and must simply keep holding.
@@ -88,11 +88,11 @@ Goal: create and delete without leaving the table — **the vault starts growing
 
 On a from-scratch vault this phase is load-bearing twice over: creation is the only way permanent notes come to exist (capture aside), and rewriting an old note by hand when it's needed — the cherry-pick path from `adr/2026-08-vault-starts-from-scratch.md` — is exactly this create-and-write gesture.
 
-- [ ] Create: a keystroke summons a type picker (the link-picker overlay pattern — the design has no buttons), instantiates the per-type template (v0 phase-5 machinery), and opens the new card's sheet.
-  - [ ] The keystroke, the picker's shape, and where the new card lands before phase 8 auto-places it (suggestion: viewport centre). **→ ADR**
-- [ ] Delete from the sheet: unconfirmed, no trash (`adr/2026-07-delete-unconfirmed-no-trash.md` now covers permanent notes); the dangling links it causes surface through the loops list, as designed.
-- [ ] Capture promotion is editing, not a feature: set `type` in `#meta`, write the summary — the card regains a hue and full fill when the watcher re-indexes it. Verify that round-trip repaints; decide whether any affordance beyond the editor is needed (suggestion: none). **→ ADR** only if one is.
-- [ ] Tests: create writes the file and the card appears, delete removes both, promotion recolours through the watcher.
+- [x] Create: Ctrl+N summons a two-step type-then-title overlay (the link-picker pattern), instantiates the per-type template, and opens the new card's sheet.
+  - [x] The keystroke (Ctrl+N), the picker's shape (one overlay, two steps), and where the new card lands (viewport centre, injected size). **→ ADR** (`adr/2026-08-ctrl-n-two-step-create-overlay.md`, `adr/2026-08-new-card-lands-at-viewport-centre.md`)
+- [x] Delete from the sheet: unconfirmed, no trash — a palette-only command, no chord (`adr/2026-08-delete-note-palette-only-from-sheet.md` extends `adr/2026-07-delete-unconfirmed-no-trash.md`); the dangling links it causes surface through the loops list, as designed.
+- [x] Capture promotion is editing, not a feature: set `type` in `#meta`, write the summary — the card regains a hue and full fill when the watcher re-indexes it. No affordance beyond the editor; the treatment rule needed code (`adr/2026-08-typed-capture-wears-its-hue.md`).
+- [x] Tests: create writes the file and the card appears, delete removes both, promotion recolours through the watcher.
 
 Exit: a new permanent note goes from keystroke to written note without touching the filesystem; Obsidian and the manual zettelkasten are both fully replaced.
 
@@ -151,6 +151,6 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 - [ ] Tag & type filters, type colours, jump-to-note (phases 2, 7)
 - [ ] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)
 - [x] Capture/generated visual treatment; `generated` type defined (phase 2)
-- [ ] Permanent-note CRUD in the app; the vault grows without leaving it (phases 3–4)
+- [x] Permanent-note CRUD in the app; the vault grows without leaving it (phases 3–4)
 - [ ] `make test` green with 100% coverage; every note compiles with vanilla typst (`make check-vault`)
 - [ ] The ceiling held: nothing shipped in v1 beyond this list (`plan.md` § Known risks 4)

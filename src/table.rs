@@ -72,17 +72,33 @@ pub fn cards(
             let (x, y) = positions
                 .get(&note.id)
                 .unwrap_or_else(|| fallback.slot_for(&note.id));
+            let kind = presented_kind(note);
             Card {
                 id: note.id.clone(),
                 title: note.title.clone().unwrap_or_else(|| note.id.clone()),
-                label: label(note, today),
-                kind: note.kind,
-                bar: bar_class(note),
+                label: label(kind, note, today),
+                kind,
+                bar: bar_class(kind, note),
                 x,
                 y,
             }
         })
         .collect()
+}
+
+/// The kind the card is drawn as. Presentation keys on the type: a capture
+/// that gained one of the eight permanent types is promoted on sight — hue,
+/// full fill, type label — while the file stays in `capture/` and the index
+/// category stays honest (adr/2026-08-typed-capture-wears-its-hue.md).
+fn presented_kind(note: &TableNote) -> NoteCategory {
+    match note.kind {
+        NoteCategory::Capture
+            if note.note_type.as_ref().is_some_and(NoteType::is_permanent) =>
+        {
+            NoteCategory::Permanent
+        }
+        kind => kind,
+    }
 }
 
 const GRID_COLUMNS: usize = 4;
@@ -102,11 +118,11 @@ fn fallback_slot(rank: usize) -> (f64, f64) {
     )
 }
 
-/// The card's label line. The query never yields time notes, so the Time arm
-/// only keeps the match total — it wears the permanent treatment rather than
-/// a panic no test could reach.
-fn label(note: &TableNote, today: Date) -> String {
-    match note.kind {
+/// The card's label line, keyed on the presented kind. The query never
+/// yields time notes, so the Time arm only keeps the match total — it wears
+/// the permanent treatment rather than a panic no test could reach.
+fn label(kind: NoteCategory, note: &TableNote, today: Date) -> String {
+    match kind {
         NoteCategory::Capture => {
             match age_days(note.created.as_deref(), today) {
                 Some(days) => format!("capture · {days} d"),
@@ -140,6 +156,22 @@ pub const SHEET_WIDTH: f64 = 620.0;
 pub const TETHER_DROP: f64 = 28.0;
 /// How far a press may wander and still read as a click (max-norm, px).
 pub const CLICK_SLOP: f64 = 4.0;
+
+/// The viewport a headless run assumes when no window injects its real
+/// size — deterministic, never an error
+/// (adr/2026-08-new-card-lands-at-viewport-centre.md).
+pub const DEFAULT_VIEWPORT: (f64, f64) = (1280.0, 800.0);
+
+/// Canvas coordinates that centre a new card in the viewport under `pan`:
+/// where the user is looking is where the note appears
+/// (adr/2026-08-new-card-lands-at-viewport-centre.md). The card's nominal
+/// mid-height is the tether's drop, the one height the layout declares.
+pub fn spawn_position(viewport: (f64, f64), pan: (f64, f64)) -> (f64, f64) {
+    (
+        viewport.0 / 2.0 - CARD_WIDTH / 2.0 - pan.0,
+        viewport.1 / 2.0 - TETHER_DROP - pan.1,
+    )
+}
 
 /// The tether's box: a horizontal line at the card's mid-height, from the
 /// card's nearest edge to the sheet's, in viewport coordinates.
@@ -180,11 +212,12 @@ pub fn is_click(down: (f64, f64), up: (f64, f64)) -> bool {
     (up.0 - down.0).abs() <= CLICK_SLOP && (up.1 - down.1).abs() <= CLICK_SLOP
 }
 
-/// The 3px bar: eight permanent hues; everything else — captures, unknown
-/// or time-scale types, no type at all — is the grey of visible debt, and
-/// generated notes keep their own dashed bar.
-fn bar_class(note: &TableNote) -> &'static str {
-    match note.kind {
+/// The 3px bar, keyed on the presented kind: eight permanent hues;
+/// everything else — captures, unknown or time-scale types, no type at all
+/// — is the grey of visible debt, and generated notes keep their own dashed
+/// bar.
+fn bar_class(kind: NoteCategory, note: &TableNote) -> &'static str {
+    match kind {
         NoteCategory::Capture => "bar-untyped",
         NoteCategory::Generated => "bar-generated",
         NoteCategory::Permanent | NoteCategory::Time => {
@@ -455,6 +488,56 @@ mod tests {
         // and fully under it
         let under = tether(SHEET_LEFT + 40.0, 0.0, (0.0, 0.0));
         assert_eq!(under.width, 0.0);
+    }
+
+    #[test]
+    fn the_spawn_position_centres_a_card_under_the_pan() {
+        // an unpanned 1280×800 viewport: the card's left edge sits half a
+        // card left of centre, its mid-height (the tether drop) at mid-height
+        assert_eq!(
+            spawn_position(DEFAULT_VIEWPORT, (0.0, 0.0)),
+            (640.0 - CARD_WIDTH / 2.0, 400.0 - TETHER_DROP)
+        );
+        // a panned canvas compensates: the card still lands mid-viewport
+        assert_eq!(
+            spawn_position(DEFAULT_VIEWPORT, (100.0, -60.0)),
+            (640.0 - CARD_WIDTH / 2.0 - 100.0, 400.0 - TETHER_DROP + 60.0)
+        );
+    }
+
+    #[test]
+    fn a_typed_capture_wears_its_hue_and_full_fill() {
+        let mut promoted = note("a", NoteCategory::Capture);
+        promoted.note_type = Some(NoteType::Concept);
+        promoted.created = Some("2026-07-20".to_string());
+        let drawn = cards(
+            &[promoted],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
+        // the one kind switch carries the label, the bar and (through
+        // card-{kind}) the full fill (adr/2026-08-typed-capture-wears-its-hue.md)
+        assert_eq!(drawn[0].kind, NoteCategory::Permanent);
+        assert_eq!(drawn[0].bar, "bar-concept");
+        assert_eq!(drawn[0].label, "concept");
+    }
+
+    #[test]
+    fn an_unknown_typed_capture_stays_grey_capture() {
+        let mut garbled = note("a", NoteCategory::Capture);
+        garbled.note_type = Some(NoteType::Unknown("concpet".to_string()));
+        garbled.created = Some("2026-07-20".to_string());
+        let drawn = cards(
+            &[garbled],
+            &empty_positions(),
+            &mut Fallback::default(),
+            TODAY,
+        );
+        // an unrecognized type is not a promotion — the age stays visible debt
+        assert_eq!(drawn[0].kind, NoteCategory::Capture);
+        assert_eq!(drawn[0].bar, "bar-untyped");
+        assert_eq!(drawn[0].label, "capture · 3 d");
     }
 
     #[test]
