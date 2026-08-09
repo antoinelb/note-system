@@ -291,8 +291,10 @@ body {
   content: "";
   position: absolute;
   left: -1px;
-  top: -0.1em;
-  height: 1.25em;
+  /* tied to the span's own content box, so the bar and the box caret
+     take their vertical extent from the same font metrics */
+  top: 0;
+  bottom: 0;
   width: 2px;
   background: var(--ember);
   animation: caret-blink 1.06s steps(1) infinite;

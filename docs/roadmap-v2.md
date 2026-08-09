@@ -46,7 +46,7 @@ Exit: days of daily writing in the homemade widget are indistinguishable from th
 Goal: normal and insert exist, and the caret announces which one you are in.
 
 - [x] `Mode` lives in the keymap layer between the widget and `Editor` — the slot `editor.rs` names (`src/vim.rs`); the widget forwards keys, the layer translates them into `Editor` calls or swallows them.
-- [x] The Escape ladder: insert → normal → rendered block; the mode is editor-wide and survives slides and activations, and the editor opens writing — insert at launch (`adr/2026-08-escape-ladder-editor-wide-mode.md`).
+- [x] The Escape ladder: insert → normal → rendered block; the mode is editor-wide and survives slides and activations, and a new file starts thinking — normal at every note open (`adr/2026-08-escape-ladder-editor-wide-mode.md`).
 - [x] Entering insert: i a I A o O (o and O open a line *inside* the block; a blank line splits it at the next resegmentation — the existing merge/split semantics, no new rules).
 - [x] The caret is the mode indicator: bar in insert, box in normal (`adr/2026-08-caret-shape-is-the-mode-indicator.md`, with the palette boundary: modal keys take no palette entries; chords keep theirs and answer in both modes).
 - [x] Unbound normal-mode keys are inert — swallowed, never inserted as text; a normal-mode composition is discarded whole.

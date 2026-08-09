@@ -61,25 +61,6 @@ pub enum Piece {
     },
 }
 
-impl Piece {
-    /// How the widget draws this piece: its css class, `data-start` byte
-    /// and text — or `None` for the zero-width bar, which the widget draws
-    /// as its own keyed span. One method, so the widget renders every
-    /// visible piece through one arm and phase 1's box caret arrives
-    /// without touching the rsx.
-    pub fn drawn(&self) -> Option<(&'static str, usize, &str)> {
-        match self {
-            Piece::Text { start, text } => Some(("", *start, text)),
-            Piece::Selected { start, text } => Some(("sel", *start, text)),
-            Piece::Caret => None,
-            Piece::CaretBox { start, cluster } => {
-                Some(("caret-box", *start, cluster))
-            }
-            Piece::Preview { start, text } => Some(("compose", *start, text)),
-        }
-    }
-}
-
 /// One logical line of the active block, ready to render.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
@@ -640,44 +621,6 @@ mod tests {
             texts(&lines[0]),
             [("caret", String::new()), ("sel", "été".to_string()),]
         );
-    }
-
-    #[test]
-    fn every_piece_knows_how_it_is_drawn() {
-        let cases = [
-            (
-                Piece::Text {
-                    start: 0,
-                    text: "un".into(),
-                },
-                Some(("", 0, "un")),
-            ),
-            (
-                Piece::Selected {
-                    start: 2,
-                    text: "deux".into(),
-                },
-                Some(("sel", 2, "deux")),
-            ),
-            (Piece::Caret, None),
-            (
-                Piece::CaretBox {
-                    start: 4,
-                    cluster: "é".into(),
-                },
-                Some(("caret-box", 4, "é")),
-            ),
-            (
-                Piece::Preview {
-                    start: 6,
-                    text: "^".into(),
-                },
-                Some(("compose", 6, "^")),
-            ),
-        ];
-        for (piece, expected) in cases {
-            assert_eq!(piece.drawn(), expected, "{piece:?}");
-        }
     }
 
     #[test]

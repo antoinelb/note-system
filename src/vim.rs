@@ -13,14 +13,13 @@ use crate::blocks::Block;
 use crate::caret;
 use crate::motions::{self, FindKind, Lines, Motion, ObjectKind};
 
-/// Which grammar the keys speak. The editor opens writing — this app opens
-/// on today's note to write in it — so insert is the birth mode and Escape
-/// is how the editor starts thinking
+/// Which grammar the keys speak. A note opens thinking — normal is the
+/// birth mode, as vim's is, and i is one key away
 /// (adr/2026-08-escape-ladder-editor-wide-mode.md).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
-    Normal,
     #[default]
+    Normal,
     Insert,
     /// See the span before choosing the verb
     /// (adr/2026-08-visual-selection-is-the-anchor.md).
@@ -1041,6 +1040,16 @@ impl Vim {
         }
     }
 
+    /// A fresh note begins thinking: normal mode, the pending grammar
+    /// cleared — while the dot, the pattern and the find survive across
+    /// notes, as vim's registers do
+    /// (adr/2026-08-escape-ladder-editor-wide-mode.md).
+    pub fn note_opened(&mut self) {
+        self.mode = Mode::Normal;
+        self.insert_from = None;
+        self.reset();
+    }
+
     /// The prompt's Enter: the pattern commits, and the first jump is the
     /// n the widget synthesizes right after.
     pub fn commit_search(&mut self, pattern: String) {
@@ -1355,6 +1364,13 @@ mod tests {
         }
     }
 
+    fn insert() -> Vim {
+        Vim {
+            mode: Mode::Insert,
+            ..Vim::default()
+        }
+    }
+
     /// Feeds a string of keys and answers the last outcome — the grammar
     /// harness: "d2w" is a verb, a count, a noun.
     fn feed(vim: &mut Vim, keys: &str, view: &View) -> Outcome {
@@ -1417,8 +1433,12 @@ mod tests {
     fn insert_mode_owns_only_escape() {
         let parsed = blocks::segment(NOTE);
         let sight = view(NOTE, &parsed, 3);
-        let mut vim = Vim::default();
-        assert_eq!(vim.mode, Mode::Insert, "the editor opens writing");
+        assert_eq!(
+            Vim::default().mode,
+            Mode::Normal,
+            "a new file starts thinking"
+        );
+        let mut vim = insert();
         for key in [
             character("x"),
             character("é"),
@@ -1439,7 +1459,7 @@ mod tests {
     #[test]
     fn escape_steps_back_onto_the_last_typed_cluster() {
         let parsed = blocks::segment(NOTE);
-        let mut vim = Vim::default();
+        let mut vim = insert();
         let outcome = vim.handle(
             &Key::Escape,
             Modifiers::empty(),
@@ -1448,7 +1468,7 @@ mod tests {
         assert_eq!(vim.mode, Mode::Normal);
         assert_eq!(outcome, Outcome::Acts(vec![Act::Place(7)]));
 
-        let mut vim = Vim::default();
+        let mut vim = insert();
         let outcome = vim.handle(
             &Key::Escape,
             Modifiers::empty(),
@@ -2747,7 +2767,7 @@ mod tests {
             "the one ctrl carve-out"
         );
         // in insert, Ctrl+R passes through like any chord
-        let mut vim = Vim::default();
+        let mut vim = insert();
         assert_eq!(
             vim.handle(&character("r"), Modifiers::CONTROL, &sight),
             Outcome::Pass,
@@ -2986,6 +3006,39 @@ mod tests {
         assert_eq!(
             stripped(feed(&mut vim, ".", &view(text, &parsed, 3))),
             Outcome::Acts(vec![]),
+        );
+    }
+
+    #[test]
+    fn a_fresh_note_begins_thinking_but_keeps_its_memory() {
+        let text = "un mot\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        feed(&mut vim, "x", &view(text, &parsed, 0));
+        feed(&mut vim, "fo", &view(text, &parsed, 0));
+        vim.commit_search("mot".to_string());
+        feed(&mut vim, "d", &view(text, &parsed, 0));
+        feed(&mut vim, "i", &view(text, &parsed, 0));
+
+        vim.note_opened();
+        assert_eq!(vim.mode, Mode::Normal, "thinking, not writing");
+        // the pending verb died with the note; the memory survives
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(text, &parsed, 3))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("m".into()),
+                Act::Splice {
+                    span: 3..4,
+                    text: String::new(),
+                    caret: 3
+                },
+            ]),
+            "the dot still remembers the cut"
+        );
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(3)]),
+            "the pattern survived the switch"
         );
     }
 

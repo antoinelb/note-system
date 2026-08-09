@@ -437,6 +437,7 @@ fn Shell(
                 .iter()
                 .any(|(existing, _)| existing == &target.1);
             editor.set(open_selected(&root, exists, &target.1));
+            vim.write().note_opened();
             fragments.borrow_mut().sweep();
             selected.set(target);
         }
@@ -476,6 +477,7 @@ fn Shell(
             zoom_to.call(table::Zoom::Titles);
             picker.set(None);
             editor.set(opened);
+            vim.write().note_opened();
             fragments.borrow_mut().sweep();
             screen.set(Screen::Table);
             sheet.set(Some(id));
@@ -508,6 +510,7 @@ fn Shell(
             let exists =
                 notes.peek().iter().any(|(existing, _)| existing == &id);
             editor.set(open_selected(&root, exists, &id));
+            vim.write().note_opened();
             fragments.borrow_mut().sweep();
         }
     });
@@ -542,6 +545,7 @@ fn Shell(
             let exists =
                 notes.peek().iter().any(|(existing, _)| existing == &id);
             editor.set(open_selected(&root, exists, &id));
+            vim.write().note_opened();
             fragments.borrow_mut().sweep();
         }
     });
@@ -1215,11 +1219,20 @@ fn Shell(
                                                 div { key: "{row}", class: "source-line",
                                                     for piece in line.pieces {
                                                         {
-                                                            match piece.drawn() {
-                                                                // the bar: keyed by position, so every move
-                                                                // remounts it — restarting the blink (solid
-                                                                // while typing) and the scroll-into-view
-                                                                None => rsx! {
+                                                            match piece {
+                                                                caret::Piece::Text { start, text } => rsx! {
+                                                                    span { key: "{start}-", "data-start": "{start}", "{text}" }
+                                                                },
+                                                                caret::Piece::Selected { start, text } => rsx! {
+                                                                    span { key: "{start}-sel", class: "sel", "data-start": "{start}", "{text}" }
+                                                                },
+                                                                caret::Piece::Preview { start, text } => rsx! {
+                                                                    span { key: "{start}-compose", class: "compose", "data-start": "{start}", "{text}" }
+                                                                },
+                                                                // both carets: keyed by position, so every move
+                                                                // remounts them — restarting the bar's blink
+                                                                // (solid while typing) and the scroll-into-view
+                                                                caret::Piece::Caret => rsx! {
                                                                     span {
                                                                         key: "caret-{head}",
                                                                         class: "caret",
@@ -1235,12 +1248,21 @@ fn Shell(
                                                                         },
                                                                     }
                                                                 },
-                                                                Some((class, start, text)) => rsx! {
+                                                                caret::Piece::CaretBox { start, cluster } => rsx! {
                                                                     span {
-                                                                        key: "{start}-{class}",
-                                                                        class: if !class.is_empty() { "{class}" },
+                                                                        key: "caret-{head}",
+                                                                        class: "caret-box",
                                                                         "data-start": "{start}",
-                                                                        "{text}"
+                                                                        onmounted: move |event: Event<MountedData>| async move {
+                                                                            let _ = event
+                                                                                .scroll_to_with_options(ScrollToOptions {
+                                                                                    behavior: ScrollBehavior::Instant,
+                                                                                    vertical: ScrollLogicalPosition::Nearest,
+                                                                                    horizontal: ScrollLogicalPosition::Nearest,
+                                                                                })
+                                                                                .await;
+                                                                        },
+                                                                        "{cluster}"
                                                                     }
                                                                 },
                                                             }
@@ -1722,6 +1744,7 @@ fn Shell(
                         Ok(_) => {
                             editor
                                 .set(Editor::open(time_note_path(&root, &id)));
+                            vim.write().note_opened();
                             fragments.borrow_mut().sweep();
                             notes.with_mut(|list| list.push((id, scale)));
                         }
@@ -3938,8 +3961,19 @@ mod tests {
         let (_, block_keys) = sheet_block_targets(&opened);
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
 
-        // rung one: insert → normal, the caret turning box; the sheet holds
+        // the sheet opens thinking; i writes, and rung one climbs back:
+        // insert → normal, the caret turning box; the sheet holds
         // (adr/2026-08-escape-ladder-editor-wide-mode.md)
+        press(
+            &mut dom,
+            block_keys,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            !dioxus_ssr::render(&dom).contains(r#"class="caret-box""#),
+            "writing: the bar"
+        );
         press(&mut dom, block_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="caret-box""#), "{html}");
@@ -4727,8 +4761,10 @@ mod tests {
         // (adr/2026-08-cursor-always-in-the-note.md)
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(r#"<div class="source-line"><span class="caret">"#),
-            "{html}"
+            html.contains(
+                r#"<div class="source-line"><span class="caret-box""#
+            ),
+            "a box caret: a new file starts thinking: {html}"
         );
         // the renderer announces the caret's mount; the scroll-into-view
         // asks and the headless refusal is absorbed
@@ -4916,32 +4952,31 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
-        // the editor opens writing: a bar caret, and keys type
-        assert!(dioxus_ssr::render(&dom).contains(r#"class="caret""#));
-
-        // escape turns the caret box and unbound keys inert
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        // a new file starts thinking: a box caret, and unbound keys inert
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="caret-box""#), "{html}");
         press(
             &mut dom,
             sink,
-            Key::Character("x".into()),
+            Key::Character("z".into()),
             Modifiers::empty(),
         );
         press(&mut dom, sink, Key::Enter, Modifiers::empty());
         assert_eq!(source_of(&dom), before, "normal mode never types");
 
-        // i writes again, where the caret stands
-        press(
+        // i writes, the caret turning bar; the renderer announces the
+        // fresh bar and its scroll-into-view absorbs the headless refusal
+        let woken = press_for_mutations(
             &mut dom,
             sink,
             Key::Character("i".into()),
             Modifiers::empty(),
         );
+        mount(&mut dom, listeners(&woken, "mounted")[0]);
+        block_on(settle(&mut dom));
         assert!(
             dioxus_ssr::render(&dom).contains(r#"class="caret""#),
-            "the bar is back"
+            "the bar is out"
         );
         press(
             &mut dom,
@@ -4950,6 +4985,13 @@ mod tests {
             Modifiers::empty(),
         );
         assert!(source_of(&dom).contains('x'), "{}", source_of(&dom));
+
+        // and escape thinks again
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"class="caret-box""#),
+            "the box is back"
+        );
     }
 
     #[test]
@@ -4959,8 +5001,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
-        // normal mode on the heading's last content line, then o
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        // o from the heading's last line opens below and writes
         press(
             &mut dom,
             sink,
@@ -4984,7 +5025,6 @@ mod tests {
 
         // normal mode, then gg: the preamble block wakes with the caret
         // on its first line, still boxed
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5032,7 +5072,6 @@ mod tests {
 
         // normal mode on the link line, then dd: the line leaves for the
         // register (adr/2026-08-one-register-the-clipboard.md)
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5083,7 +5122,6 @@ mod tests {
 
         // gg to the preamble, then dG: the whole note goes in one splice
         // across every block (adr/2026-08-editor-splice-cross-block.md)
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5129,7 +5167,6 @@ mod tests {
         );
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5147,7 +5184,6 @@ mod tests {
             clipboard_app(Some(vault.path().to_path_buf()), None);
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5166,7 +5202,6 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
         // normal, to the line's start, then v e: the first word lights up
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5240,7 +5275,6 @@ mod tests {
         let before = source_of(&dom);
 
         // one insert session is one intent
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5280,7 +5314,6 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
         // normal on the heading's first line, x then . . — three cuts
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
             sink,
@@ -5327,7 +5360,6 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
         // / opens the one-line prompt over the active heading
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         let opened = press_for_mutations(
             &mut dom,
             sink,
@@ -5361,7 +5393,6 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         let opened = press_for_mutations(
             &mut dom,
             sink,
@@ -5415,7 +5446,6 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         compose(&mut dom, sink, "compositionstart", "");
         compose(&mut dom, sink, "compositionupdate", "^");
         assert!(
@@ -5432,7 +5462,6 @@ mod tests {
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (block, sink) = activate_heading(&mut dom, &clicks);
 
-        press(&mut dom, sink, Key::Escape, Modifiers::empty());
         place_caret(&mut dom, block, &hit, 0);
         press(&mut dom, sink, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
@@ -5454,6 +5483,12 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
         press(&mut dom, sink, Key::Dead, Modifiers::empty());
         compose(&mut dom, sink, "compositionstart", "");
         compose(&mut dom, sink, "compositionupdate", "^");
@@ -5498,6 +5533,12 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
         compose(&mut dom, sink, "compositionstart", "");
         compose(&mut dom, sink, "compositionupdate", "¨");
         press(
@@ -5518,6 +5559,12 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
         // from the empty last line, shift+up selects the link line
         press(&mut dom, sink, Key::ArrowUp, Modifiers::SHIFT);
         let html = dioxus_ssr::render(&dom);
@@ -6434,10 +6481,10 @@ mod tests {
             "spliced at the caret: {}",
             source_of(&dom)
         );
-        // the caret lands past the link it just wrote: the drawn caret
-        // stands between the new link and the old one
+        // the caret lands past the link it just wrote: the box caret
+        // wears the old link's first cluster
         assert!(
-            html.contains(r#"summer&#34;)</span><span class="caret">"#),
+            html.contains(r#"summer&#34;)</span><span class="caret-box""#),
             "{html}"
         );
     }
@@ -6550,7 +6597,7 @@ mod tests {
         // the heading's second line, before the day link
         assert!(
             html.contains(
-                r#"<div class="source-line"><span class="caret"></span><span data-start="13">"#
+                r#"<div class="source-line"><span class="caret-box" data-start="13">"#
             ),
             "{html}"
         );
@@ -7146,7 +7193,7 @@ mod tests {
         // the caret is app state the palette never touched
         assert!(
             html.contains(
-                r#"<div class="source-line"><span class="caret"></span><span data-start="13">"#
+                r#"<div class="source-line"><span class="caret-box" data-start="13">"#
             ),
             "{html}"
         );
@@ -7641,6 +7688,12 @@ mod tests {
         let (_, jump_keys) = open_overlay(&mut dom, block_keys, ctrl_o());
         press(&mut dom, jump_keys, Key::Escape, Modifiers::empty());
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
+        press(
+            &mut dom,
+            block_keys,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
         type_keys(&mut dom, block_keys, "x");
         assert!(
             source_of(&dom).contains('x'),
@@ -8152,7 +8205,7 @@ mod tests {
         // the caret is app state the overlay never touched: still after
         // the fourth character of the heading's first line
         assert!(
-            html.contains(r#">= 20</span><span class="caret">"#),
+            html.contains(r#">= 20</span><span class="caret-box""#),
             "{html}"
         );
     }
@@ -8523,6 +8576,7 @@ mod tests {
     /// Replaces the active block's whole content: select all, then type —
     /// the keystroke-honest successor to feeding the textarea a new value.
     fn retype(dom: &mut VirtualDom, sink: ElementId, text: &str) {
+        press(dom, sink, Key::Character("i".into()), Modifiers::empty());
         press(dom, sink, Key::Character("a".into()), Modifiers::CONTROL);
         type_keys(dom, sink, text);
     }
