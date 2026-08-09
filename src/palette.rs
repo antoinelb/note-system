@@ -177,7 +177,12 @@ pub fn filter(query: &str, context: Context) -> Vec<&'static Command> {
 /// (`adr/2026-08-palette-birth-command-list.md`).
 fn available(id: CommandId, context: Context) -> bool {
     match id {
-        CommandId::InsertLink | CommandId::FollowLink => context.block_active,
+        // the caret commands need their block *visible*: on the table the
+        // editor's block lives behind the screen unless a sheet shows it
+        // (adr/2026-08-cursor-always-in-the-note.md)
+        CommandId::InsertLink | CommandId::FollowLink => {
+            context.block_active && (!context.on_table || context.sheet_open)
+        }
         // going where you stand is not a command
         CommandId::GoToTable => !context.on_table,
         CommandId::GoToLogs => context.on_table,
@@ -269,6 +274,33 @@ mod tests {
         assert_eq!(visible.len(), COMMANDS.len() - 9);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
+    }
+
+    #[test]
+    fn the_caret_commands_need_their_block_visible() {
+        const EDITING_AT_TABLE: Context = Context {
+            block_active: true,
+            on_table: true,
+            sheet_open: false,
+            at_bodies: false,
+        };
+        const EDITING_AT_SHEET: Context = Context {
+            block_active: true,
+            on_table: true,
+            sheet_open: true,
+            at_bodies: false,
+        };
+        // the logs show the block; the bare table hides it behind the
+        // screen; the sheet shows it again
+        assert_eq!(labels(&filter("insert", EDITING)), vec!["insert link"]);
+        assert_eq!(
+            labels(&filter("insert", EDITING_AT_TABLE)),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("insert", EDITING_AT_SHEET)),
+            vec!["insert link"]
+        );
     }
 
     #[test]

@@ -756,16 +756,13 @@ fn Shell(
     // active block and the picker the way Escape would: their textarea and
     // input are about to unmount, and a hidden overlay waiting behind a
     // screen would reopen unasked on the way back.
-    let go_table = use_callback({
-        let fragments = fragments.clone();
-        move |()| {
-            if editor.peek().active().is_some() {
-                editor.write().deactivate();
-                fragments.borrow_mut().sweep();
-            }
-            picker.set(None);
-            screen.set(Screen::Table);
-        }
+    let go_table = use_callback(move |()| {
+        // the block stays active behind the screen switch — the cursor
+        // belongs to the note, and returning to the logs finds it again
+        // (adr/2026-08-cursor-always-in-the-note.md); only the picker
+        // closes, its input being about to unmount
+        picker.set(None);
+        screen.set(Screen::Table);
     });
     let go_logs = use_callback(move |()| {
         // the mirror hygiene: a sheet left open behind the logs would hold
@@ -878,9 +875,8 @@ fn Shell(
     });
 
     // the capture chord's working half, lifted so the palette runs the same
-    // body; the chord's own guard (no active block) stays in its match arm,
-    // because it exists to keep one keystroke from being both paste and
-    // capture — which a palette run cannot be
+    // body; the chord's arm suppresses the webview's paste itself, so one
+    // keystroke stays one action — the capture
     let capture_clipboard = use_callback({
         let root = root.clone();
         let clipboard = clipboard.clone();
@@ -1094,6 +1090,11 @@ fn Shell(
                             match pane {
                                 Pane::Source { start, text } => {
                                     let rows = text.split('\n').count();
+                                    // the widget's default caret: the end
+                                    // of the block — a note opens with the
+                                    // cursor on its last line
+                                    // (adr/2026-08-cursor-always-in-the-note.md)
+                                    let end_units = text.encode_utf16().count();
                                     rsx! {
                                         textarea {
                                             // the epoch remounts it after a link is
@@ -1111,17 +1112,19 @@ fn Shell(
                                                 let pending_caret = pending_caret.clone();
                                                 let writer = writer.clone();
                                                 move |event: Event<MountedData>| {
-                                                    let caret = pending_caret.take();
+                                                    // a pending caret (accepted completion,
+                                                    // restored overlay) wins; otherwise the
+                                                    // cursor lands at the end — the note's
+                                                    // last line, never wherever the webview
+                                                    // happens to put it
+                                                    let caret = pending_caret
+                                                        .take()
+                                                        .unwrap_or(end_units);
                                                     let writer = writer.clone();
                                                     async move {
                                                         let _ = event.set_focus(true).await;
-                                                        // after an accepted completion, the
-                                                        // caret belongs past the link, not at
-                                                        // whatever the webview picks
-                                                        if let Some(units) = caret
-                                                            && let Some(writer) = writer
-                                                        {
-                                                            (writer.0)(units).await;
+                                                        if let Some(writer) = writer {
+                                                            (writer.0)(caret).await;
                                                         }
                                                     }
                                                 }
@@ -1145,13 +1148,11 @@ fn Shell(
                                                 move |event: KeyboardEvent| {
                                                     let key = event.key();
                                                     if key == Key::Escape {
-                                                        editor.write().deactivate();
-                                                        fragments.borrow_mut().sweep();
-                                                        // the block swallows its own escape:
-                                                        // over the sheet the pane's arm would
-                                                        // otherwise also close the sheet on
-                                                        // the same keystroke
-                                                        event.stop_propagation();
+                                                        // escape no longer deactivates — the
+                                                        // cursor always stays in the note; the
+                                                        // keystroke bubbles to the pane, which
+                                                        // closes the sheet or the loops list
+                                                        // (adr/2026-08-cursor-always-in-the-note.md)
                                                     } else if key == Key::ArrowUp
                                                         || key == Key::ArrowDown
                                                     {
@@ -1396,16 +1397,17 @@ fn Shell(
                 // capture/, no required fields, nothing to fill in
                 // (adr/2026-08-capture-headless-second-process.md). Shift
                 // uppercases the character the browser reports, so the chord
-                // is matched either way. Over an active block it stays the
-                // webview's own paste — capturing into a file you are not
-                // looking at, *and* pasting into the one you are, would be
-                // two actions on one keystroke.
+                // is matched either way. A block is now always active over
+                // an open note, so the chord captures unconditionally and
+                // suppresses the webview's paste — still one action on one
+                // keystroke, the capture
+                // (adr/2026-08-cursor-always-in-the-note.md).
                 Key::Character(ref character)
                     if character.eq_ignore_ascii_case("v")
                         && event.modifiers().ctrl()
-                        && event.modifiers().shift()
-                        && editor.peek().active().is_none() =>
+                        && event.modifiers().shift() =>
                 {
+                    event.prevent_default();
                     capture_clipboard.call(());
                 }
                 // the link picker (adr/2026-08-ctrl-l-link-picker.md). It
@@ -3017,10 +3019,11 @@ mod tests {
     }
 
     #[test]
-    fn leaving_a_block_hands_focus_back_to_the_pane() {
+    fn leaving_the_note_hands_focus_back_to_the_pane() {
         // the window's chords only reach the app root by bubbling, so
-        // something inside the app must hold focus; a textarea that
-        // unmounts takes it out of the app entirely
+        // something inside the app must hold focus; with the cursor always
+        // in an open note, only an empty selection frees the pane to take
+        // it (adr/2026-08-cursor-always-in-the-note.md)
         let vault = temp_vault();
         let (mut dom, mutations) =
             mounted_app(Some(vault.path().to_path_buf()), None);
@@ -3031,17 +3034,12 @@ mod tests {
         );
         let taken = focused.load(Ordering::SeqCst);
 
-        // editing: the block owns focus, the pane leaves it alone
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
-        block_on(settle(&mut dom));
-        assert_eq!(focused.load(Ordering::SeqCst), taken);
-
-        // and on the way out the pane takes it back
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        // day 24 has no note: the editor closes and the pane reclaims
+        click(&mut dom, clicks[day_cell(24)]);
         block_on(settle(&mut dom));
         assert!(
             focused.load(Ordering::SeqCst) > taken,
-            "the pane asked for focus once the block let go"
+            "the pane asked for focus once the note left"
         );
     }
 
@@ -3082,7 +3080,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, _) = activate_heading(&mut dom, &clicks);
         // typed but inside the quiet window: only the flush can save it
         type_into(&mut dom, input, "= presque perdu\n");
         press(
@@ -3104,7 +3102,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, _) = activate_heading(&mut dom, &clicks);
         type_into(&mut dom, input, "= pas encore sauvé\n");
 
         let file = vault.path().join("time/2026-07-23.typ");
@@ -3137,7 +3135,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, _) = activate_heading(&mut dom, &clicks);
         type_and_settle(&mut dom, input, "= autosauvé\n");
 
         let saved =
@@ -3156,7 +3154,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, _) = activate_heading(&mut dom, &clicks);
 
         let file = vault.path().join("time/2026-07-23.typ");
         let mut permissions = std::fs::metadata(&file)
@@ -3324,19 +3322,21 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_logs_closes_the_active_block() {
+    fn leaving_the_logs_keeps_the_cursor() {
+        // the cursor belongs to the note: a screen round trip finds it
+        // again (adr/2026-08-cursor-always-in-the-note.md)
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        activate_block(&mut dom, clicks[BLOCK_HEADING]);
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
 
         click(&mut dom, clicks[CHROME_TABLE]);
+        assert!(!dioxus_ssr::render(&dom).contains("block-active"));
         click(&mut dom, clicks[CHROME_LOGS]);
         let html = dioxus_ssr::render(&dom);
         assert!(
-            !html.contains("block-active"),
-            "leaving closed the block, Escape's semantics: {html}"
+            html.contains("block-active"),
+            "the cursor survived the round trip: {html}"
         );
     }
 
@@ -3357,7 +3357,8 @@ mod tests {
         assert!(html.contains(r#"class="table""#), "{html}");
 
         // from the table the palette offers the way back and nothing the
-        // table cannot answer for — no block can be active here
+        // table cannot answer for — the logs' block is active but hidden
+        // behind the screen, so the caret commands hide with it
         let table_keys = listeners(&mutations, "keydown")[0];
         let (input, palette_keys) = open_palette(&mut dom, table_keys);
         // a second Ctrl+P while it is open changes nothing
@@ -3723,28 +3724,29 @@ mod tests {
     }
 
     #[test]
-    fn escape_in_a_sheet_block_closes_the_block_then_the_sheet() {
+    fn escape_in_a_sheet_block_closes_the_sheet_directly() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let blocks = listeners(&opened, "click");
-
-        // the heading fragment becomes the textarea
-        let (_, block_keys) = activate_block(&mut dom, blocks[1]);
+        let (_, block_keys) = sheet_block_targets(&opened);
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
 
-        // first escape: the block deactivates and swallows the keystroke —
-        // the sheet stays up
+        // the block no longer swallows escape: one press bubbles to the
+        // pane and the sheet closes
+        // (adr/2026-08-cursor-always-in-the-note.md)
         press(&mut dom, block_keys, Key::Escape, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("block-active"), "{html}");
-        assert!(html.contains(r#"class="sheet""#), "{html}");
-
-        // second escape, now on the pane: the sheet closes
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
         assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+
+        // and the logs' note wakes with its own cursor
+        press(
+            &mut dom,
+            keys,
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(dioxus_ssr::render(&dom).contains("block-active"));
     }
 
     #[test]
@@ -4002,8 +4004,7 @@ mod tests {
             dioxus_ssr::render(&dom)
         );
 
-        let blocks = listeners(&opened, "click");
-        let (input, _) = activate_block(&mut dom, blocks[1]);
+        let (input, _) = sheet_block_targets(&opened);
         type_and_settle(&mut dom, input, "= alpha renommé\n");
         let saved =
             std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
@@ -4031,8 +4032,7 @@ mod tests {
             quit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let blocks = listeners(&opened, "click");
-        let (input, _) = activate_block(&mut dom, blocks[1]);
+        let (input, _) = sheet_block_targets(&opened);
         // typed but inside the quiet window: only the flush can save it
         type_into(&mut dom, input, "= presque perdu\n");
 
@@ -4056,8 +4056,7 @@ mod tests {
             probe_and_writer_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let blocks = listeners(&opened, "click");
-        let (_, keys) = activate_block(&mut dom, blocks[1]);
+        let (_, keys) = sheet_block_targets(&opened);
 
         // the caret sits at the end of "= alpha"
         let anchor = "= alpha".len();
@@ -4110,8 +4109,7 @@ mod tests {
                 rendered_app(Some(vault.path().to_path_buf()));
             let (pane, cards) = table_targets(&mut dom, &clicks);
             let opened = open_sheet_on(&mut dom, pane, cards[0]);
-            let blocks = listeners(&opened, "click");
-            let (_, keys) = activate_block(&mut dom, blocks[1]);
+            let (_, keys) = sheet_block_targets(&opened);
             press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
             assert!(!dioxus_ssr::render(&dom).contains("link-picker"));
         }
@@ -4121,8 +4119,7 @@ mod tests {
             probe_and_writer_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let blocks = listeners(&opened, "click");
-        let (_, keys) = activate_block(&mut dom, blocks[1]);
+        let (_, keys) = sheet_block_targets(&opened);
         *caret.lock().expect("the probe cell never poisons") = None;
         press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
         block_on(settle(&mut dom));
@@ -4140,7 +4137,7 @@ mod tests {
         .expect("the day is rewritten");
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         *caret.lock().expect("the probe cell never poisons") =
             Some(LINK_IN_HEADING + 3);
@@ -4173,8 +4170,7 @@ mod tests {
         let (pane, cards) = table_targets(&mut dom, &clicks);
         // beta sits second in id order
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
-        let blocks = listeners(&opened, "click");
-        let (_, keys) = activate_block(&mut dom, blocks[1]);
+        let (_, keys) = sheet_block_targets(&opened);
 
         // inside `#l("alpha")`, just past "= beta\n"
         *caret.lock().expect("the probe cell never poisons") = Some(10);
@@ -4196,8 +4192,7 @@ mod tests {
             probe_and_writer_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
-        let blocks = listeners(&opened, "click");
-        let (_, keys) = activate_block(&mut dom, blocks[1]);
+        let (_, keys) = sheet_block_targets(&opened);
 
         // inside `#l("2026-07-22")`
         *caret.lock().expect("the probe cell never poisons") = Some(22);
@@ -4224,8 +4219,7 @@ mod tests {
         let (pane, cards) = table_targets(&mut dom, &clicks);
         // gamma sits last in id order
         let opened = open_sheet_on(&mut dom, pane, cards[3]);
-        let blocks = listeners(&opened, "click");
-        let (_, keys) = activate_block(&mut dom, blocks[1]);
+        let (_, keys) = sheet_block_targets(&opened);
 
         // inside `#l("fantome")`, just past "= gamma\n"
         *caret.lock().expect("the probe cell never poisons") = Some(11);
@@ -4244,8 +4238,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let blocks = listeners(&opened, "click");
-        activate_block(&mut dom, blocks[1]);
+        sheet_block_targets(&opened);
 
         // no new command was registered for phase 3 — the editor commands
         // simply become available where the editor now is
@@ -4375,11 +4368,19 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[RAIL_DAY_21]);
+        // the broken `#let x = (` block wakes as the source — its
+        // diagnostic hides while it is the one being edited
         let html = dioxus_ssr::render(&dom);
-        // the broken `#let x = (` block shows its diagnostic inline while
-        // the preamble block still renders — per-block honesty
+        assert!(!html.contains("render-error"), "{html}");
+        assert!(html.contains(RENDERED_NOTE), "the preamble renders: {html}");
+
+        // activating the preamble renders the broken block: it fails
+        // alone, inline, while the preamble's source stays honest text
+        // (day 21's blocks keep day 23's keys, so the mount id holds)
+        click(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains(RENDERED_NOTE), "{html}");
+        assert!(html.contains("#import"), "the preamble source: {html}");
     }
 
     #[test]
@@ -4528,21 +4529,55 @@ mod tests {
     // -- the hybrid editor: click to source, type, escape to rendered --------
 
     #[test]
+    fn a_note_opens_with_the_caret_on_its_last_line() {
+        let vault = temp_vault();
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = written.clone();
+        let writer = CaretWriter(Arc::new(move |units| {
+            recorder
+                .lock()
+                .expect("the writer cell never poisons")
+                .push(units);
+            Box::pin(async {})
+        }));
+        let (mut dom, mutations) = mounted_app_with_probe(
+            Some(vault.path().to_path_buf()),
+            None,
+            None,
+            Some(writer),
+        );
+        // the pane mounts first, the born-active textarea second
+        mount(&mut dom, listeners(&mutations, "mounted")[1]);
+        assert_eq!(
+            *written.lock().expect("the writer cell never poisons"),
+            // the heading block "= 2026-07-23\n#l(\"2026-07-22\")\n" is 30
+            // UTF-16 units: the caret sits past the final newline, on the
+            // empty last line (adr/2026-08-cursor-always-in-the-note.md)
+            vec![30],
+        );
+    }
+
+    #[test]
     fn clicking_a_block_opens_its_source_in_place() {
+        // the note opens with its heading already the source; clicking the
+        // still-rendered preamble moves the source there and renders the
+        // heading in its place
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_HEADING]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "born editing: {html}");
+        assert!(html.contains("= 2026-07-23"), "the raw source: {html}");
+
+        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
         // the renderer announces the mount and the textarea asks for focus;
         // the fake backing refuses, which is all the handler has to absorb
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
         let html = dioxus_ssr::render(&dom);
-
-        assert!(html.contains("block-active"), "{html}");
-        assert!(html.contains("= 2026-07-23"), "the raw source: {html}");
+        assert!(html.contains("#import"), "the preamble source: {html}");
         assert!(
             html.contains(RENDERED_NOTE),
-            "the preamble block stays rendered: {html}"
+            "the heading renders in its place: {html}"
         );
     }
 
@@ -4551,7 +4586,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, keys) = activate_heading(&mut dom, &clicks);
 
         type_into(&mut dom, input, "= renamed\n\nencore\n");
         let file = vault.path().join("time/2026-07-23.typ");
@@ -4559,11 +4594,13 @@ mod tests {
             std::fs::read_to_string(&file).expect("the note is readable");
         assert!(!untouched.contains("renamed"), "typing alone never writes");
 
+        // escape no longer closes the block — the cursor stays put
         press(&mut dom, keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("block-active"), "escape closes it: {html}");
-        // the blank line split the heading block: preamble + two prose
-        assert_eq!(html.matches(r#"class="block""#).count(), 3, "{html}");
+        assert!(html.contains("block-active"), "the cursor held: {html}");
+
+        // the autosave is what writes, once the typing goes quiet
+        block_on(settle(&mut dom));
         let saved =
             std::fs::read_to_string(&file).expect("the note is readable");
         assert!(saved.contains("= renamed"), "{saved}");
@@ -4584,8 +4621,9 @@ mod tests {
         std::fs::set_permissions(&file, permissions)
             .expect("the note is made read-only");
 
-        // activation flushes before moving, and the failure is the notice
-        click(&mut dom, clicks[BLOCK_HEADING]);
+        // activating the preamble flushes the born-active heading first,
+        // and the failure is the notice
+        click(&mut dom, clicks[BLOCK_PREAMBLE]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
@@ -4596,7 +4634,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         // arrows move the caret, not the month grid below; without an
         // injected probe the vertical ones slide nowhere either
@@ -4625,11 +4663,15 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let bounced = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let heading = listeners(&bounced, "click")[1];
+        let woken = click_for_mutations(&mut dom, heading);
+        let input = listeners(&woken, "input")[0];
+        // the preamble re-rendered as a fragment under a fresh id
+        let preamble = listeners(&woken, "click")[0];
         type_into(&mut dom, input, "= renamed\n");
 
-        // the still-rendered preamble block is the first click target again
-        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let mutations = click_for_mutations(&mut dom, preamble);
         assert_eq!(
             listeners(&mutations, "input").len(),
             1,
@@ -4648,7 +4690,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret) =
             probe_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         // caret on the heading's first line: up slides into the preamble
         *caret.lock().expect("the probe cell never poisons") = Some(0);
@@ -5271,26 +5313,27 @@ mod tests {
     }
 
     #[test]
-    fn over_an_active_block_the_chord_stays_an_ordinary_paste() {
+    fn over_an_active_block_the_chord_still_captures() {
+        // a block is now always active over an open note: the chord
+        // suppresses the webview's paste and captures — one keystroke,
+        // one action (adr/2026-08-cursor-always-in-the-note.md)
         let vault = temp_vault();
         let captures = vault.path().join("capture");
         let before = std::fs::read_dir(&captures)
             .expect("the capture directory is there")
             .count();
-        // a clipboard with something on it, but a block is being edited:
-        // the webview pastes into it and nothing is captured
         let (mut dom, clicks, keys) = capture_app(
             Some(vault.path().to_path_buf()),
-            Some("pour le bloc".to_string()),
+            Some("pour la capture".to_string()),
             Some(CAPTURED_AT),
         );
-        activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        activate_heading(&mut dom, &clicks);
         capture_chord(&mut dom, &keys);
         assert_eq!(
             std::fs::read_dir(&captures)
                 .expect("the capture directory is there")
                 .count(),
-            before
+            before + 1
         );
     }
 
@@ -5301,7 +5344,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, written) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         // the caret sits right after "= 2026-07-23\n"
         let anchor = "= 2026-07-23\n".len();
@@ -5346,7 +5389,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
 
         let mutations =
@@ -5368,7 +5411,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         let (input, picker_keys) = open_picker(&mut dom, keys);
 
@@ -5403,7 +5446,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         let (input, picker_keys) = open_picker(&mut dom, keys);
 
@@ -5441,7 +5484,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, written) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") =
             Some(LINK_IN_HEADING);
         let (_, picker_keys) = open_picker(&mut dom, keys);
@@ -5470,7 +5513,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         let (_, picker_keys) = open_picker(&mut dom, keys);
 
@@ -5498,7 +5541,7 @@ mod tests {
         assert!(!html.contains("link-picker"), "{html}");
 
         // a probe that answers nothing: no anchor, no picker
-        let (_, block_keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, block_keys) = activate_heading(&mut dom, &clicks);
         press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
@@ -5517,7 +5560,7 @@ mod tests {
         // and without an injected probe at all, the chord is inert
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
@@ -5534,7 +5577,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         // inside the `#l("2026-07-22")` the heading block ends with
         *caret.lock().expect("the probe cell never poisons") =
@@ -5553,8 +5596,9 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_HEADING]);
-        let source = listeners(&mutations, "click")[0];
+        // the heading is already the active source: its own click listener
+        // sits at the heading's mount slot
+        let source = clicks[BLOCK_HEADING];
 
         // the click that follows has already moved the caret into the link
         *caret.lock().expect("the probe cell never poisons") =
@@ -5573,8 +5617,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_HEADING]);
-        let source = listeners(&mutations, "click")[0];
+        let source = clicks[BLOCK_HEADING];
 
         // the caret is in the link, but without the modifier nothing follows
         *caret.lock().expect("the probe cell never poisons") =
@@ -5593,7 +5636,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         // in the heading text, well before the link
         *caret.lock().expect("the probe cell never poisons") = Some(2);
@@ -5627,7 +5670,7 @@ mod tests {
         // and with no probe injected at all it is simply inert
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("cal-day has-note selected\">23"), "{html}");
@@ -5638,7 +5681,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         let saboteur =
             rusqlite::Connection::open(vault.path().join(".index/index.db"))
@@ -5658,7 +5701,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         replace_database_with_a_directory(vault.path());
 
@@ -5685,7 +5728,7 @@ mod tests {
             None,
         );
         let clicks = listeners(&mutations, "click");
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         let (input, picker_keys) = open_picker(&mut dom, keys);
         type_into(&mut dom, input, "summer");
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
@@ -5775,7 +5818,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, _) = activate_heading(&mut dom, &clicks);
         // the heading block loses its outgoing link and gains a ghost one
         type_and_settle(&mut dom, input, "= 2026-07-23\n#l(\"fantôme\")\n");
         let html = dioxus_ssr::render(&dom);
@@ -5792,7 +5835,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (input, _) = activate_heading(&mut dom, &clicks);
         type_and_settle(&mut dom, input, "= 2026-07-23\n");
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains('←'), "the backlink survives: {html}");
@@ -5864,6 +5907,8 @@ mod tests {
                 "toggle theme",
                 "quit",
                 "capture clipboard",
+                "insert link",
+                "follow link",
                 "previous month",
                 "next month",
                 "open loops",
@@ -5871,8 +5916,9 @@ mod tests {
                 "go to table",
                 "new note",
             ],
-            "no block active: the caret commands are hidden, the screen \
-             already stood on is not offered, and no sheet backs a delete"
+            "the note opened editing, so the caret commands stand; the \
+             screen already stood on is not offered, and no sheet backs \
+             a delete"
         );
 
         type_into(&mut dom, input, "THEME");
@@ -5888,7 +5934,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
@@ -5968,7 +6014,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, written) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") =
             Some(LINK_IN_HEADING);
         let (input, palette_keys) = open_palette(&mut dom, keys);
@@ -6016,7 +6062,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") =
             Some(LINK_IN_HEADING + 3);
         let (input, palette_keys) = open_palette(&mut dom, keys);
@@ -6036,7 +6082,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
 
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "insert link");
@@ -6114,10 +6160,14 @@ mod tests {
         let (mut dom, mutations) =
             mounted_app(Some(vault.path().to_path_buf()), None);
         let keys = listeners(&mutations, "keydown")[LOGS_KEYS];
+        let clicks = listeners(&mutations, "click");
         let focused = mount_counting_focus(
             &mut dom,
             listeners(&mutations, "mounted")[0],
         );
+        // an empty selection: the editor closes, the pane holds the chords
+        // — the one state where no textarea competes for focus
+        click(&mut dom, clicks[day_cell(24)]);
 
         let (_, palette_keys) = open_palette(&mut dom, keys);
         block_on(settle(&mut dom));
@@ -6142,7 +6192,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, written) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") =
             Some(LINK_IN_HEADING);
 
@@ -6250,7 +6300,7 @@ mod tests {
         // and over an open link picker, Ctrl+P is inert
         let (mut dom, clicks, caret, _) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, block_keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, block_keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
         open_picker(&mut dom, block_keys);
         press(&mut dom, block_keys, ctrl_p(), Modifiers::CONTROL);
@@ -6560,6 +6610,29 @@ mod tests {
     }
 
     #[test]
+    fn overlays_closed_over_a_closed_editor_skip_the_remount() {
+        // an empty selection is the one state without a cursor: escaping
+        // an overlay then has no textarea to hand focus back to
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[day_cell(24)]);
+
+        let (_, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains("command-palette"));
+
+        // the finders on the table, the editor still closed behind them
+        let (_, _, table_keys) = table_targets_with_keys(&mut dom, &clicks);
+        let (_, filter_keys) = open_overlay(&mut dom, table_keys, ctrl_f());
+        press(&mut dom, filter_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">filter<"));
+        let (_, jump_keys) = open_overlay(&mut dom, table_keys, ctrl_o());
+        press(&mut dom, jump_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">jump<"));
+    }
+
+    #[test]
     fn a_finder_over_a_broken_index_reports_instead_of_opening() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
@@ -6620,8 +6693,7 @@ mod tests {
             probe_and_writer_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let blocks = listeners(&opened, "click");
-        let (_, block_keys) = activate_block(&mut dom, blocks[1]);
+        let (_, block_keys) = sheet_block_targets(&opened);
         *caret.lock().expect("the probe cell never poisons") = Some(0);
 
         // the filter, opened over the active block, escapes back into it
@@ -7144,7 +7216,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, caret, written) =
             probe_and_writer_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_block(&mut dom, clicks[BLOCK_HEADING]);
+        let (_, keys) = activate_heading(&mut dom, &clicks);
         *caret.lock().expect("the probe cell never poisons") = Some(4);
 
         let (_, creator_keys) = open_creator(&mut dom, keys);
@@ -8025,6 +8097,30 @@ mod tests {
         let inputs = listeners(&mutations, "input");
         let keys = listeners(&mutations, "keydown");
         (inputs[0], keys[0])
+    }
+
+    /// The heading textarea's targets. A note now opens with its last
+    /// block — the fixture's heading — already active, so the old
+    /// click-to-activate is a bounce: activate the preamble, then click
+    /// the heading fragment back into a fresh textarea, landing on the
+    /// exact state the pre-cursor tests started from.
+    fn activate_heading(
+        dom: &mut VirtualDom,
+        clicks: &[ElementId],
+    ) -> (ElementId, ElementId) {
+        let bounced = click_for_mutations(dom, clicks[BLOCK_PREAMBLE]);
+        let heading = listeners(&bounced, "click")[1];
+        activate_block(dom, heading)
+    }
+
+    /// The sheet's active textarea targets: the sheet opens with the
+    /// note's last block already awake, its listeners in the opening
+    /// mutations themselves (adr/2026-08-cursor-always-in-the-note.md).
+    fn sheet_block_targets(opened: &Mutations) -> (ElementId, ElementId) {
+        (
+            listeners(opened, "input")[0],
+            listeners(opened, "keydown")[0],
+        )
     }
 
     /// Fires a wheel event with the given vertical pixel delta.

@@ -13,7 +13,10 @@ pub struct Block {
     /// The widget shows and edits only `content()`; the separator stays in
     /// the buffer, invisible, so the textarea carries no phantom blank
     /// lines — and emptying a block's content leaves a bare separator that
-    /// merges away at the next resegmentation.
+    /// merges away at the next resegmentation. The note's *last* block is
+    /// the exception: its content runs to the end of the note, so the
+    /// trailing empty line is real and the cursor can rest on it
+    /// (adr/2026-08-cursor-always-in-the-note.md).
     pub content_end: usize,
     /// The block carries its own template import (the note's preamble), so a
     /// fragment compile must not prepend another one.
@@ -30,7 +33,9 @@ impl Block {
 
 /// Splits `text` into blocks at top-level `Parbreak` nodes. Total: an empty
 /// or blank-only note is one block covering it all, leading blank lines
-/// belong to block 0, and the returned ranges tile `0..text.len()`.
+/// belong to block 0, and the returned ranges tile `0..text.len()`. The
+/// last block's content runs to the end of the note — its trailing
+/// newlines are where the cursor lives, every other separator stays hidden.
 pub fn segment(text: &str) -> Vec<Block> {
     let root = typst_syntax::parse(text);
     let mut blocks = Vec::new();
@@ -68,9 +73,12 @@ pub fn segment(text: &str) -> Vec<Block> {
         }
         offset += child.len();
     }
+    // the note's last block keeps its ending visible: the trailing newline
+    // is the empty line the caret rests on, not a separator to hide
+    // (adr/2026-08-cursor-always-in-the-note.md)
     blocks.push(Block {
         range: start..text.len(),
-        content_end,
+        content_end: text.len(),
         standalone,
     });
     blocks
@@ -210,13 +218,15 @@ mod tests {
         let blocks = segment(NOTE);
         assert!(NOTE[blocks[0].range.clone()].ends_with(")\n\n"));
         assert!(NOTE[blocks[1].range.clone()].ends_with("21\n\n"));
-        // the widget shows content only: no phantom blank lines at the end
+        // the widget shows content only: no phantom blank lines between
+        // blocks…
         assert!(NOTE[blocks[0].content()].ends_with(")"));
         assert!(NOTE[blocks[1].content()].ends_with("21"));
+        // …but the note's final newline is real: the empty last line is
+        // where the cursor rests (adr/2026-08-cursor-always-in-the-note.md)
         assert_eq!(
             &NOTE[blocks[2].content()],
-            "Read about the #l(\"zettelkasten\").",
-            "the note's final newline is separator too"
+            "Read about the #l(\"zettelkasten\").\n",
         );
     }
 

@@ -31,11 +31,19 @@ impl Editor {
     /// closed editor carrying the error as its notice.
     pub fn open(file: PathBuf) -> Editor {
         match Buffer::open(file.clone()) {
-            Ok(note) => Editor {
-                blocks: blocks::segment(note.text()),
-                buffer: Some(note),
-                ..Editor::default()
-            },
+            Ok(note) => {
+                let blocks = blocks::segment(note.text());
+                Editor {
+                    // an open note always has its cursor somewhere: the
+                    // last block wakes active, and the widget's default
+                    // caret lands on its last line
+                    // (adr/2026-08-cursor-always-in-the-note.md)
+                    active: Some(blocks.len().saturating_sub(1)),
+                    blocks,
+                    buffer: Some(note),
+                    ..Editor::default()
+                }
+            }
             Err(err) => Editor {
                 notice: Some(format!("{}: {err}", file.display())),
                 ..Editor::default()
@@ -328,10 +336,12 @@ mod tests {
     }
 
     #[test]
-    fn open_segments_the_note_with_nothing_active() {
+    fn open_segments_the_note_and_wakes_its_last_block() {
+        // an open note always has its cursor somewhere
+        // (adr/2026-08-cursor-always-in-the-note.md)
         let (_dir, editor) = open_note(NOTE);
         assert_eq!(editor.blocks().len(), 3, "{:?}", editor.blocks());
-        assert_eq!(editor.active(), None);
+        assert_eq!(editor.active(), Some(2));
         assert_eq!(editor.notice(), None);
         let (file, text) = editor.note().expect("the note is open");
         assert!(file.ends_with("note.typ"));
@@ -426,8 +436,9 @@ mod tests {
 
     #[test]
     fn edits_against_a_stale_editor_are_dropped_loudly() {
-        // no block active
+        // no block active: only deactivation reaches it now
         let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
         editor.edit("anything");
         assert_eq!(editor.notice(), Some(STALE_EDIT));
 
@@ -495,8 +506,9 @@ mod tests {
 
     #[test]
     fn insert_against_a_stale_editor_is_dropped_loudly() {
-        // no block active
+        // no block active: only deactivation reaches it now
         let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
         editor.insert(0, "#l(\"x\")");
         assert_eq!(editor.notice(), Some(STALE_EDIT));
 
@@ -579,6 +591,7 @@ mod tests {
         assert_eq!(editor.active(), None);
 
         let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
         editor.slide(0, true);
         assert_eq!(editor.active(), None, "rendered view: arrows are inert");
     }
