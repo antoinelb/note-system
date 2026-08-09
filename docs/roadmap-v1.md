@@ -133,12 +133,12 @@ Exit: tag, type and name each reach any card without panning by hand.
 
 Goal: new notes land near their links; layout is only ever a command, never a background process.
 
-- [ ] Auto-place an unplaced note near its strongest linked placed card; deterministic and bounded — no iteration to convergence at place time.
-  - [ ] What "strongest" means (link count? both directions?) and the fallback for an unlinked note. **→ ADR**
-- [ ] On-demand "arrange this cluster" — at most a command, force-directed is never the default (`plan.md` § Canvas).
-  - [ ] What "this cluster" scopes to, the keystroke, and the explicit iteration bound. **→ ADR**
-- [ ] The invariant, test-enforced: a hand-placed card is never moved by either mechanism — positions change only under the user's drag or their explicit arrange.
-- [ ] Tests: placement near links, unlinked fallback, the hand-placed invariant, arrange terminates within its bound.
+- [x] Auto-place an unplaced note near its strongest linked placed card; deterministic and bounded — a derivation-time proposal on a ring of free slots, never a store write, so the card follows its links live until a drag pins it; creation's viewport-centre stamp became a session birth slot.
+  - [x] "Strongest" = edge count in both directions, ties to the smallest anchor id; an unlinked note keeps the origin grid. **→ ADR** (`adr/2026-08-auto-place-strongest-link-ring.md`)
+- [x] On-demand "arrange this cluster" — a palette-only command over the open sheet's connected component, force-directed never the default (`plan.md` § Canvas).
+  - [x] The scope (the sheet's component), the gesture (palette-only, no chord), and the explicit bound (50 clamped iterations, flat). **→ ADR** (`adr/2026-08-arrange-cluster-command.md`)
+- [x] The invariant, test-enforced *and structural*: a hand-placed card is never moved by either mechanism — auto-placement cannot write the store at all, so positions change only under the user's drag or their explicit arrange.
+- [x] Tests: placement near links, unlinked fallback, the hand-placed invariant, arrange terminates within its bound.
 
 Exit: creating a linked note lands it where it belongs, and nothing ever moves a card you placed.
 
@@ -149,8 +149,8 @@ Exit: creating a linked note lands it where it belongs, and nothing ever moves a
 - [x] Two-level semantic zoom: titles ⇄ rendered bodies (phase 6)
 - [x] Tethered writing sheet on card click, dimmed table behind it (phase 3)
 - [x] Tag & type filters, type colours, jump-to-note (phases 2, 7)
-- [ ] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)
+- [x] Auto-placement of new notes near linked ones; on-demand cluster arrange (phase 8)
 - [x] Capture/generated visual treatment; `generated` type defined (phase 2)
 - [x] Permanent-note CRUD in the app; the vault grows without leaving it (phases 3–4)
-- [ ] `make test` green with 100% coverage; every note compiles with vanilla typst (`make check-vault`)
-- [ ] The ceiling held: nothing shipped in v1 beyond this list (`plan.md` § Known risks 4)
+- [x] `make test` green with 100% coverage; every note compiles with vanilla typst (`make check-vault`)
+- [x] The ceiling held: nothing shipped in v1 beyond this list (`plan.md` § Known risks 4)

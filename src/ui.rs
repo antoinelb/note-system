@@ -578,6 +578,7 @@ fn Shell(
     let create_note = use_callback({
         let root = root.clone();
         let window_size = window_size.clone();
+        let fallback = fallback.clone();
         move |(picked, title): (NoteType, String)| {
             let created = today.to_string();
             match crate::create::permanent(&root, &picked, &title, &created) {
@@ -587,7 +588,10 @@ fn Shell(
                         .as_ref()
                         .map_or(table::DEFAULT_VIEWPORT, |size| (size.0)());
                     let (x, y) = table::spawn_position(viewport, *pan.peek());
-                    positions.write().set(&id, x, y);
+                    // a session birth slot, never a store write: the card
+                    // drifts to its links as they arrive, and only a drag
+                    // pins it (adr/2026-08-auto-place-strongest-link-ring.md)
+                    fallback.borrow_mut().place(&id, (x, y));
                     // optimistic, the time-note idiom: the watcher batch
                     // converges the same row ~200 ms later
                     table_notes.with_mut(|list| {
@@ -688,17 +692,53 @@ fn Shell(
                 &table_notes.peek(),
                 &positions.peek(),
                 &mut fallback.borrow_mut(),
+                &edges.peek(),
                 filter.peek().as_ref(),
                 today,
             );
             if let Some(card) = placed.iter().find(|card| card.id == id) {
-                let landed = table::centre_on(
-                    card,
-                    *zoom.peek(),
-                    *viewport.peek(),
-                );
+                let landed =
+                    table::centre_on(card, *zoom.peek(), *viewport.peek());
                 pan.set(landed);
             }
+        }
+    });
+
+    // the explicit layout, palette-only: the open sheet's connected
+    // component springs toward legibility for 50 clamped steps, then stops
+    // — the one sanctioned mover besides the drag
+    // (adr/2026-08-arrange-cluster-command.md)
+    let arrange_cluster = use_callback({
+        let fallback = fallback.clone();
+        move |()| {
+            let Some(own) = sheet.peek().clone() else {
+                return;
+            };
+            let cluster = crate::arrange::component(&own, &edges.peek());
+            let placed = table::cards(
+                &table_notes.peek(),
+                &positions.peek(),
+                &mut fallback.borrow_mut(),
+                &edges.peek(),
+                filter.peek().as_ref(),
+                today,
+            );
+            // only component members with cards arrange; dangling ids in
+            // the component lay out nothing
+            let seed: Vec<(String, (f64, f64))> = placed
+                .iter()
+                .filter(|card| cluster.contains(&card.id))
+                .map(|card| (card.id.clone(), (card.x, card.y)))
+                .collect();
+            let ids: Vec<String> =
+                seed.iter().map(|(id, _)| id.clone()).collect();
+            let laid = crate::arrange::arrange(&ids, &edges.peek(), &seed);
+            // one write: one repaint, one debounce restart
+            positions.with_mut(|store| {
+                for (id, (x, y)) in &laid {
+                    store.set(id, *x, *y);
+                }
+            });
         }
     });
 
@@ -758,7 +798,8 @@ fn Shell(
             let listing = loops_open();
             let summoned = palette.read().is_some();
             let creating = creator.read().is_some();
-            let finding = filter_picker.read().is_some() || jump.read().is_some();
+            let finding =
+                filter_picker.read().is_some() || jump.read().is_some();
             let handle = pane.borrow().clone();
             if let Some(handle) = handle
                 && (!editing || listing)
@@ -1005,6 +1046,9 @@ fn Shell(
                 }
                 palette::CommandId::FilterCards => open_filter.call(()),
                 palette::CommandId::JumpToNote => open_jump.call(()),
+                palette::CommandId::ArrangeCluster => {
+                    arrange_cluster.call(());
+                }
             }
         });
 
@@ -1272,11 +1316,13 @@ fn Shell(
     let captured = (exists && scale == NoteType::Daily)
         .then(|| captured_lines(&root, &id));
     // reading the signals here is what repaints the table on a drag write,
-    // a watcher batch and a filter change alike
+    // a watcher batch and a filter change alike — and why an auto-placed
+    // card follows its links live until a drag pins it
     let placed = table::cards(
         &table_notes.read(),
         &positions.read(),
         &mut fallback.borrow_mut(),
+        &edges.read(),
         filter.read().as_ref(),
         today,
     );
@@ -6213,6 +6259,109 @@ mod tests {
         assert!(html.contains("link-picker"), "{html}");
     }
 
+    // -- auto-placement and the explicit arrange ------------------------------
+
+    /// A vault whose alpha stands hand-placed at (1000, 500), with beta
+    /// linking it — the auto-placement scenario.
+    fn anchored_vault() -> tempfile::TempDir {
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join(".index"))
+            .expect("the index dir is creatable");
+        std::fs::write(
+            vault.path().join(".index/positions"),
+            "alpha 1000 500\n",
+        )
+        .expect("the hand placement is written");
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("the linking note is written");
+        vault
+    }
+
+    #[test]
+    fn a_linked_unplaced_note_appears_beside_its_anchor() {
+        let vault = anchored_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 1000px; top: 500px"), "{html}");
+        // beta proposes the first ring cell beside its anchor
+        assert!(html.contains("left: 808px; top: 404px"), "{html}");
+    }
+
+    #[test]
+    fn auto_place_never_writes_the_positions_file() {
+        let vault = anchored_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        assert!(dioxus_ssr::render(&dom).contains("left: 808px; top: 404px"));
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(
+            saved.trim(),
+            "alpha 1000 500",
+            "the proposal stayed a proposal — the invariant is structural"
+        );
+    }
+
+    #[test]
+    fn arrange_cluster_moves_the_component_and_the_debounce_persists_it() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("the linking note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "arrange");
+        assert_eq!(palette_labels(&dom), vec!["arrange cluster"]);
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert!(saved.contains("alpha "), "the anchor arranged: {saved}");
+        assert!(saved.contains("beta "), "its neighbour too: {saved}");
+        assert_eq!(
+            saved.trim().lines().count(),
+            2,
+            "cards outside the component were never touched: {saved}"
+        );
+    }
+
+    #[test]
+    fn an_arrange_whose_sheet_left_meanwhile_moves_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        // the delete guard's twin: the palette froze "a sheet is open",
+        // the sheet closed under it, the frozen command runs into nothing
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "arrange");
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the idle tick still writes the empty store");
+        assert_eq!(saved.trim(), "", "no cluster to arrange: {saved}");
+    }
+
     // -- findability: the filter and the jump ---------------------------------
 
     #[test]
@@ -6270,13 +6419,10 @@ mod tests {
         let dimmed = html.matches("dimmed").count();
         assert_eq!(dimmed, 3, "alpha, the capture and the generated: {html}");
         assert!(
-            !html
-                .split(">beta</div>")
+            !html.split(">beta</div>").next().is_some_and(|before| before
+                .rsplit("card card-")
                 .next()
-                .is_some_and(|before| before
-                    .rsplit("card card-")
-                    .next()
-                    .is_some_and(|card| card.contains("dimmed"))),
+                .is_some_and(|card| card.contains("dimmed"))),
             "beta itself is not dimmed: {html}"
         );
     }
@@ -6410,9 +6556,7 @@ mod tests {
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
         // alpha is the first row
         click(&mut dom, rows[0]);
-        assert!(
-            dioxus_ssr::render(&dom).contains("translate(520px, 340px)")
-        );
+        assert!(dioxus_ssr::render(&dom).contains("translate(520px, 340px)"));
     }
 
     #[test]
@@ -6761,10 +6905,15 @@ mod tests {
         mouse(&mut dom, "mousedown", cards[1], (100.0, 100.0));
         mouse(&mut dom, "mousemove", pane, (276.0, 100.0));
         mouse(&mut dom, "mouseup", pane, (276.0, 100.0));
+        // the drag pinned beta at (400, 32); alpha, never hand-placed and
+        // linked to it, drifted onto beta's ring at (208, −64) — and the
+        // edge follows both ends (adr/2026-08-auto-place-strongest-link-ring.md)
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 208px; top: -64px"), "{html}");
         let drawn = edges_svg(&dom);
         assert!(
-            drawn.contains(r#"<line x1="400" y1="60" x2="208" y2="60""#),
-            "the moving end followed, the still end held: {drawn}"
+            drawn.contains(r#"<line x1="432" y1="32" x2="352" y2="-8""#),
+            "the edge tracked the drag and the drift: {drawn}"
         );
     }
 
@@ -6957,11 +7106,16 @@ mod tests {
         // 800×600: centre (400, 300) → card corner (400−88, 300−28)
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("left: 312px; top: 272px"), "{html}");
+        // a birth slot, not a placement: the positions file holds only
+        // hand-drags (adr/2026-08-auto-place-strongest-link-ring.md)
         block_on(settle(&mut dom));
         let saved =
             std::fs::read_to_string(vault.path().join(".index/positions"))
                 .expect("the debounced write reached the file");
-        assert!(saved.contains("deep-modules 312 272"), "{saved}");
+        assert!(
+            !saved.contains("deep-modules"),
+            "creation persists nothing: {saved}"
+        );
     }
 
     #[test]

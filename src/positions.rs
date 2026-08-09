@@ -46,6 +46,13 @@ impl Positions {
         self.placed.remove(id);
     }
 
+    /// Every placed entry, in the file's deterministic order — the anchors
+    /// auto-placement clusters around
+    /// (adr/2026-08-auto-place-strongest-link-ring.md).
+    pub fn iter(&self) -> impl Iterator<Item = (&str, (f64, f64))> {
+        self.placed.iter().map(|(id, at)| (id.as_str(), *at))
+    }
+
     /// Plain `fs::write`, the same known ceiling as the editor's save
     /// (adr/2026-07-debounced-autosave.md): the crash window is one small
     /// write, and the upgrade path is write-temp-then-rename.

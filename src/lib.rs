@@ -1,5 +1,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod arrange;
 pub mod blocks;
 pub mod capture;
 pub mod create;

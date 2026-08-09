@@ -27,6 +27,7 @@ pub enum CommandId {
     ZoomToTitles,
     FilterCards,
     JumpToNote,
+    ArrangeCluster,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -42,7 +43,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 17] = [
+pub const COMMANDS: [Command; 18] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -130,6 +131,13 @@ pub const COMMANDS: [Command; 17] = [
         label: "jump to note",
         chord: Some("ctrl+o"),
     },
+    // chordless: layout is rare and deliberate — "at most a command"
+    // (adr/2026-08-arrange-cluster-command.md)
+    Command {
+        id: CommandId::ArrangeCluster,
+        label: "arrange cluster",
+        chord: None,
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
@@ -178,6 +186,8 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::ZoomToTitles => context.on_table && context.at_bodies,
         // the finders act on cards, which only the table shows
         CommandId::FilterCards | CommandId::JumpToNote => context.on_table,
+        // the arrange scopes to the open sheet's component
+        CommandId::ArrangeCluster => context.sheet_open,
         _ => true,
     }
 }
@@ -244,6 +254,7 @@ mod tests {
                 .filter(|label| {
                     *label != "go to logs"
                         && *label != "delete note"
+                        && *label != "arrange cluster"
                         && !label.starts_with("zoom")
                         && *label != "filter cards"
                         && *label != "jump to note"
@@ -255,7 +266,7 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 8);
+        assert_eq!(visible.len(), COMMANDS.len() - 9);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
     }
@@ -279,6 +290,15 @@ mod tests {
     fn delete_note_exists_only_over_an_open_sheet() {
         assert!(!labels(&filter("delete", AT_TABLE)).contains(&"delete note"));
         assert_eq!(labels(&filter("delete", AT_SHEET)), vec!["delete note"]);
+    }
+
+    #[test]
+    fn arrange_cluster_exists_only_over_an_open_sheet() {
+        assert_eq!(labels(&filter("arrange", AT_TABLE)), Vec::<&str>::new());
+        assert_eq!(
+            labels(&filter("arrange", AT_SHEET)),
+            vec!["arrange cluster"]
+        );
     }
 
     #[test]
@@ -326,7 +346,12 @@ mod tests {
             .collect();
         assert_eq!(
             chordless,
-            vec!["open loops", "go to today", "delete note"]
+            vec![
+                "open loops",
+                "go to today",
+                "delete note",
+                "arrange cluster"
+            ]
         );
         let mut names: Vec<&str> =
             COMMANDS.iter().map(|command| command.label).collect();

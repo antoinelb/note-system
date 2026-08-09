@@ -921,11 +921,7 @@ mod tests {
         // "method" appears on two notes and once in the vocabulary
         assert_eq!(
             index.tag_names().expect("query"),
-            vec![
-                "book".to_string(),
-                "method".to_string(),
-                "rust".to_string()
-            ]
+            vec!["book".to_string(), "method".to_string(), "rust".to_string()]
         );
     }
 
@@ -946,10 +942,7 @@ mod tests {
             let raw = Connection::open(dir.path().join("index.sqlite"))
                 .expect("raw open");
             raw.execute_batch(plant).expect("plant the blob row");
-            assert!(matches!(
-                index.table_notes(),
-                Err(IndexError::Sqlite(_))
-            ));
+            assert!(matches!(index.table_notes(), Err(IndexError::Sqlite(_))));
         }
         // tag_names decodes only the tag column
         let (dir, index) = temp_index();

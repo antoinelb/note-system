@@ -61,25 +61,55 @@ impl Fallback {
         self.slots.insert(id.to_string(), slot);
         slot
     }
+
+    /// Creation pins its viewport-centre birth slot here — a session
+    /// proposal, never a store write, so the positions file stays purely
+    /// hand-placed; links, once written, outrank it
+    /// (adr/2026-08-auto-place-strongest-link-ring.md).
+    pub fn place(&mut self, id: &str, slot: (f64, f64)) {
+        self.slots.insert(id.to_string(), slot);
+    }
 }
 
-/// Resolve every table note against the store. Unplaced notes take a
-/// session-stable slot near the origin — dumb and honest until phase 8
-/// places them (roadmap-v1.md § Phase 2). A filter dims, never drops
-/// (adr/2026-08-filter-overlay-ctrl-f.md).
+/// Resolve every table note: the store's word first, then an auto-placement
+/// proposal beside its strongest anchored link, then the session slot —
+/// birth slots included — near the origin
+/// (adr/2026-08-auto-place-strongest-link-ring.md). Nothing here writes the
+/// store: proposals follow the links live until a drag pins them. A filter
+/// dims, never drops (adr/2026-08-filter-overlay-ctrl-f.md).
 pub fn cards(
     notes: &[TableNote],
     positions: &Positions,
     fallback: &mut Fallback,
+    edges: &[(String, String)],
     filter: Option<&Filter>,
     today: Date,
 ) -> Vec<Card> {
+    // anchors: the store's entries, then cards auto-placed earlier in this
+    // pass — grid and birth slots anchor nothing; occupied: everything
+    // resolved, so proposals never stack
+    let mut anchors: Vec<(String, (f64, f64))> = positions
+        .iter()
+        .map(|(id, at)| (id.to_string(), at))
+        .collect();
+    let mut occupied: Vec<(f64, f64)> =
+        anchors.iter().map(|(_, at)| *at).collect();
     notes
         .iter()
         .map(|note| {
-            let (x, y) = positions
-                .get(&note.id)
-                .unwrap_or_else(|| fallback.slot_for(&note.id));
+            let (x, y) = match positions.get(&note.id) {
+                Some(at) => at,
+                None => match crate::arrange::auto_place(
+                    &note.id, edges, &anchors, &occupied,
+                ) {
+                    Some(at) => {
+                        anchors.push((note.id.clone(), at));
+                        at
+                    }
+                    None => fallback.slot_for(&note.id),
+                },
+            };
+            occupied.push((x, y));
             let kind = presented_kind(note);
             Card {
                 id: note.id.clone(),
@@ -162,11 +192,7 @@ pub fn filter_rows<'entries>(
 /// The pan that puts a card's nominal centre at the viewport centre at
 /// this zoom: pan = centre/s − card_centre
 /// (adr/2026-08-jump-ctrl-o-centres-viewport.md).
-pub fn centre_on(
-    card: &Card,
-    zoom: Zoom,
-    viewport: (f64, f64),
-) -> (f64, f64) {
+pub fn centre_on(card: &Card, zoom: Zoom, viewport: (f64, f64)) -> (f64, f64) {
     let scale = zoom.scale();
     (
         viewport.0 / 2.0 / scale - (card.x + CARD_WIDTH / 2.0),
@@ -511,6 +537,7 @@ mod tests {
                 &[typed("a", note_type)],
                 &empty_positions(),
                 &mut Fallback::default(),
+                &[],
                 None,
                 TODAY,
             );
@@ -528,6 +555,7 @@ mod tests {
             &[untyped, unknown, time_scale],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -550,6 +578,7 @@ mod tests {
             &[fresh, old],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -567,6 +596,7 @@ mod tests {
             &[dateless, garbled],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -582,6 +612,7 @@ mod tests {
             &[tomorrow],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -594,6 +625,7 @@ mod tests {
             &[note("a", NoteCategory::Generated)],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -611,6 +643,7 @@ mod tests {
             &[titled, bare],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -628,6 +661,7 @@ mod tests {
             &[note("a", NoteCategory::Permanent)],
             &positions,
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -640,8 +674,14 @@ mod tests {
             .iter()
             .map(|id| note(id, NoteCategory::Permanent))
             .collect();
-        let drawn =
-            cards(&notes, &empty_positions(), &mut Fallback::default(), None, TODAY);
+        let drawn = cards(
+            &notes,
+            &empty_positions(),
+            &mut Fallback::default(),
+            &[],
+            None,
+            TODAY,
+        );
         let slots: Vec<(f64, f64)> =
             drawn.iter().map(|card| (card.x, card.y)).collect();
         assert_eq!(
@@ -658,7 +698,14 @@ mod tests {
         // deterministic: the same input stacks identically again
         assert_eq!(
             drawn,
-            cards(&notes, &empty_positions(), &mut Fallback::default(), None, TODAY)
+            cards(
+                &notes,
+                &empty_positions(),
+                &mut Fallback::default(),
+                &[],
+                None,
+                TODAY
+            )
         );
     }
 
@@ -669,14 +716,15 @@ mod tests {
             note("a", NoteCategory::Permanent),
             note("b", NoteCategory::Permanent),
         ];
-        let before = cards(&notes, &empty_positions(), &mut fallback, None, TODAY);
+        let before =
+            cards(&notes, &empty_positions(), &mut fallback, &[], None, TODAY);
         assert_eq!((before[1].x, before[1].y), (224.0, 32.0));
 
         // a gets dragged somewhere real; b must not compact into its slot
         let dir = tempfile::tempdir().expect("create tempdir");
         let mut positions = Positions::load(&dir.path().join("positions"));
         positions.set("a", 900.0, 900.0);
-        let after = cards(&notes, &positions, &mut fallback, None, TODAY);
+        let after = cards(&notes, &positions, &mut fallback, &[], None, TODAY);
         assert_eq!((after[0].x, after[0].y), (900.0, 900.0));
         assert_eq!(
             (after[1].x, after[1].y),
@@ -751,6 +799,7 @@ mod tests {
             &[promoted],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -770,6 +819,7 @@ mod tests {
             &[garbled],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -788,6 +838,98 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_placed_card_is_never_moved_by_auto_place() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut positions = Positions::load(&dir.path().join("positions"));
+        positions.set("a", 40.0, 40.0);
+        positions.set("b", 900.0, 900.0);
+        // a is saturated with links to b: still, the store's word stands
+        let edges = [
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "a".to_string()),
+        ];
+        let notes = [
+            note("a", NoteCategory::Permanent),
+            note("b", NoteCategory::Permanent),
+        ];
+        let drawn = cards(
+            &notes,
+            &positions,
+            &mut Fallback::default(),
+            &edges,
+            None,
+            TODAY,
+        );
+        assert_eq!((drawn[0].x, drawn[0].y), (40.0, 40.0));
+        assert_eq!((drawn[1].x, drawn[1].y), (900.0, 900.0));
+    }
+
+    #[test]
+    fn a_linked_unplaced_note_lands_beside_its_anchor() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut positions = Positions::load(&dir.path().join("positions"));
+        positions.set("a", 1000.0, 500.0);
+        let edges = [("b".to_string(), "a".to_string())];
+        let notes = [
+            note("a", NoteCategory::Permanent),
+            note("b", NoteCategory::Permanent),
+        ];
+        let drawn = cards(
+            &notes,
+            &positions,
+            &mut Fallback::default(),
+            &edges,
+            None,
+            TODAY,
+        );
+        // the first free ring cell beside a, and no grid slot burned
+        assert_eq!((drawn[1].x, drawn[1].y), (1000.0 - 192.0, 500.0 - 96.0));
+
+        // and the chain: c, linked only to the auto-placed b, clusters on
+        let mut chained = notes.to_vec();
+        chained.push(note("c", NoteCategory::Permanent));
+        let edges = [
+            ("b".to_string(), "a".to_string()),
+            ("c".to_string(), "b".to_string()),
+        ];
+        let drawn = cards(
+            &chained,
+            &positions,
+            &mut Fallback::default(),
+            &edges,
+            None,
+            TODAY,
+        );
+        assert_eq!(
+            (drawn[2].x, drawn[2].y),
+            (808.0 - 192.0, 404.0 - 96.0),
+            "anchored on b's proposal, not the grid"
+        );
+    }
+
+    #[test]
+    fn an_unlinked_note_keeps_the_origin_grid() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut positions = Positions::load(&dir.path().join("positions"));
+        positions.set("a", 1000.0, 500.0);
+        // b's only link reaches nothing placed: the grid keeps it
+        let edges = [("b".to_string(), "ghost".to_string())];
+        let notes = [
+            note("a", NoteCategory::Permanent),
+            note("b", NoteCategory::Permanent),
+        ];
+        let drawn = cards(
+            &notes,
+            &positions,
+            &mut Fallback::default(),
+            &edges,
+            None,
+            TODAY,
+        );
+        assert_eq!((drawn[1].x, drawn[1].y), (32.0, 32.0));
+    }
+
+    #[test]
     fn a_tag_filter_dims_the_cards_without_that_tag() {
         let mut tagged = typed("a", NoteType::Concept);
         tagged.tags = vec!["method".to_string()];
@@ -797,6 +939,7 @@ mod tests {
             &[tagged, plain],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             Some(&filter),
             TODAY,
         );
@@ -816,11 +959,11 @@ mod tests {
             &[wanted, other, untyped, capture, generated],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             Some(&filter),
             TODAY,
         );
-        let dimmed: Vec<bool> =
-            drawn.iter().map(|card| card.dimmed).collect();
+        let dimmed: Vec<bool> = drawn.iter().map(|card| card.dimmed).collect();
         assert_eq!(dimmed, vec![false, true, true, true, true]);
     }
 
@@ -830,6 +973,7 @@ mod tests {
             &[note("a", NoteCategory::Permanent)],
             &empty_positions(),
             &mut Fallback::default(),
+            &[],
             None,
             TODAY,
         );
@@ -838,16 +982,11 @@ mod tests {
 
     #[test]
     fn filter_entries_list_every_tag_then_the_eight_types() {
-        let entries = filter_entries(&[
-            "method".to_string(),
-            "zettel".to_string(),
-        ]);
+        let entries =
+            filter_entries(&["method".to_string(), "zettel".to_string()]);
         assert_eq!(entries.len(), 10);
         assert_eq!(entries[0].label, "method");
-        assert_eq!(
-            entries[0].filter,
-            Filter::Tag("method".to_string())
-        );
+        assert_eq!(entries[0].filter, Filter::Tag("method".to_string()));
         assert_eq!(entries[2].label, "person");
         assert_eq!(entries[2].filter, Filter::Type(NoteType::Person));
         assert_eq!(entries[9].filter, Filter::Type(NoteType::Project));
@@ -1040,7 +1179,14 @@ mod tests {
             note("a", NoteCategory::Permanent),
             note("b", NoteCategory::Permanent),
         ];
-        let drawn = cards(&notes, &positions, &mut Fallback::default(), None, TODAY);
+        let drawn = cards(
+            &notes,
+            &positions,
+            &mut Fallback::default(),
+            &[],
+            None,
+            TODAY,
+        );
         // b is the first unplaced note, so it takes the grid's first slot
         assert_eq!((drawn[1].x, drawn[1].y), (32.0, 32.0));
     }
