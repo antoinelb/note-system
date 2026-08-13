@@ -15,6 +15,7 @@ pub mod loops;
 pub mod motions;
 pub mod palette;
 pub mod parse;
+pub mod persist;
 pub mod positions;
 pub mod render;
 pub mod status;

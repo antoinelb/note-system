@@ -47,6 +47,11 @@ pub enum Severity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Save,
+    /// Its own source, not `Save`: an io failure resolves when a later
+    /// save lands, a conflict only when the user picks a side — and the
+    /// palette's resolution pair exists exactly while this one stands
+    /// (adr/2026-08-external-edit-conflict-commands.md).
+    Conflict,
     Positions,
     Watcher,
     Editor,
@@ -170,6 +175,20 @@ impl Notice {
                 text: detail,
             },
             Trouble::Save(detail) => Notice::save_failed(&detail),
+            Trouble::Conflict => Notice::conflicted(),
+        }
+    }
+
+    /// The external-edit guard refusing to clobber: both versions survive
+    /// — the buffer in memory, the other author's on disk — until the user
+    /// picks a side (adr/2026-08-external-edit-conflict-commands.md).
+    pub fn conflicted() -> Notice {
+        Notice {
+            severity: Severity::Critical,
+            source: Source::Conflict,
+            text: "save: the note changed on disk — \
+                   keep mine or take disk decides"
+                .to_string(),
         }
     }
 
@@ -442,6 +461,12 @@ mod tests {
         assert_eq!(save.severity, Severity::Critical);
         assert_eq!(save.source, Source::Save);
         assert!(save.text.contains("a.typ: full"), "{save:?}");
+
+        let conflict = Notice::from_trouble(Trouble::Conflict);
+        assert_eq!(conflict.severity, Severity::Critical);
+        assert_eq!(conflict.source, Source::Conflict);
+        assert!(conflict.text.contains("changed on disk"), "{conflict:?}");
+        assert!(conflict.text.contains("keep mine"), "{conflict:?}");
     }
 
     #[test]

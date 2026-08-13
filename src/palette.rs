@@ -24,6 +24,8 @@ pub enum CommandId {
     NewNote,
     DeleteNote,
     Notices,
+    KeepMine,
+    TakeDisk,
     ZoomToBodies,
     ZoomToTitles,
     FilterCards,
@@ -44,7 +46,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 19] = [
+pub const COMMANDS: [Command; 21] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -119,6 +121,19 @@ pub const COMMANDS: [Command; 19] = [
         label: "notices",
         chord: None,
     },
+    // the conflict's fork, chordless like delete: picking a side between
+    // two authors earns a summon-and-name
+    // (adr/2026-08-external-edit-conflict-commands.md)
+    Command {
+        id: CommandId::KeepMine,
+        label: "keep mine",
+        chord: None,
+    },
+    Command {
+        id: CommandId::TakeDisk,
+        label: "take disk",
+        chord: None,
+    },
     Command {
         id: CommandId::ZoomToBodies,
         label: "zoom to bodies",
@@ -164,6 +179,10 @@ pub struct Context {
     /// its own level — going where you stand is not a command
     /// (adr/2026-08-body-zoom-scale-and-metrics.md).
     pub at_bodies: bool,
+    /// Whether a save stands refused over an external edit: the resolution
+    /// pair exists only while there is a side to pick
+    /// (adr/2026-08-external-edit-conflict-commands.md).
+    pub conflict: bool,
 }
 
 /// The rows a query leaves: the available commands whose label contains the
@@ -201,6 +220,8 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::FilterCards | CommandId::JumpToNote => context.on_table,
         // the arrange scopes to the open sheet's component
         CommandId::ArrangeCluster => context.sheet_open,
+        // no conflict, no sides to pick
+        CommandId::KeepMine | CommandId::TakeDisk => context.conflict,
         _ => true,
     }
 }
@@ -215,30 +236,39 @@ mod tests {
         on_table: false,
         sheet_open: false,
         at_bodies: false,
+        conflict: false,
     };
     const READING: Context = Context {
         block_active: false,
         on_table: false,
         sheet_open: false,
         at_bodies: false,
+        conflict: false,
     };
     const AT_TABLE: Context = Context {
         block_active: false,
         on_table: true,
         sheet_open: false,
         at_bodies: false,
+        conflict: false,
     };
     const AT_SHEET: Context = Context {
         block_active: false,
         on_table: true,
         sheet_open: true,
         at_bodies: false,
+        conflict: false,
     };
     const AT_BODIES: Context = Context {
         block_active: false,
         on_table: true,
         sheet_open: false,
         at_bodies: true,
+        conflict: false,
+    };
+    const CONFLICTED: Context = Context {
+        conflict: true,
+        ..READING
     };
 
     fn labels(rows: &[&Command]) -> Vec<&'static str> {
@@ -271,6 +301,8 @@ mod tests {
                         && !label.starts_with("zoom")
                         && *label != "filter cards"
                         && *label != "jump to note"
+                        && *label != "keep mine"
+                        && *label != "take disk"
                 })
                 .collect::<Vec<_>>()
         );
@@ -279,7 +311,7 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 9);
+        assert_eq!(visible.len(), COMMANDS.len() - 11);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
     }
@@ -291,12 +323,14 @@ mod tests {
             on_table: true,
             sheet_open: false,
             at_bodies: false,
+            conflict: false,
         };
         const EDITING_AT_SHEET: Context = Context {
             block_active: true,
             on_table: true,
             sheet_open: true,
             at_bodies: false,
+            conflict: false,
         };
         // the logs show the block; the bare table hides it behind the
         // screen; the sheet shows it again
@@ -330,6 +364,14 @@ mod tests {
     fn delete_note_exists_only_over_an_open_sheet() {
         assert!(!labels(&filter("delete", AT_TABLE)).contains(&"delete note"));
         assert_eq!(labels(&filter("delete", AT_SHEET)), vec!["delete note"]);
+    }
+
+    #[test]
+    fn the_conflict_pair_exists_only_while_a_conflict_stands() {
+        assert_eq!(labels(&filter("mine", READING)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("disk", READING)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("mine", CONFLICTED)), vec!["keep mine"]);
+        assert_eq!(labels(&filter("disk", CONFLICTED)), vec!["take disk"]);
     }
 
     #[test]
@@ -391,6 +433,8 @@ mod tests {
                 "go to today",
                 "delete note",
                 "notices",
+                "keep mine",
+                "take disk",
                 "arrange cluster"
             ]
         );

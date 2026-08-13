@@ -37,7 +37,7 @@ pub struct Editor {
 
 /// The editor's failure modes, typed so the status surface can rank them:
 /// a diverged widget edit, a note that would not open, a save that failed —
-/// the last one carrying typed text that is not on disk.
+/// the last two carrying typed text that is not on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Trouble {
     /// Every guard in `edit` failing means the widget diverged from the
@@ -46,6 +46,10 @@ pub enum Trouble {
     Stale,
     Open(String),
     Save(String),
+    /// The file changed on disk under the open buffer: the save refused to
+    /// clobber the other author, and only the user can pick a side
+    /// (adr/2026-08-external-edit-conflict-commands.md).
+    Conflict,
 }
 
 /// One undo step: the whole note and where the caret stood — notes are
@@ -590,8 +594,8 @@ impl Editor {
     pub fn flush(&mut self) -> bool {
         match self.save() {
             None => true,
-            Some(detail) => {
-                self.trouble = Some(Trouble::Save(detail));
+            Some(trouble) => {
+                self.trouble = Some(trouble);
                 false
             }
         }
@@ -601,12 +605,33 @@ impl Editor {
     /// state. The caller decides how to surface a failure — the autosave
     /// resource must not write the signal it subscribes to unguarded, or it
     /// would restart itself forever.
-    pub fn save(&self) -> Option<String> {
-        self.buffer.as_ref().and_then(|note| {
-            note.save()
+    pub fn save(&self) -> Option<Trouble> {
+        self.buffer.as_ref().and_then(|note| match note.save() {
+            Ok(()) => None,
+            Err(SaveError::Conflict) => Some(Trouble::Conflict),
+            Err(SaveError::Io(err)) => Some(Trouble::Save(format!(
+                "{}: {err}",
+                note.file().display()
+            ))),
+        })
+    }
+
+    /// Keep-mine, one side of the conflict's fork: the buffer overwrites
+    /// the diverged file and the guard re-arms on the new version. Returns
+    /// whether it landed; a disk that refuses deposits like a flush.
+    pub fn clobber(&mut self) -> bool {
+        let failure = self.buffer.as_ref().and_then(|note| {
+            note.clobber()
                 .err()
                 .map(|err| format!("{}: {err}", note.file().display()))
-        })
+        });
+        match failure {
+            None => true,
+            Some(detail) => {
+                self.trouble = Some(Trouble::Save(detail));
+                false
+            }
+        }
     }
 
     /// The active block's own text, or `None` when there is no active block
@@ -687,12 +712,35 @@ impl Editor {
 pub struct Buffer {
     file: PathBuf,
     text: String,
+    /// The mtime of the version this buffer last read or wrote — the
+    /// external-edit guard's reference point. A `Cell`, because the
+    /// autosave tick holds the editor through a read-only `peek` and the
+    /// stamp is bookkeeping no render ever depends on.
+    stamp: std::cell::Cell<Option<std::time::SystemTime>>,
+}
+
+/// Why a save did not land: the disk refused, or the guard did — the file
+/// changed under the buffer and clobbering it would erase another author
+/// (adr/2026-08-external-edit-conflict-commands.md).
+#[derive(Debug)]
+pub enum SaveError {
+    Conflict,
+    Io(std::io::Error),
 }
 
 impl Buffer {
     pub fn open(file: PathBuf) -> Result<Buffer, std::io::Error> {
+        // stamped before the read: an edit slipping between the two makes
+        // the next save refuse instead of silently missing it
+        let stamp = std::fs::metadata(&file)
+            .and_then(|meta| meta.modified())
+            .ok();
         let text = std::fs::read_to_string(&file)?;
-        Ok(Buffer { file, text })
+        Ok(Buffer {
+            file,
+            text,
+            stamp: std::cell::Cell::new(stamp),
+        })
     }
     pub fn file(&self) -> &Path {
         &self.file
@@ -720,8 +768,31 @@ impl Buffer {
         }
         valid
     }
-    pub fn save(&self) -> Result<(), std::io::Error> {
-        std::fs::write(&self.file, &self.text)
+    /// The guarded save: refused when the file diverged from the stamp, so
+    /// an edit made outside the app survives until the user picks a side.
+    pub fn save(&self) -> Result<(), SaveError> {
+        if self.diverged() {
+            return Err(SaveError::Conflict);
+        }
+        self.clobber().map_err(SaveError::Io)
+    }
+    /// The write itself, guard skipped — keep-mine, and every save the
+    /// guard waved through. Atomic (adr/2026-08-atomic-persist-seam.md),
+    /// and the stamp re-arms on the version it just wrote.
+    pub fn clobber(&self) -> Result<(), std::io::Error> {
+        crate::persist::write_atomic(&self.file, &self.text)
+            .map(|stamp| self.stamp.set(Some(stamp)))
+    }
+    /// Whether the file changed under the buffer. A file that vanished is
+    /// not divergence — recreating the user's own text erases no one — and
+    /// a stamp that never resolved leaves the guard off rather than
+    /// blocking every save.
+    fn diverged(&self) -> bool {
+        let disk = std::fs::metadata(&self.file)
+            .and_then(|meta| meta.modified())
+            .ok();
+        disk.zip(self.stamp.get())
+            .is_some_and(|(disk, known)| disk != known)
     }
 }
 
@@ -731,6 +802,31 @@ mod tests {
     use std::io::ErrorKind;
 
     use super::*;
+
+    /// Saves are refused by locking the *directory*: an atomic write never
+    /// opens the target file, it creates a sibling and renames — so only
+    /// the directory can say no. Callers unlock before the tempdir drops.
+    fn lock(dir: &Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(dir)
+            .expect("the dir exists")
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(dir, permissions)
+            .expect("the dir permissions are set");
+    }
+
+    /// An external edit the guard must notice: rewrite the file and push
+    /// its mtime to the epoch, so the divergence never hides inside the
+    /// filesystem's timestamp granularity.
+    fn edit_behind(file: &Path, text: &str) {
+        std::fs::write(file, text).expect("the outside edit is written");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(file)
+            .expect("the note reopens for backdating")
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .expect("the mtime is set");
+    }
 
     #[test]
     fn open_reads_the_text_and_keeps_the_path_it_was_given() {
@@ -920,15 +1016,9 @@ mod tests {
         editor.activate(editor.blocks()[1].range.start);
         editor.edit("= unsaved\n\n");
 
-        let file = dir.path().join("note.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock(dir.path(), true);
         editor.deactivate();
+        lock(dir.path(), false);
         match editor.take_trouble() {
             Some(Trouble::Save(detail)) => {
                 assert!(detail.contains("note.typ"), "{detail}");
@@ -1638,15 +1728,10 @@ mod tests {
         assert!(editor.flush());
         assert_eq!(editor.trouble(), None);
 
-        // open and read-only: the failure cancels and is deposited
-        let file = dir.path().join("note.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
+        // open in a locked directory: the failure cancels and is deposited
+        lock(dir.path(), true);
         assert!(!editor.flush(), "a failed save must cancel a quit");
+        lock(dir.path(), false);
         match editor.take_trouble() {
             Some(Trouble::Save(detail)) => {
                 assert!(detail.contains("note.typ"), "{detail}");
@@ -1662,15 +1747,15 @@ mod tests {
         let (dir, editor) = open_note(NOTE);
         assert_eq!(editor.save(), None, "a writable note saves");
 
-        let file = dir.path().join("note.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-        let error = editor.save().expect("the failure is returned");
-        assert!(error.contains("note.typ"), "{error}");
+        lock(dir.path(), true);
+        let trouble = editor.save().expect("the failure is returned");
+        lock(dir.path(), false);
+        match trouble {
+            Trouble::Save(detail) => {
+                assert!(detail.contains("note.typ"), "{detail}");
+            }
+            other => panic!("a refused disk is a save failure: {other:?}"),
+        }
         assert_eq!(editor.trouble(), None, "save never deposits");
     }
 
@@ -1681,14 +1766,84 @@ mod tests {
         std::fs::write(&file, "= read only\n").expect("the note is written");
 
         let buffer = Buffer::open(file.clone()).expect("the note opens");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock(dir.path(), true);
         let error = buffer.save().unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
+        lock(dir.path(), false);
+        match error {
+            SaveError::Io(error) => {
+                assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+            }
+            other => panic!("a refused disk is io, not conflict: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_external_edit_refuses_the_save_and_both_versions_survive() {
+        let (dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.edit("= mine\n\n");
+
+        let file = dir.path().join("note.typ");
+        edit_behind(&file, "= theirs\n");
+
+        assert_eq!(editor.save(), Some(Trouble::Conflict));
+        assert!(
+            !editor.flush(),
+            "a conflict cancels a quit like any refusal"
+        );
+        assert_eq!(editor.take_trouble(), Some(Trouble::Conflict));
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the note is readable"),
+            "= theirs\n",
+            "the outside author was not clobbered"
+        );
+        let (_, text) = editor.note().expect("still open");
+        assert!(text.contains("= mine"), "the buffer kept its side: {text}");
+    }
+
+    #[test]
+    fn clobber_takes_the_buffers_side_and_rearms_the_guard() {
+        let (dir, mut editor) = open_note(NOTE);
+        editor.activate(editor.blocks()[1].range.start);
+        editor.edit("= mine\n\n");
+
+        let file = dir.path().join("note.typ");
+        edit_behind(&file, "= theirs\n");
+
+        assert!(editor.clobber(), "keep-mine lands");
+        let saved =
+            std::fs::read_to_string(&file).expect("the note is readable");
+        assert!(saved.contains("= mine"), "{saved}");
+        assert_eq!(editor.save(), None, "the guard accepts its own write");
+        assert_eq!(editor.trouble(), None);
+    }
+
+    #[test]
+    fn clobber_reports_a_disk_that_refuses_and_a_closed_editor_is_a_no_op() {
+        assert!(Editor::closed().clobber(), "nothing open, nothing to fail");
+
+        let (dir, mut editor) = open_note(NOTE);
+        lock(dir.path(), true);
+        assert!(!editor.clobber());
+        lock(dir.path(), false);
+        match editor.take_trouble() {
+            Some(Trouble::Save(detail)) => {
+                assert!(detail.contains("note.typ"), "{detail}");
+            }
+            other => panic!("the failure is deposited: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_vanished_file_is_recreated_not_a_conflict() {
+        // deleting is not authorship: rewriting the user's own text over a
+        // hole erases no one
+        let (dir, editor) = open_note(NOTE);
+        let file = dir.path().join("note.typ");
+        std::fs::remove_file(&file).expect("the note is deleted outside");
+
+        assert_eq!(editor.save(), None, "the save recreates the file");
+        assert!(file.exists());
+        assert_eq!(editor.save(), None, "and the guard re-armed on it");
     }
 }

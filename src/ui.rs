@@ -468,9 +468,12 @@ fn Shell(
             tokio::time::sleep(QUIET).await;
             match editor.peek().save() {
                 // gated like every status write from a ticking resource:
-                // the same failure re-reported would repaint for nothing
-                Some(detail) => {
-                    let notice = Notice::save_failed(&detail);
+                // the same failure re-reported would repaint for nothing.
+                // A refused disk and a refused clobber both surface here —
+                // the conflict's notice summons the palette pair
+                // (adr/2026-08-external-edit-conflict-commands.md)
+                Some(trouble) => {
+                    let notice = Notice::from_trouble(trouble);
                     if !status.peek().showing(&notice) {
                         status.write().report(notice);
                     }
@@ -1004,7 +1007,29 @@ fn Shell(
             on_table: *screen.peek() == Screen::Table,
             sheet_open: sheet.peek().is_some(),
             at_bodies: *zoom.peek() == table::Zoom::Bodies,
+            conflict: status.peek().has(Source::Conflict),
         }));
+    });
+
+    // the conflict's fork (adr/2026-08-external-edit-conflict-commands.md):
+    // the guard refused to clobber an edit made outside the app, and the
+    // app cannot merge — each command picks a side, and picking one is the
+    // resolution
+    let keep_mine = use_callback(move |()| {
+        if editor.write().clobber() {
+            status.write().resolve(Source::Conflict);
+        }
+    });
+    let take_disk = use_callback({
+        let fragments = fragments.clone();
+        move |()| {
+            let file =
+                editor.peek().note().map(|(path, _)| path.to_path_buf());
+            editor.set(file.map_or_else(Editor::closed, Editor::open));
+            vim.write().note_opened();
+            fragments.borrow_mut().sweep();
+            status.write().resolve(Source::Conflict);
+        }
     });
 
     // one run path for Enter and for a click on a row. The palette closes
@@ -1039,6 +1064,8 @@ fn Shell(
                 palette::CommandId::NewNote => open_creator.call(()),
                 palette::CommandId::DeleteNote => delete_note.call(()),
                 palette::CommandId::Notices => toggle_notices.call(()),
+                palette::CommandId::KeepMine => keep_mine.call(()),
+                palette::CommandId::TakeDisk => take_disk.call(()),
                 palette::CommandId::ZoomToBodies => {
                     zoom_to.call(table::Zoom::Bodies);
                 }
@@ -1659,6 +1686,7 @@ fn Shell(
                 on_table: frozen.on_table,
                 sheet_open: frozen.sheet_open,
                 at_bodies: frozen.at_bodies,
+                conflict: frozen.conflict,
             },
         );
         (frozen, matches)
@@ -3138,6 +3166,10 @@ struct Palette {
     /// Whether the table stood at body zoom: each zoom command hides at its
     /// own level (adr/2026-08-body-zoom-scale-and-metrics.md).
     at_bodies: bool,
+    /// Whether a save stood refused over an external edit: the resolution
+    /// pair exists only while there is a side to pick
+    /// (adr/2026-08-external-edit-conflict-commands.md).
+    conflict: bool,
 }
 
 /// The open create overlay's fixed half — the `Palette` idiom with one more
@@ -3491,14 +3523,7 @@ mod tests {
         let (input, _) = activate_heading(&mut dom, &clicks);
         type_into(&mut dom, input, "= pas encore sauvé\n");
 
-        let file = vault.path().join("time/2026-07-23.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock_dir(&vault.path().join("time"), true);
         press(
             &mut dom,
             keydown,
@@ -3511,6 +3536,7 @@ mod tests {
         );
         // the deposit is drained by the forwarding effect, one poll later
         block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("notice-critical"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
@@ -3545,14 +3571,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
-        let file = vault.path().join("time/2026-07-23.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock_dir(&vault.path().join("time"), true);
         // the settle loop spans several autosave restarts, so the
         // value-gated write is exercised on both of its sides here
         retype(&mut dom, sink, "= en panne\n");
@@ -3563,17 +3582,127 @@ mod tests {
 
         // writable again: the save that lands resolves its own failure —
         // no gesture (adr/2026-08-status-surface-owns-notices.md)
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is writable again");
+        lock_dir(&vault.path().join("time"), false);
         retype(&mut dom, sink, "= réparé\n");
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("notice-critical"), "resolved: {html}");
+    }
+
+    // -- the external-edit conflict and its palette fork ---------------------
+    // (adr/2026-08-external-edit-conflict-commands.md)
+
+    #[test]
+    fn an_external_edit_refuses_the_autosave_and_summons_the_fork() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        edit_behind(&file, "= repris dehors\n");
+        retype(&mut dom, sink, "= à moi\n");
+        block_on(settle(&mut dom));
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("notice-critical"), "{html}");
+        assert!(html.contains("changed on disk"), "{html}");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the note is readable"),
+            "= repris dehors\n",
+            "the outside author was not clobbered"
+        );
+
+        // the fork exists exactly while the conflict stands
+        open_palette(&mut dom, sink);
+        let labels = palette_labels(&dom);
+        assert!(labels.contains(&"keep mine".to_string()), "{labels:?}");
+        assert!(labels.contains(&"take disk".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn keep_mine_overwrites_the_disk_and_resolves_the_conflict() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        edit_behind(&file, "= repris dehors\n");
+        retype(&mut dom, sink, "= à moi\n");
+        block_on(settle(&mut dom));
+
+        let (input, palette_keys) = open_palette(&mut dom, sink);
+        type_into(&mut dom, input, "keep mine");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+
+        let saved =
+            std::fs::read_to_string(&file).expect("the note is readable");
+        assert!(saved.contains("= à moi"), "the buffer won: {saved}");
+        assert!(!saved.contains("dehors"), "{saved}");
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("notice-"), "resolved: {html}");
+    }
+
+    #[test]
+    fn a_keep_mine_the_disk_refuses_leaves_the_conflict_standing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        edit_behind(&file, "= repris dehors\n");
+        retype(&mut dom, sink, "= à moi\n");
+        block_on(settle(&mut dom));
+
+        // the write itself fails now: picking a side resolved nothing
+        lock_dir(&vault.path().join("time"), true);
+        let (input, palette_keys) = open_palette(&mut dom, sink);
+        type_into(&mut dom, input, "keep mine");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("notice-critical"), "{html}");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the note is readable"),
+            "= repris dehors\n",
+            "nothing reached the disk"
+        );
+        // the fork still stands, because the conflict does
+        open_palette(&mut dom, sink);
+        let labels = palette_labels(&dom);
+        assert!(labels.contains(&"keep mine".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn take_disk_reloads_the_buffer_and_resolves_the_conflict() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        let file = vault.path().join("time/2026-07-23.typ");
+        edit_behind(&file, "= repris dehors\n");
+        retype(&mut dom, sink, "= à moi\n");
+        block_on(settle(&mut dom));
+
+        let (input, palette_keys) = open_palette(&mut dom, sink);
+        type_into(&mut dom, input, "take disk");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("repris dehors"), "the disk won: {html}");
+        assert!(!html.contains("notice-"), "resolved: {html}");
+        // the reloaded buffer re-armed the guard: its own autosave lands
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the note is readable"),
+            "= repris dehors\n"
+        );
     }
 
     #[test]
@@ -4378,16 +4507,10 @@ mod tests {
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         open_sheet_on(&mut dom, pane, cards[0]);
 
-        let file = vault.path().join("permanent/alpha.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock_dir(&vault.path().join("permanent"), true);
         press(&mut dom, keys, Key::Escape, Modifiers::empty());
         block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("permanent"), false);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(r#"class="sheet""#),
@@ -4409,18 +4532,12 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
 
-        let file = vault.path().join("time/2026-07-23.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock_dir(&vault.path().join("time"), true);
         // the flush guard refuses: the day's buffer cannot reach disk, so
         // the logs stay up with the error rather than dropping the buffer
         click(&mut dom, clicks[FOOTER_BACKLINK]);
         block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="logs""#), "{html}");
         assert!(!html.contains(r#"class="sheet""#), "{html}");
@@ -5027,18 +5144,12 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
 
-        let file = vault.path().join("time/2026-07-23.typ");
-        let mut permissions = std::fs::metadata(&file)
-            .expect("the note exists")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&file, permissions)
-            .expect("the note is made read-only");
-
+        lock_dir(&vault.path().join("time"), true);
         // activating the preamble flushes the born-active heading first,
         // and the failure is the notice
         click(&mut dom, clicks[BLOCK_PREAMBLE]);
         block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("notice-critical"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
@@ -9687,6 +9798,32 @@ mod tests {
                 .expect("the debt note is written");
         }
         dir
+    }
+
+    /// Saves are refused by locking the note's *directory*: an atomic
+    /// write never opens the target file, it creates a sibling and renames
+    /// — so only the directory can say no (`persist::write_atomic`).
+    /// Callers unlock before the tempdir drops, or its cleanup would leak.
+    fn lock_dir(dir: &std::path::Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(dir)
+            .expect("the dir exists")
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(dir, permissions)
+            .expect("the dir permissions are set");
+    }
+
+    /// An external edit the guard must notice: rewrite the file and push
+    /// its mtime to the epoch, so the divergence never hides inside the
+    /// filesystem's timestamp granularity.
+    fn edit_behind(file: &std::path::Path, text: &str) {
+        std::fs::write(file, text).expect("the outside edit is written");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(file)
+            .expect("the note reopens for backdating")
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .expect("the mtime is set");
     }
 
     fn temp_vault() -> tempfile::TempDir {

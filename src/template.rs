@@ -82,9 +82,6 @@ fn write_note(
     content: &str,
 ) -> Result<PathBuf, TemplateError> {
     let path = vault.join(category.as_dir()).join(format!("{id}.typ"));
-    if path.exists() {
-        return Err(TemplateError::AlreadyExists(path));
-    }
     let filled = fill(
         template,
         &[
@@ -94,8 +91,16 @@ fn write_note(
             ("content", content),
         ],
     )?;
-    std::fs::write(&path, &filled)
-        .map_err(|err| TemplateError::Io(path.clone(), err))?;
+    // existence check and creation are one operation: two writers cannot
+    // both pass a pre-check (adr/2026-08-atomic-persist-seam.md)
+    crate::persist::create_new(&path, &filled).map_err(|err| {
+        match err.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                TemplateError::AlreadyExists(path.clone())
+            }
+            _ => TemplateError::Io(path.clone(), err),
+        }
+    })?;
     Ok(path)
 }
 

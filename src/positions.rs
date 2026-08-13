@@ -53,16 +53,17 @@ impl Positions {
         self.placed.iter().map(|(id, at)| (id.as_str(), *at))
     }
 
-    /// Plain `fs::write`, the same known ceiling as the editor's save
-    /// (adr/2026-07-debounced-autosave.md): the crash window is one small
-    /// write, and the upgrade path is write-temp-then-rename.
+    /// Write-temp-then-rename through the persist seam: the ceiling the
+    /// debounced-autosave ADR recorded is closed — a crash mid-save leaves
+    /// the previous placements, never a truncated file
+    /// (adr/2026-08-atomic-persist-seam.md).
     pub fn save(&self) -> Result<(), std::io::Error> {
         let lines: String = self
             .placed
             .iter()
             .map(|(id, (x, y))| format!("{id} {x} {y}\n"))
             .collect();
-        std::fs::write(&self.path, lines)
+        crate::persist::write_atomic(&self.path, &lines).map(|_| ())
     }
 }
 
