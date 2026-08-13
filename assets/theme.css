@@ -149,6 +149,30 @@ body {
   color: var(--ember);
 }
 
+/* the liveness glyph (adr/2026-08-status-surface-owns-notices.md): the
+   same place in every state — dim while watching, the alert hue when the
+   index may be behind; the fill, not the colour, carries the state, so it
+   survives greyscale */
+.liveness {
+  margin-left: auto;
+  cursor: default;
+}
+
+/* with the ember present, the ember's own auto margin already pushed the
+   right-side group over; a second auto would split it apart */
+.ember + .liveness {
+  margin-left: 0;
+}
+
+.liveness-watching {
+  color: var(--ink-faintest);
+}
+
+.liveness-unwatched,
+.liveness-degraded {
+  color: var(--ember);
+}
+
 /* -- the logs screen: rail · centre · jump (design § The logs screen);
       mockup widths 210/330 and indents 10/20 normalized to multiples
       of 4 ------------------------------------------------------------------ */
@@ -639,6 +663,26 @@ body {
   padding: 16px;
   font: 16px Lato, sans-serif;
   color: var(--ember);
+}
+
+/* the notice line (adr/2026-08-status-surface-owns-notices.md): one line,
+   one owner — severity is weight and hue together, never hue alone */
+.notice {
+  padding: 16px;
+  font: 16px Lato, sans-serif;
+}
+
+.notice-info {
+  color: var(--ink-muted);
+}
+
+.notice-warning {
+  color: var(--ember);
+}
+
+.notice-critical {
+  color: var(--ember);
+  font-weight: 700;
 }
 
 /* -- the table screen: void, stars, cards (wireframes state 6a) ----------- */

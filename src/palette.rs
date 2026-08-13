@@ -23,6 +23,7 @@ pub enum CommandId {
     GoToLogs,
     NewNote,
     DeleteNote,
+    Notices,
     ZoomToBodies,
     ZoomToTitles,
     FilterCards,
@@ -43,7 +44,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 18] = [
+pub const COMMANDS: [Command; 19] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -109,6 +110,13 @@ pub const COMMANDS: [Command; 18] = [
     Command {
         id: CommandId::DeleteNote,
         label: "delete note",
+        chord: None,
+    },
+    // the status history: everything the notice line ever showed
+    // (adr/2026-08-status-surface-owns-notices.md)
+    Command {
+        id: CommandId::Notices,
+        label: "notices",
         chord: None,
     },
     Command {
@@ -382,6 +390,7 @@ mod tests {
                 "open loops",
                 "go to today",
                 "delete note",
+                "notices",
                 "arrange cluster"
             ]
         );

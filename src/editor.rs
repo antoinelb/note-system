@@ -5,10 +5,10 @@ use crate::blocks::{self, Block};
 use crate::caret;
 
 /// The edit-command layer over one open note: the buffer, its block map,
-/// the active block, the caret and the notice the widget should surface.
-/// The widget only forwards events here — the v2 modal keymap slots in
-/// between the two without touching either (plan.md § Editor,
-/// adr/2026-07-hybrid-active-block-textarea.md).
+/// the active block, the caret and the trouble the shell forwards to the
+/// status surface. The widget only forwards events here — the v2 modal
+/// keymap slots in between the two without touching either (plan.md
+/// § Editor, adr/2026-07-hybrid-active-block-textarea.md).
 #[derive(Debug, Default)]
 pub struct Editor {
     buffer: Option<Buffer>,
@@ -27,7 +27,25 @@ pub struct Editor {
     /// open note carries its own history.
     history: Vec<Snapshot>,
     undone: Vec<Snapshot>,
-    notice: Option<String>,
+    /// What went wrong since the shell last asked: deposited by the paths
+    /// that discover it (internal chains like activate → deactivate → flush
+    /// included), drained by the shell's forwarding effect and reported to
+    /// `status` — the editor detects, the status surface displays
+    /// (adr/2026-08-status-surface-owns-notices.md).
+    trouble: Option<Trouble>,
+}
+
+/// The editor's failure modes, typed so the status surface can rank them:
+/// a diverged widget edit, a note that would not open, a save that failed —
+/// the last one carrying typed text that is not on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Trouble {
+    /// Every guard in `edit` failing means the widget diverged from the
+    /// buffer — a bug, surfaced as a visible notice rather than silently
+    /// eaten input.
+    Stale,
+    Open(String),
+    Save(String),
 }
 
 /// One undo step: the whole note and where the caret stood — notes are
@@ -58,10 +76,6 @@ pub enum Deletion {
     WordBack,
 }
 
-/// Every guard in `edit` failing means the widget diverged from the buffer
-/// — a bug, surfaced as a visible notice rather than silently eaten input.
-const STALE_EDIT: &str = "edit dropped: the editor lost its block";
-
 /// `offset` clamped into the text and back onto a char boundary — a stale
 /// coordinate degrades instead of panicking.
 fn floor_boundary(text: &str, offset: usize) -> usize {
@@ -80,7 +94,7 @@ impl Editor {
     }
 
     /// Opens `file` and segments it; a file that cannot be read becomes a
-    /// closed editor carrying the error as its notice.
+    /// closed editor carrying the error as its trouble.
     pub fn open(file: PathBuf) -> Editor {
         match Buffer::open(file.clone()) {
             Ok(note) => {
@@ -108,7 +122,10 @@ impl Editor {
                 }
             }
             Err(err) => Editor {
-                notice: Some(format!("{}: {err}", file.display())),
+                trouble: Some(Trouble::Open(format!(
+                    "{}: {err}",
+                    file.display()
+                ))),
                 ..Editor::default()
             },
         }
@@ -128,13 +145,17 @@ impl Editor {
         self.active
     }
 
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+    /// The undrained trouble — the forwarding effect's gate, read before it
+    /// commits to a draining write.
+    pub fn trouble(&self) -> Option<&Trouble> {
+        self.trouble.as_ref()
     }
 
-    /// Errors from outside the editor (note creation) share the notice line.
-    pub fn set_notice(&mut self, notice: String) {
-        self.notice = Some(notice);
+    /// Drains the trouble for the status surface: the editor detects, the
+    /// shell forwards, status displays — nothing here renders
+    /// (adr/2026-08-status-surface-owns-notices.md).
+    pub fn take_trouble(&mut self) -> Option<Trouble> {
+        self.trouble.take()
     }
 
     /// One widget edit: the active block's whole new content, spliced into
@@ -144,17 +165,17 @@ impl Editor {
     pub fn edit(&mut self, value: &str) {
         let (Some(index), Some(note)) = (self.active, self.buffer.as_mut())
         else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         };
         let Some(block) = self.blocks.get(index) else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         };
         if note.replace_range(block.content(), value) {
             blocks::resize(&mut self.blocks, index, value.len());
         } else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
         }
     }
 
@@ -165,7 +186,7 @@ impl Editor {
     /// staleness policy (adr/2026-08-ctrl-l-link-picker.md).
     pub fn insert_at_caret(&mut self, text: &str) {
         let Some((content, source)) = self.active_slice() else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         };
         let (anchor, head) = self.caret_in_block();
@@ -173,7 +194,7 @@ impl Editor {
         if !source.is_char_boundary(span.start)
             || !source.is_char_boundary(span.end)
         {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         }
         let mut value = source;
@@ -190,7 +211,7 @@ impl Editor {
     /// backspacing across the hidden separator.
     pub fn delete_at_caret(&mut self, kind: Deletion) {
         let Some((content, source)) = self.active_slice() else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         };
         let (anchor, head) = self.caret_in_block();
@@ -438,7 +459,7 @@ impl Editor {
         caret: usize,
     ) {
         let Some(content) = self.active_content() else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         };
         if span.start <= span.end
@@ -446,14 +467,14 @@ impl Editor {
             && span.end <= content.end
         {
             let Some(source) = self.active_source().map(str::to_string) else {
-                self.notice = Some(STALE_EDIT.to_string());
+                self.trouble = Some(Trouble::Stale);
                 return;
             };
             let rel = span.start - content.start..span.end - content.start;
             if !source.is_char_boundary(rel.start)
                 || !source.is_char_boundary(rel.end)
             {
-                self.notice = Some(STALE_EDIT.to_string());
+                self.trouble = Some(Trouble::Stale);
                 return;
             }
             let mut value = source;
@@ -463,11 +484,11 @@ impl Editor {
             return;
         }
         let Some(note) = self.buffer.as_mut() else {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         };
         if !note.replace_range(span, replacement) {
-            self.notice = Some(STALE_EDIT.to_string());
+            self.trouble = Some(Trouble::Stale);
             return;
         }
         let text = self
@@ -548,7 +569,7 @@ impl Editor {
     }
 
     /// Escape or clicking away: save, resegment, back to fully rendered. A
-    /// failed save is the notice — the text survives in the buffer.
+    /// failed save deposits its trouble — the text survives in the buffer.
     pub fn deactivate(&mut self) {
         self.flush();
         self.blocks = self
@@ -562,15 +583,18 @@ impl Editor {
     /// Ctrl+Q and deactivation: save and surface the outcome. Returns
     /// whether the note reached disk, so a failed flush can cancel a quit
     /// instead of losing the buffer
-    /// (adr/2026-07-ctrl-q-flushes-then-closes.md).
+    /// (adr/2026-07-ctrl-q-flushes-then-closes.md). A failure deposits; a
+    /// success never clears a pending deposit — an undrained `Stale` from
+    /// the same gesture must still reach the shell, and resolution is the
+    /// status surface's job, not this one's.
     pub fn flush(&mut self) -> bool {
-        if self.buffer.is_none() {
-            // nothing open, nothing to lose — and any pending notice (a
-            // create error) is not this flush's to clear
-            return true;
+        match self.save() {
+            None => true,
+            Some(detail) => {
+                self.trouble = Some(Trouble::Save(detail));
+                false
+            }
         }
-        self.notice = self.save();
-        self.notice.is_none()
     }
 
     /// The autosave tick: saves the open note without touching editor
@@ -810,28 +834,37 @@ mod tests {
         let (_dir, editor) = open_note(NOTE);
         assert_eq!(editor.blocks().len(), 3, "{:?}", editor.blocks());
         assert_eq!(editor.active(), Some(2));
-        assert_eq!(editor.notice(), None);
+        assert_eq!(editor.trouble(), None);
         let (file, text) = editor.note().expect("the note is open");
         assert!(file.ends_with("note.typ"));
         assert_eq!(text, NOTE);
     }
 
     #[test]
-    fn open_failure_is_a_closed_editor_carrying_the_error() {
+    fn open_failure_is_a_closed_editor_carrying_the_trouble() {
         let dir = tempfile::tempdir().expect("a temp dir is available");
-        let editor = Editor::open(dir.path().join("absente.typ"));
+        let mut editor = Editor::open(dir.path().join("absente.typ"));
         assert!(editor.note().is_none());
         assert!(editor.blocks().is_empty());
-        let notice = editor.notice().expect("the failure is the notice");
-        assert!(notice.contains("absente.typ"), "{notice}");
+        match editor.take_trouble() {
+            Some(Trouble::Open(detail)) => {
+                assert!(detail.contains("absente.typ"), "{detail}");
+            }
+            other => panic!("the failure is the trouble: {other:?}"),
+        }
     }
 
     #[test]
-    fn closed_is_empty_and_accepts_a_notice() {
+    fn closed_is_empty_and_take_trouble_drains_once() {
         let mut editor = Editor::closed();
         assert!(editor.note().is_none());
-        editor.set_notice("create: boom".to_string());
-        assert_eq!(editor.notice(), Some("create: boom"));
+        assert_eq!(editor.take_trouble(), None, "nothing to drain");
+
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let mut editor = Editor::open(dir.path().join("absente.typ"));
+        assert!(editor.trouble().is_some(), "the gate sees the deposit");
+        assert!(editor.take_trouble().is_some(), "the drain takes it");
+        assert_eq!(editor.trouble(), None, "and it is gone");
     }
 
     #[test]
@@ -861,7 +894,7 @@ mod tests {
         editor.deactivate();
 
         assert_eq!(editor.active(), None);
-        assert_eq!(editor.notice(), None);
+        assert_eq!(editor.trouble(), None);
         assert_eq!(editor.blocks().len(), 4, "{:?}", editor.blocks());
         let saved = std::fs::read_to_string(dir.path().join("note.typ"))
             .expect("the note is readable");
@@ -882,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_save_becomes_the_notice_and_the_text_survives() {
+    fn a_failed_save_becomes_the_trouble_and_the_text_survives() {
         let (dir, mut editor) = open_note(NOTE);
         editor.activate(editor.blocks()[1].range.start);
         editor.edit("= unsaved\n\n");
@@ -896,8 +929,12 @@ mod tests {
             .expect("the note is made read-only");
 
         editor.deactivate();
-        let notice = editor.notice().expect("the save failure is visible");
-        assert!(notice.contains("note.typ"), "{notice}");
+        match editor.take_trouble() {
+            Some(Trouble::Save(detail)) => {
+                assert!(detail.contains("note.typ"), "{detail}");
+            }
+            other => panic!("the save failure is deposited: {other:?}"),
+        }
         let (_, text) = editor.note().expect("still open");
         assert!(text.contains("= unsaved"), "nothing was lost: {text}");
     }
@@ -908,21 +945,21 @@ mod tests {
         let (_dir, mut editor) = open_note(NOTE);
         editor.deactivate();
         editor.edit("anything");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // an active index the block map no longer has
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.blocks.clear();
         editor.edit("anything");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // a span the buffer refuses
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.blocks[0].content_end = NOTE.len() + 40;
         editor.edit("anything");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, NOTE, "a refused edit changes nothing");
     }
@@ -987,7 +1024,7 @@ mod tests {
         assert!(text.contains("= étitle"), "{text}");
         assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
         assert_eq!(editor.caret_in_block(), (4, 4), "after the é");
-        assert_eq!(editor.notice(), None);
+        assert_eq!(editor.trouble(), None);
     }
 
     #[test]
@@ -1013,21 +1050,21 @@ mod tests {
         let (_dir, mut editor) = open_note(NOTE);
         editor.deactivate();
         editor.insert_at_caret("x");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // an active index the block map no longer has
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.blocks.clear();
         editor.insert_at_caret("x");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // a caret off a char boundary is a stale coordinate
         let (_dir, mut editor) = open_note("été\n");
         editor.activate(0);
         editor.caret = Caret { anchor: 1, head: 1 };
         editor.insert_at_caret("x");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, "été\n", "a refused insert changes nothing");
 
@@ -1036,7 +1073,7 @@ mod tests {
         editor.activate(0);
         editor.blocks[0].content_end = NOTE.len() + 40;
         editor.insert_at_caret("x");
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, NOTE, "a refused insert changes nothing");
     }
@@ -1107,7 +1144,7 @@ mod tests {
         editor.delete_at_caret(Deletion::Forward);
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, NOTE, "nothing to remove, nothing removed");
-        assert_eq!(editor.notice(), None, "and nothing to complain about");
+        assert_eq!(editor.trouble(), None, "and nothing to complain about");
     }
 
     #[test]
@@ -1115,7 +1152,7 @@ mod tests {
         let (_dir, mut editor) = open_note(NOTE);
         editor.deactivate();
         editor.delete_at_caret(Deletion::Back);
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // a stale caret refuses quietly: there is no span to remove
         let (_dir, mut editor) = open_note("été\n");
@@ -1250,7 +1287,7 @@ mod tests {
         editor.select_all();
         editor.slide(true);
         assert_eq!(editor.active(), None);
-        assert_eq!(editor.notice(), None);
+        assert_eq!(editor.trouble(), None);
 
         // a slide with no neighbour in that direction holds
         let (_dir, mut editor) = open_note(NOTE);
@@ -1329,19 +1366,19 @@ mod tests {
         let (_dir, mut editor) = open_note(NOTE);
         editor.deactivate();
         editor.splice(0..1, "x", 0);
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // a span off a char boundary, inside the block
         let (_dir, mut editor) = open_note("été\n");
         editor.activate(0);
         editor.splice(1..3, "x", 0);
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // and across: a reversed span the buffer refuses
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(editor.blocks()[1].range.start);
         editor.splice(NOTE.len()..0, "x", 0);
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, NOTE, "a refused splice changes nothing");
     }
@@ -1353,14 +1390,14 @@ mod tests {
         editor.activate(0);
         editor.blocks[0].content_end = NOTE.len() + 40;
         editor.splice(2..4, "x", 2);
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
 
         // across-shaped span with the buffer gone from under the blocks
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(0);
         editor.buffer = None;
         editor.splice(0..NOTE.len(), "", 0);
-        assert_eq!(editor.notice(), Some(STALE_EDIT));
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
     }
 
     #[test]
@@ -1375,7 +1412,7 @@ mod tests {
         // a paste with nothing under it is inert, twice over
         let mut closed = Editor::closed();
         closed.paste("x", false, 1);
-        assert_eq!(closed.notice(), None);
+        assert_eq!(closed.trouble(), None);
         let (_dir, mut editor) = open_note("un mot\n");
         editor.deactivate();
         editor.paste("x", false, 1);
@@ -1454,7 +1491,7 @@ mod tests {
         editor.activate(5);
         assert_eq!(editor.active(), None, "nothing to activate");
         editor.deactivate();
-        assert_eq!(editor.notice(), None, "nothing to save");
+        assert_eq!(editor.trouble(), None, "nothing to save");
     }
 
     #[test]
@@ -1580,24 +1617,28 @@ mod tests {
         let saved = std::fs::read_to_string(dir.path().join("note.typ"))
             .expect("the note is readable");
         assert_eq!(saved, corpus);
-        assert_eq!(editor.notice(), None);
+        assert_eq!(editor.trouble(), None);
     }
 
     #[test]
-    fn flush_reports_the_save_and_owns_only_save_notices() {
-        // nothing open: trivially flushed, and a create error survives
-        let mut editor = Editor::closed();
-        editor.set_notice("create: boom".to_string());
+    fn flush_reports_the_save_and_deposits_only_failures() {
+        // nothing open: trivially flushed, and a pending deposit — the open
+        // failure here — is not this flush's to clear
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let mut editor = Editor::open(dir.path().join("absente.typ"));
         assert!(editor.flush(), "nothing open, nothing to lose");
-        assert_eq!(editor.notice(), Some("create: boom"));
+        assert!(
+            matches!(editor.trouble(), Some(Trouble::Open(_))),
+            "the undrained trouble survives the flush: {:?}",
+            editor.trouble()
+        );
 
-        // open and writable: flushed, and a stale notice is cleared
+        // open and writable: flushed, nothing deposited
         let (dir, mut editor) = open_note(NOTE);
-        editor.set_notice("stale".to_string());
         assert!(editor.flush());
-        assert_eq!(editor.notice(), None);
+        assert_eq!(editor.trouble(), None);
 
-        // open and read-only: the failure cancels and is the notice
+        // open and read-only: the failure cancels and is deposited
         let file = dir.path().join("note.typ");
         let mut permissions = std::fs::metadata(&file)
             .expect("the note exists")
@@ -1606,8 +1647,12 @@ mod tests {
         std::fs::set_permissions(&file, permissions)
             .expect("the note is made read-only");
         assert!(!editor.flush(), "a failed save must cancel a quit");
-        let notice = editor.notice().expect("the failure is visible");
-        assert!(notice.contains("note.typ"), "{notice}");
+        match editor.take_trouble() {
+            Some(Trouble::Save(detail)) => {
+                assert!(detail.contains("note.typ"), "{detail}");
+            }
+            other => panic!("the failure is deposited: {other:?}"),
+        }
     }
 
     #[test]
@@ -1626,7 +1671,7 @@ mod tests {
             .expect("the note is made read-only");
         let error = editor.save().expect("the failure is returned");
         assert!(error.contains("note.typ"), "{error}");
-        assert_eq!(editor.notice(), None, "save never writes the notice");
+        assert_eq!(editor.trouble(), None, "save never deposits");
     }
 
     #[test]

@@ -122,13 +122,12 @@ fn watcher_feed(root: Option<&std::path::Path>) -> ui::VaultFeed {
                     }
                 }
             });
-            feed(Some(receiver))
+            feed(Some(receiver), None)
         }
-        Some(Err(error)) => {
-            eprintln!("the vault will not be watched: {error}");
-            feed(None)
-        }
-        None => feed(None),
+        // the failure rides the feed into the status surface — a desktop
+        // app's stderr is nowhere (adr/2026-08-status-surface-owns-notices.md)
+        Some(Err(error)) => feed(None, Some(error.to_string())),
+        None => feed(None, None),
     }
 }
 
@@ -136,6 +135,10 @@ fn feed(
     receiver: Option<
         tokio::sync::mpsc::UnboundedReceiver<Vec<watch::VaultChange>>,
     >,
+    trouble: Option<String>,
 ) -> ui::VaultFeed {
-    ui::VaultFeed(std::sync::Arc::new(std::sync::Mutex::new(receiver)))
+    ui::VaultFeed {
+        changes: std::sync::Arc::new(std::sync::Mutex::new(receiver)),
+        trouble,
+    }
 }

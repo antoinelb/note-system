@@ -59,6 +59,7 @@ On any conflict between `plan.md` and the wireframes, **the wireframes win** (`a
 
 ## Other instructions
 
+- Implementation is Claude's job — code, tests, docs; the user directs, decides, and reviews (`adr/2026-08-implementation-is-claudes-job.md`)
 - When writing comments, don't prefix them with `ponytail: `
 - Don't hesitate to delegate to a cheaper model when it makes sense
 - Never use while loops

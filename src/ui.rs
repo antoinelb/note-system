@@ -23,6 +23,7 @@ use crate::loops;
 use crate::palette;
 use crate::positions::Positions;
 use crate::render::{BodyCache, FragmentCache, RenderTheme};
+use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
 use crate::vim;
@@ -93,11 +94,16 @@ pub struct Clipboard(
 /// send batches by hand (adr/2026-08-watcher-feeds-the-ui.md). Taken out of
 /// the cell once, by the shell's first render — a receiver has one owner,
 /// and an app with no feed simply keeps the index it loaded at launch.
+/// A watcher that would not start rides along as `trouble`, so the status
+/// surface can say the vault is unwatched instead of stderr saying it to
+/// nobody (adr/2026-08-status-surface-owns-notices.md).
 #[derive(Clone)]
-pub struct VaultFeed(
+pub struct VaultFeed {
     #[allow(clippy::type_complexity)]
-    pub  Arc<Mutex<Option<UnboundedReceiver<Vec<watch::VaultChange>>>>>,
-);
+    pub changes:
+        Arc<Mutex<Option<UnboundedReceiver<Vec<watch::VaultChange>>>>>,
+    pub trouble: Option<String>,
+}
 
 /// The clock a capture is stamped by, injected like `Today` and read only
 /// when one is written (adr/2026-08-capture-timestamp-ids.md). `Today` is
@@ -156,7 +162,11 @@ pub fn App() -> Element {
     });
     use_context_provider(|| RootCommands { toggle_theme, quit });
     rsx! {
-        document::Stylesheet { href: asset!("/assets/theme.css") }
+        // inlined, not `asset!`: manganis only resolves an asset path under
+        // the `dx` CLI, so a plainly-built binary (cargo run aside) asks for
+        // a bundle that does not exist and comes up unstyled
+        // (adr/2026-08-theme-css-inlined.md)
+        document::Style { {include_str!("../assets/theme.css")} }
         div {
             class: "app",
             // always "dark" or "light", never absent: the theme is a fact of
@@ -245,6 +255,12 @@ fn Shell(
     let fallback =
         use_hook(|| Rc::new(RefCell::new(table::Fallback::default())));
     let mut loops_open = use_signal(|| false);
+    // the status surface: every notice and the liveness fact — one owner,
+    // one line, one glyph (adr/2026-08-status-surface-owns-notices.md)
+    let mut status = use_signal(Status::default);
+    // the notices overlay, the loops list's sibling: the history behind a
+    // palette command, closed by the same Escape ladder
+    let mut notices_open = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
     // the fragment cache is a memo store, not UI state: nothing should
@@ -318,6 +334,19 @@ fn Shell(
     let dragging = use_hook(|| Rc::new(std::cell::Cell::new(false)));
     let probing = use_hook(|| Rc::new(std::cell::Cell::new(false)));
 
+    // the editor's one exit for trouble: whatever any path deposited —
+    // internal chains like activate → deactivate → flush included — is
+    // drained here and reported, so the editor detects and status displays
+    // (adr/2026-08-status-surface-owns-notices.md). The gate reads before
+    // the drain writes, or the effect would subscribe to its own write and
+    // spin forever.
+    use_effect(move || {
+        let pending = editor.read().trouble().is_some();
+        if pending && let Some(trouble) = editor.write().take_trouble() {
+            status.write().report(Notice::from_trouble(trouble));
+        }
+    });
+
     // the Ctrl+Q flush: reports whether the open note and the canvas
     // positions reached disk, so a failed save can hold the app open
     // instead of losing either
@@ -326,7 +355,9 @@ fn Shell(
         let placed_saved = match positions.peek().save() {
             Ok(()) => true,
             Err(error) => {
-                editor.write().set_notice(format!("positions: {error}"));
+                status
+                    .write()
+                    .report(Notice::positions_failed(&error.to_string()));
                 false
             }
         };
@@ -341,6 +372,11 @@ fn Shell(
     // updates the index and refreshes what the screen derives from it — the
     // rail and the open loops (adr/2026-08-watcher-feeds-the-ui.md). Taken
     // out of its cell once; a second render finds `None` and starts nothing.
+    // Liveness is established here and only here: Watching when the
+    // receiver is taken, Unwatched when there is none to take, Degraded
+    // when a batch fails — and a failed batch queues a rescan so the state
+    // heals instead of lingering
+    // (adr/2026-08-failed-batch-escalates-to-rescan.md).
     use_hook({
         let root = root.clone();
         let bodies = bodies.clone();
@@ -348,11 +384,23 @@ fn Shell(
             let Some(feed) = try_consume_context::<VaultFeed>() else {
                 return;
             };
-            let taken = feed.0.lock().ok().and_then(|mut cell| cell.take());
+            if let Some(reason) = &feed.trouble {
+                status.write().report(Notice::unwatched(reason));
+                return;
+            }
+            let taken =
+                feed.changes.lock().ok().and_then(|mut cell| cell.take());
             let Some(mut changes) = taken else { return };
+            status.write().set_liveness(Liveness::Watching);
             spawn(async move {
                 loop {
                     let Some(batch) = changes.recv().await else {
+                        // the sender died mid-session: the screen keeps the
+                        // index it has, and the glyph says so instead of
+                        // freezing quietly in the past
+                        let mut status = status.write();
+                        status.report(Notice::watcher_stopped());
+                        status.set_liveness(Liveness::Unwatched);
                         break;
                     };
                     // the body cache hears about every change first, so the
@@ -369,14 +417,42 @@ fn Shell(
                             }
                         }
                     }
-                    match refresh(&root, &batch) {
+                    // a failed batch degrades the liveness and escalates to
+                    // one bounded rescan — the watcher's own doctrine,
+                    // applied around it: updates were lost, so the index
+                    // can no longer be trusted
+                    // (adr/2026-08-failed-batch-escalates-to-rescan.md).
+                    // The rescan's success flows into the same arm as a
+                    // clean batch, where degradation resolves.
+                    let survey = refresh(&root, &batch).or_else(|message| {
+                        {
+                            let mut status = status.write();
+                            status.report(Notice::watcher_failed(&message));
+                            status.set_liveness(Liveness::Degraded);
+                        }
+                        bodies.borrow_mut().clear();
+                        refresh(&root, &[watch::VaultChange::Rescan])
+                    });
+                    match survey {
                         Ok((time_notes, open, table, links)) => {
                             notes.set(time_notes);
                             loops.set(open);
                             table_notes.set(table);
                             edges.set(links);
+                            // reaching here is the degradation's
+                            // resolution, whether by clean batch or by the
+                            // escalated rescan
+                            if status.peek().liveness() == Liveness::Degraded {
+                                let mut status = status.write();
+                                status.resolve(Source::Watcher);
+                                status.set_liveness(Liveness::Watching);
+                            }
                         }
-                        Err(message) => editor.write().set_notice(message),
+                        Err(second) => {
+                            status
+                                .write()
+                                .report(Notice::watcher_failed(&second));
+                        }
                     }
                 }
             });
@@ -390,13 +466,23 @@ fn Shell(
         let _ = editor.read();
         async move {
             tokio::time::sleep(QUIET).await;
-            let error = editor.peek().save();
-            // only a value-gated write may touch the subscribed signal: an
-            // unguarded one would restart this resource forever
-            if let Some(error) = error
-                && editor.peek().notice() != Some(error.as_str())
-            {
-                editor.write().set_notice(error);
+            match editor.peek().save() {
+                // gated like every status write from a ticking resource:
+                // the same failure re-reported would repaint for nothing
+                Some(detail) => {
+                    let notice = Notice::save_failed(&detail);
+                    if !status.peek().showing(&notice) {
+                        status.write().report(notice);
+                    }
+                }
+                // the save that lands resolves its own failure — no
+                // gesture, the condition simply ceased
+                // (adr/2026-08-status-surface-owns-notices.md)
+                None => {
+                    if status.peek().has(Source::Save) {
+                        status.write().resolve(Source::Save);
+                    }
+                }
             }
         }
     });
@@ -411,14 +497,19 @@ fn Shell(
         let _ = positions.read();
         async move {
             tokio::time::sleep(QUIET).await;
-            let failed = positions.peek().save().err();
-            // value-gated like the autosave's: an unguarded write to the
-            // subscribed editor signal would be fine, but the same message
-            // re-set forever would repaint for nothing
-            if let Some(error) = failed {
-                let message = format!("positions: {error}");
-                if editor.peek().notice() != Some(message.as_str()) {
-                    editor.write().set_notice(message);
+            match positions.peek().save() {
+                // gated like the autosave's: the same failure re-reported
+                // would repaint for nothing
+                Err(error) => {
+                    let notice = Notice::positions_failed(&error.to_string());
+                    if !status.peek().showing(&notice) {
+                        status.write().report(notice);
+                    }
+                }
+                Ok(()) => {
+                    if status.peek().has(Source::Positions) {
+                        status.write().resolve(Source::Positions);
+                    }
                 }
             }
         }
@@ -489,7 +580,16 @@ fn Shell(
             if sheet.peek().as_deref() == Some(id.as_str()) {
                 return;
             }
-            let opened = open_sheet_note(&root, &id);
+            // a lookup that fails still opens the sheet: the closed editor
+            // keeps the pane bare and the notice line — rendered inside the
+            // sheet — puts the message where the user is looking
+            let opened = match open_sheet_note(&root, &id) {
+                Ok(opened) => opened,
+                Err(message) => {
+                    status.write().report(Notice::index(message));
+                    Editor::closed()
+                }
+            };
             show_sheet.call((id, opened));
         }
     });
@@ -535,7 +635,9 @@ fn Shell(
             if let Some(file) = file
                 && let Err(error) = std::fs::remove_file(&file)
             {
-                editor.write().set_notice(format!("delete: {error}"));
+                status
+                    .write()
+                    .report(Notice::delete_failed(&error.to_string()));
                 return;
             }
             sheet.set(None);
@@ -621,7 +723,7 @@ fn Shell(
                     entries: table::filter_entries(&tags),
                 }));
             }
-            Err(msg) => editor.write().set_notice(msg),
+            Err(msg) => status.write().report(Notice::index(msg)),
         }
     });
     // closing hands focus back through the focus effect, like every overlay
@@ -651,7 +753,7 @@ fn Shell(
                 jump_highlighted.set(0);
                 jump.set(Some(Jump { entries: carded }));
             }
-            Err(msg) => editor.write().set_notice(msg),
+            Err(msg) => status.write().report(Notice::index(msg)),
         }
     });
     let close_jump = use_callback(move |()| jump.set(None));
@@ -720,6 +822,9 @@ fn Shell(
         month.set(logs::page_month(month(), forward));
     });
     let toggle_loops = use_callback(move |()| loops_open.set(!loops_open()));
+    // the notices overlay's toggle, the loops list's twin
+    let toggle_notices =
+        use_callback(move |()| notices_open.set(!notices_open()));
     let go_today = use_callback(move |()| {
         select.call((NoteType::Daily, time::day_id(today)))
     });
@@ -860,11 +965,11 @@ fn Shell(
                     &pasted,
                 ) {
                     Ok(path) => {
-                        format!("captured {}", crate::domain::stem_of(&path))
+                        Notice::captured(&crate::domain::stem_of(&path))
                     }
-                    Err(err) => format!("capture: {err:?}"),
+                    Err(err) => Notice::capture_failed(&format!("{err:?}")),
                 };
-                editor.write().set_notice(notice);
+                status.write().report(notice);
             });
         }
     });
@@ -879,7 +984,7 @@ fn Shell(
                 highlighted.set(0);
                 picker.set(Some(Picker { entries }));
             }
-            Err(msg) => editor.write().set_notice(msg),
+            Err(msg) => status.write().report(Notice::index(msg)),
         }
     });
 
@@ -933,6 +1038,7 @@ fn Shell(
                 palette::CommandId::GoToLogs => go_logs.call(()),
                 palette::CommandId::NewNote => open_creator.call(()),
                 palette::CommandId::DeleteNote => delete_note.call(()),
+                palette::CommandId::Notices => toggle_notices.call(()),
                 palette::CommandId::ZoomToBodies => {
                     zoom_to.call(table::Zoom::Bodies);
                 }
@@ -959,7 +1065,9 @@ fn Shell(
     } else {
         RenderTheme::Dark
     };
-    let notice = editor.read().notice().map(str::to_string);
+    // the one notice line, read from the one owner: highest severity
+    // standing, latest among equals (adr/2026-08-status-surface-owns-notices.md)
+    let notice = status.read().line().cloned();
     // the footer belongs to the logs' selected note; over the table the
     // editor holds the sheet's, whose backlinks the sheet counts itself
     let footer = (screen() == Screen::Logs)
@@ -1636,9 +1744,21 @@ fn Shell(
         let fragments = fragments.clone();
         move |event: KeyboardEvent| {
             match event.key() {
+                // the notices overlay is a destination you leave, like the
+                // loops list below it on the ladder
+                Key::Escape if notices_open() => notices_open.set(false),
                 // the open-loops list is a destination you leave; escape
                 // reaches here only when no block owns it
                 Key::Escape if loops_open() => loops_open.set(false),
+                // the ladder's bottom: with nothing left to close, Escape
+                // acknowledges the visible notice — the explicit gesture a
+                // critical requires (adr/2026-08-status-surface-owns-notices.md);
+                // gated so a bare Escape over a clean line writes nothing
+                Key::Escape => {
+                    if status.peek().line().is_some() {
+                        status.write().acknowledge();
+                    }
+                }
                 // in-app capture: what is on the clipboard becomes a note in
                 // capture/, no required fields, nothing to fill in
                 // (adr/2026-08-capture-headless-second-process.md). Shift
@@ -1748,9 +1868,9 @@ fn Shell(
                             fragments.borrow_mut().sweep();
                             notes.with_mut(|list| list.push((id, scale)));
                         }
-                        Err(err) => editor
-                            .write()
-                            .set_notice(format!("create: {err:?}")),
+                        Err(err) => status.write().report(
+                            Notice::create_failed(&format!("{err:?}")),
+                        ),
                     }
                 }
                 _ => {}
@@ -1763,9 +1883,19 @@ fn Shell(
     // everything else bubbles to the app root
     let table_keys = {
         move |event: KeyboardEvent| match event.key() {
+            // the notices overlay closes before the sheet: overlays leave
+            // the ladder first
+            Key::Escape if notices_open() => notices_open.set(false),
             // escape reaches here only when no block or overlay owns it:
             // the sheet closes and the card goes back (wireframe 6b)
             Key::Escape if sheet.peek().is_some() => close_sheet.call(()),
+            // the ladder's bottom, the logs arm's twin: acknowledge the
+            // visible notice, gated so a clean line writes nothing
+            Key::Escape => {
+                if status.peek().line().is_some() {
+                    status.write().acknowledge();
+                }
+            }
             // the link picker over the sheet's active block — the logs
             // pane's arm, guard for guard (adr/2026-08-ctrl-l-link-picker.md)
             Key::Character(ref character)
@@ -1872,6 +2002,7 @@ fn Shell(
             screen: screen(),
             loops: loops.read().len(),
             filter: filter.read().as_ref().map(table::filter_label),
+            liveness: status.read().liveness(),
             on_ember: move |_| toggle_loops.call(()),
             on_table: move |_| go_table.call(()),
             on_logs: move |_| go_logs.call(()),
@@ -2060,6 +2191,28 @@ fn Shell(
                 None => rsx! {},
             }
         }
+        // the notices overlay floats in the palette's box on either screen:
+        // the history newest first — a notice leaves the line by gesture or
+        // resolution, never the record
+        // (adr/2026-08-status-surface-owns-notices.md)
+        if notices_open() {
+            div { class: "command-palette",
+                div { class: "palette-head type-label", "notices" }
+                if status.read().history().is_empty() {
+                    div { class: "picker-empty", "nothing to report" }
+                }
+                for (rank, line) in status
+                    .read()
+                    .history()
+                    .iter()
+                    .rev()
+                    .map(|entry| entry.text.clone())
+                    .enumerate()
+                {
+                    div { key: "{rank}", class: "loops-line", "{line}" }
+                }
+            }
+        }
         if screen() == Screen::Logs {
             div {
                 class: "logs",
@@ -2121,7 +2274,7 @@ fn Shell(
                     }
                     {
                         match &notice {
-                            Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
+                            Some(shown) => rsx! { p { class: "notice {shown.class()}", "{shown.text}" } },
                             None => rsx! {},
                         }
                     }
@@ -2484,7 +2637,7 @@ fn Shell(
                         onmousedown: move |event: MouseEvent| event.stop_propagation(),
                         {
                             match &notice {
-                                Some(msg) => rsx! { p { class: "render-error", "{msg}" } },
+                                Some(shown) => rsx! { p { class: "notice {shown.class()}", "{shown.text}" } },
                                 None => rsx! {},
                             }
                         }
@@ -2702,15 +2855,19 @@ fn point(event: &MouseEvent, scale: f64) -> (f64, f64) {
 
 /// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
 /// current screen's lit and each a button to its screen
-/// (adr/2026-08-screen-switch-gesture.md), and the open-loops ember. Zero
-/// loops renders nothing at all — absence, not a zero — so the ember is
-/// clickable exactly when there is a list to show
-/// (adr/2026-08-loops-list-overlay.md).
+/// (adr/2026-08-screen-switch-gesture.md), the open-loops ember, and the
+/// liveness glyph. Zero loops renders nothing at all — absence, not a zero
+/// — so the ember is clickable exactly when there is a list to show
+/// (adr/2026-08-loops-list-overlay.md). The glyph is the one thing that
+/// never disappears: liveness is a fact in every state, rendered in the
+/// same place — a ring watching, filled otherwise, so the state survives
+/// greyscale (adr/2026-08-status-surface-owns-notices.md).
 #[component]
 fn Chrome(
     screen: Screen,
     loops: usize,
     filter: Option<String>,
+    liveness: Liveness,
     on_ember: EventHandler<()>,
     on_table: EventHandler<()>,
     on_logs: EventHandler<()>,
@@ -2749,6 +2906,19 @@ fn Chrome(
                     class: "ember",
                     onclick: move |_| on_ember.call(()),
                     "{loops}"
+                }
+            }
+            svg {
+                class: "liveness {liveness.class()}",
+                width: "14",
+                height: "14",
+                view_box: "0 0 14 14",
+                circle {
+                    cx: "7",
+                    cy: "7",
+                    r: "3",
+                    fill: if liveness.filled() { "currentColor" } else { "none" },
+                    stroke: "currentColor",
                 }
             }
         }
@@ -2859,29 +3029,19 @@ fn time_note_path(root: &Path, id: &str) -> PathBuf {
 }
 
 /// The sheet's editor: the card knows its id, not its file, so the path is
-/// looked up per event — the `completions` pattern. A lookup that fails
-/// still opens the sheet: a closed editor carrying the error puts the
-/// message where the user is looking, and Escape closes it.
-fn open_sheet_note(root: &Path, id: &str) -> Editor {
-    let looked_up = Index::open(&root.join(".index/index.db"))
-        .map_err(|err| format!("sheet: {err:?}"))
-        .and_then(|index| {
-            index
-                .path_for_id(&crate::domain::NoteId(id.to_string()))
-                .map_err(|err| format!("sheet: {err:?}"))
-        });
-    match looked_up {
-        Ok(Some(path)) => Editor::open(root.join(path)),
-        Ok(None) => closed_with(format!("sheet: no note has the id {id}")),
-        Err(message) => closed_with(message),
+/// looked up per event — the `completions` pattern. A lookup that fails is
+/// the caller's to report: the error goes to the status surface, never
+/// onto the editor (adr/2026-08-status-surface-owns-notices.md).
+fn open_sheet_note(root: &Path, id: &str) -> Result<Editor, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("sheet: {err:?}"))?;
+    let path = index
+        .path_for_id(&crate::domain::NoteId(id.to_string()))
+        .map_err(|err| format!("sheet: {err:?}"))?;
+    match path {
+        Some(path) => Ok(Editor::open(root.join(path))),
+        None => Err(format!("sheet: no note has the id {id}")),
     }
-}
-
-/// A closed editor already carrying its notice — the sheet's error state.
-fn closed_with(message: String) -> Editor {
-    let mut editor = Editor::closed();
-    editor.set_notice(message);
-    editor
 }
 
 /// The sheet's footer: how many notes link here — a count ("← 2"), the
@@ -3349,8 +3509,10 @@ mod tests {
             !closed.load(Ordering::SeqCst),
             "the app never closes over an unsaved buffer"
         );
+        // the deposit is drained by the forwarding effect, one poll later
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-critical"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
     }
 
@@ -3396,8 +3558,22 @@ mod tests {
         retype(&mut dom, sink, "= en panne\n");
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-critical"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
+
+        // writable again: the save that lands resolves its own failure —
+        // no gesture (adr/2026-08-status-surface-owns-notices.md)
+        let mut permissions = std::fs::metadata(&file)
+            .expect("the note exists")
+            .permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&file, permissions)
+            .expect("the note is writable again");
+        retype(&mut dom, sink, "= réparé\n");
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("notice-critical"), "resolved: {html}");
     }
 
     #[test]
@@ -3425,6 +3601,7 @@ mod tests {
             Chrome {
                 screen,
                 loops: 0,
+                liveness: Liveness::Watching,
                 on_ember: move |()| {},
                 on_table: move |()| {},
                 on_logs: move |()| {},
@@ -3832,6 +4009,16 @@ mod tests {
             !closed.load(Ordering::SeqCst),
             "an unsaved store holds the app open"
         );
+
+        // the squat removed, the next landed write resolves the notice
+        std::fs::remove_dir(vault.path().join(".index/positions"))
+            .expect("the squat is removed");
+        mouse(&mut dom, "mousedown", cards[0], (0.0, 0.0));
+        mouse(&mut dom, "mousemove", pane, (60.0, 60.0));
+        mouse(&mut dom, "mouseup", pane, (60.0, 60.0));
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("positions:"), "resolved: {html}");
     }
 
     // -- the writing sheet: click to open, escape to close (wireframe 6b) ----
@@ -4200,12 +4387,13 @@ mod tests {
             .expect("the note is made read-only");
 
         press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(r#"class="sheet""#),
             "an unsaved buffer holds the sheet open: {html}"
         );
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-critical"), "{html}");
         assert!(html.contains("alpha.typ"), "{html}");
     }
 
@@ -4232,10 +4420,11 @@ mod tests {
         // the flush guard refuses: the day's buffer cannot reach disk, so
         // the logs stay up with the error rather than dropping the buffer
         click(&mut dom, clicks[FOOTER_BACKLINK]);
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="logs""#), "{html}");
         assert!(!html.contains(r#"class="sheet""#), "{html}");
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-critical"), "{html}");
     }
 
     #[test]
@@ -4613,8 +4802,9 @@ mod tests {
         std::fs::remove_file(vault.path().join("time/2026-07-22.typ"))
             .expect("the note exists before the click");
         click(&mut dom, clicks[RAIL_DAY_22]);
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-warning"), "{html}");
         assert!(html.contains("2026-07-22.typ"), "{html}");
     }
 
@@ -4704,7 +4894,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_template_reports_the_create_error_and_navigating_clears_it() {
+    fn a_missing_template_reports_the_create_error_and_escape_dismisses_it() {
         let vault = temp_vault();
         let (mut dom, clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -4714,13 +4904,22 @@ mod tests {
         press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
 
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-warning"), "{html}");
         assert!(html.contains("UnknownTemplate"), "{html}");
         assert!(!vault.path().join("time/2026-07-24.typ").exists());
 
+        // a warning persists until dismissed — navigation is not a gesture
+        // (adr/2026-08-status-surface-owns-notices.md)
         click(&mut dom, clicks[RAIL_DAY_23]);
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("UnknownTemplate"), "navigation clears it");
+        assert!(html.contains("UnknownTemplate"), "navigation keeps it");
+
+        // the empty day has no block to close, so Escape reaches the
+        // ladder's bottom and acknowledges
+        click(&mut dom, clicks[day_cell(24)]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("UnknownTemplate"), "escape dismisses it");
     }
 
     #[test]
@@ -4839,8 +5038,9 @@ mod tests {
         // activating the preamble flushes the born-active heading first,
         // and the failure is the notice
         click(&mut dom, clicks[BLOCK_PREAMBLE]);
+        block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("notice-critical"), "{html}");
         assert!(html.contains("2026-07-23.typ"), "{html}");
     }
 
@@ -6151,9 +6351,10 @@ mod tests {
         dom.insert_any_root_context(Box::new(Today(
             TODAY.parse().expect("the test clock is a valid date"),
         )));
-        dom.insert_any_root_context(Box::new(VaultFeed(Arc::new(
-            Mutex::new(Some(receiver)),
-        ))));
+        dom.insert_any_root_context(Box::new(VaultFeed {
+            changes: Arc::new(Mutex::new(Some(receiver))),
+            trouble: None,
+        }));
         let mutations = with_reactor(|| dom.rebuild_to_vec());
         let clicks = listeners(&mutations, "click");
         (dom, clicks, sender)
@@ -6301,10 +6502,71 @@ mod tests {
             watched_app(Some(vault.path().to_path_buf()));
         drop(sender);
         block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
         assert!(
-            dioxus_ssr::render(&dom).contains("rail-id"),
+            html.contains("rail-id"),
             "the screen stands, it just stops hearing about the vault"
         );
+        // and it says so: the glyph fills and the notice names the loss
+        assert!(html.contains("liveness-unwatched"), "{html}");
+        assert!(html.contains("no longer watched"), "{html}");
+    }
+
+    #[test]
+    fn a_watcher_that_would_not_start_is_an_unwatched_vault_on_screen() {
+        // main hands the start failure over as the feed's trouble instead
+        // of stderr (adr/2026-08-status-surface-owns-notices.md)
+        let vault = temp_vault();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(Some(
+            vault.path().to_path_buf(),
+        ))));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(VaultFeed {
+            changes: Arc::new(Mutex::new(None)),
+            trouble: Some("inotify refused".to_string()),
+        }));
+        with_reactor(|| dom.rebuild_to_vec());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("liveness-unwatched"), "{html}");
+        assert!(
+            html.contains("the vault is not watched: inotify refused"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_degraded_watcher_heals_when_a_batch_lands_again() {
+        let vault = temp_vault();
+        let (mut dom, _, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        assert!(
+            dioxus_ssr::render(&dom).contains("liveness-watching"),
+            "the taken receiver is the watching state"
+        );
+
+        // squat the database: the batch fails, and so does its rescan
+        std::fs::remove_file(vault.path().join(".index/index.db"))
+            .expect("the database is there to remove");
+        std::fs::create_dir(vault.path().join(".index/index.db"))
+            .expect("a directory squats the database path");
+        feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("liveness-degraded"), "{html}");
+        assert!(html.contains("watching the vault"), "{html}");
+
+        // the squat removed, the next batch rebuilds from disk and the
+        // arrival resolves the degradation without a gesture
+        // (adr/2026-08-failed-batch-escalates-to-rescan.md)
+        std::fs::remove_dir(vault.path().join(".index/index.db"))
+            .expect("the squat is removed");
+        feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("liveness-watching"), "healed: {html}");
+        assert!(!html.contains("watching the vault"), "resolved: {html}");
     }
 
     #[test]
@@ -6327,9 +6589,10 @@ mod tests {
             TODAY.parse().expect("the test clock is a valid date"),
         )));
         // the cell arrives empty, as it would on a second shell
-        dom.insert_any_root_context(Box::new(VaultFeed(Arc::new(
-            Mutex::new(None),
-        ))));
+        dom.insert_any_root_context(Box::new(VaultFeed {
+            changes: Arc::new(Mutex::new(None)),
+            trouble: None,
+        }));
         with_reactor(|| dom.rebuild_to_vec());
         assert!(
             dioxus_ssr::render(&dom).contains("rail-id"),
@@ -6950,6 +7213,7 @@ mod tests {
                 "go to today",
                 "go to table",
                 "new note",
+                "notices",
             ],
             "the note opened editing, so the caret commands stand; the \
              screen already stood on is not offered, and no sheet backs \
@@ -6972,9 +7236,98 @@ mod tests {
         let (_, keys) = activate_heading(&mut dom, &clicks);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 11, "{labels:?}");
+        assert_eq!(labels.len(), 12, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
+    }
+
+    // -- the notices overlay: the history behind a palette command -----------
+
+    #[test]
+    fn an_empty_notices_history_says_so() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "notices");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">notices<"), "{html}");
+        assert!(html.contains("nothing to report"), "{html}");
+
+        // Escape closes the overlay; a second, with nothing standing and
+        // nothing to close, is inert — the ladder's bottom writes nothing
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">notices<"), "{html}");
+        assert!(
+            !html.contains("notice-"),
+            "a clean line stays clean: {html}"
+        );
+    }
+
+    #[test]
+    fn the_notices_overlay_lists_the_history_and_escape_closes_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // a standing warning to remember: the missing template refuses
+        std::fs::remove_file(vault.path().join("templates/daily.typ"))
+            .expect("remove the template");
+        click(&mut dom, clicks[day_cell(24)]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "notices");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">notices<"), "{html}");
+        assert!(
+            html.contains(r#"class="loops-line""#),
+            "the history lists the warning: {html}"
+        );
+
+        // Escape closes the overlay; the notice itself still stands — a
+        // record is not a dismissal
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">notices<"), "{html}");
+        assert!(html.contains("notice-warning"), "{html}");
+    }
+
+    #[test]
+    fn the_table_escape_reaches_the_overlay_then_the_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // a standing warning, then the table
+        std::fs::remove_file(vault.path().join("templates/daily.typ"))
+            .expect("remove the template");
+        click(&mut dom, clicks[day_cell(24)]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
+        let (_pane, _cards, table_keys) =
+            table_targets_with_keys(&mut dom, &clicks);
+
+        // the palette summons the overlay over the table too
+        let (input, palette_keys) = open_palette(&mut dom, table_keys);
+        type_into(&mut dom, input, "notices");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(">notices<"));
+
+        // the ladder: the first Escape closes the overlay, the second —
+        // with no sheet to close — acknowledges the notice
+        press(&mut dom, table_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">notices<"));
+        press(&mut dom, table_keys, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("notice-warning"), "acknowledged: {html}");
     }
 
     #[test]
