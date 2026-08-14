@@ -148,6 +148,36 @@ impl From<VirtualizeError> for RenderError {
     }
 }
 
+/// One queued fragment compile: everything `render_svg` needs, carried to
+/// the compute tier, plus the content-addressed key the outcome lands back
+/// under (adr/2026-08-compute-tier-worker-seam.md). Content-addressing is
+/// why fragments need no staleness guard: a result is valid for its key
+/// forever, however late it lands.
+#[derive(Debug)]
+pub struct FragmentJob {
+    pub key: u64,
+    root: PathBuf,
+    note: PathBuf,
+    source: String,
+    theme: RenderTheme,
+}
+
+impl FragmentJob {
+    pub fn compile(&self) -> Result<String, String> {
+        render_svg(&self.root, &self.note, &self.source, self.theme)
+            .map_err(describe)
+    }
+}
+
+/// What a fragment probe answers: the cached result, or "not yet" with the
+/// job to submit — present only the first time, the in-flight set dedups
+/// the repaints in between (adr/2026-08-async-caches-pending-stale.md).
+#[derive(Debug)]
+pub enum FragmentView {
+    Ready(Result<String, String>),
+    Pending(Option<FragmentJob>),
+}
+
 /// Per-block SVG fragments for the hybrid editor — the successor
 /// adr/2026-07-svg-cache-per-path.md predicted, decided in
 /// adr/2026-07-block-segmentation-parbreak-tiling.md. Keyed by note path +
@@ -155,11 +185,14 @@ impl From<VirtualizeError> for RenderError {
 /// cached too, because a failing block would otherwise recompile on every
 /// re-render. `sweep`, called at every resegmentation, drops what the
 /// current generation never rendered, which bounds the map at the open
-/// note's block count.
+/// note's block count. Two ways in, one per compute adapter: `render`
+/// compiles on a miss in place (the inline adapter), `probe` answers
+/// `Pending` and hands the compile to the worker (the queued adapter).
 #[derive(Debug, Default)]
 pub struct FragmentCache {
     entries: HashMap<u64, Result<String, String>>,
     touched: HashSet<u64>,
+    inflight: HashSet<u64>,
 }
 
 impl FragmentCache {
@@ -180,6 +213,41 @@ impl FragmentCache {
             .clone()
     }
 
+    /// The queued adapter's read: never compiles, so the frame that first
+    /// needs a pixel no longer pays for it (adr/2026-08-compute-tier-worker-seam.md).
+    pub fn probe(
+        &mut self,
+        root: &Path,
+        note: &Path,
+        source: &str,
+        theme: RenderTheme,
+    ) -> FragmentView {
+        let key = hash_fragment(note, source, theme);
+        self.touched.insert(key);
+        if let Some(hit) = self.entries.get(&key) {
+            return FragmentView::Ready(hit.clone());
+        }
+        if self.inflight.insert(key) {
+            FragmentView::Pending(Some(FragmentJob {
+                key,
+                root: root.to_path_buf(),
+                note: note.to_path_buf(),
+                source: source.to_string(),
+                theme,
+            }))
+        } else {
+            FragmentView::Pending(None)
+        }
+    }
+
+    /// A worker outcome landing. A key swept while its compile was out is
+    /// re-inserted here and swept again next resegmentation — harmless,
+    /// content-addressing means the value is right whenever it arrives.
+    pub fn absorb(&mut self, key: u64, result: Result<String, String>) {
+        self.inflight.remove(&key);
+        self.entries.insert(key, result);
+    }
+
     pub fn sweep(&mut self) {
         self.entries.retain(|key, _| self.touched.contains(key));
         self.touched.clear();
@@ -195,16 +263,55 @@ fn describe(error: RenderError) -> String {
     }
 }
 
+/// One queued body compile — `FragmentJob`'s sibling. Bodies are keyed by
+/// path, not content, so an outcome can be stale: it carries the epoch it
+/// was queued under, and `absorb` drops it if an invalidation has bumped
+/// the epoch since (adr/2026-08-async-caches-pending-stale.md).
+#[derive(Debug)]
+pub struct BodyJob {
+    pub note: PathBuf,
+    pub theme: RenderTheme,
+    pub epoch: u64,
+    root: PathBuf,
+}
+
+impl BodyJob {
+    pub fn compile(&self) -> Result<String, String> {
+        compile_body(&self.root, &self.note, self.theme)
+    }
+}
+
+/// What a body probe answers: the cached result, or "not yet" with the
+/// last good SVG to keep showing (stale-while-revalidate) and the job to
+/// submit — present only the first time, like a fragment's.
+#[derive(Debug)]
+pub enum BodyView {
+    Ready(Result<String, String>),
+    Pending {
+        stale: Option<String>,
+        job: Option<BodyJob>,
+    },
+}
+
 /// Whole-note SVGs for the table's body zoom — `FragmentCache`'s sibling
 /// with the opposite lifecycle: the table shows many notes at once where
 /// the sheet shows one, so entries live until the watcher says their file
 /// changed rather than being swept per open note
 /// (adr/2026-08-body-cache-per-note-svg.md). Reads the file itself on a
 /// miss; errors — unreadable or uncompilable — are cached like the
-/// fragment cache's. In-process only, like every render hash.
+/// fragment cache's. In-process only, like every render hash. The same
+/// two ways in as the fragment cache: `render` compiles in place, `probe`
+/// queues — and because the key is a path whose content can change under
+/// an in-flight compile, invalidation bumps an epoch that dooms every
+/// outcome queued before it.
 #[derive(Debug, Default)]
 pub struct BodyCache {
     entries: HashMap<(PathBuf, RenderTheme), Result<String, String>>,
+    /// The last good SVG per key, shown while a recompile is pending —
+    /// never an error: seeing those is the point of `Ready(Err)`.
+    stale: HashMap<(PathBuf, RenderTheme), String>,
+    inflight: HashSet<(PathBuf, RenderTheme)>,
+    epoch: u64,
 }
 
 impl BodyCache {
@@ -218,28 +325,99 @@ impl BodyCache {
         if let Some(cached) = self.entries.get(&key) {
             return cached.clone();
         }
-        // the world wants the absolute path; the key stays vault-relative,
-        // the shape the index and the watcher both speak
-        let file = root.join(note);
-        let rendered = std::fs::read_to_string(&file)
-            .map_err(|error| format!("body: {error}"))
-            .and_then(|text| {
-                render_svg(root, &file, &text, theme).map_err(describe)
-            });
+        let rendered = compile_body(root, note, theme);
         self.entries.insert(key, rendered.clone());
         rendered
+    }
+
+    /// The queued adapter's read — `FragmentCache::probe`'s twin.
+    pub fn probe(
+        &mut self,
+        root: &Path,
+        note: &Path,
+        theme: RenderTheme,
+    ) -> BodyView {
+        let key = (note.to_path_buf(), theme);
+        if let Some(hit) = self.entries.get(&key) {
+            return BodyView::Ready(hit.clone());
+        }
+        let stale = self.stale.get(&key).cloned();
+        let job = self.inflight.insert(key).then(|| BodyJob {
+            note: note.to_path_buf(),
+            theme,
+            epoch: self.epoch,
+            root: root.to_path_buf(),
+        });
+        BodyView::Pending { stale, job }
+    }
+
+    /// A worker outcome landing — dropped whole if an invalidation bumped
+    /// the epoch after it was queued: it compiled a file that has since
+    /// changed, and the bump already cleared its in-flight slot, so the
+    /// next probe re-queues against the current epoch.
+    pub fn absorb(
+        &mut self,
+        note: PathBuf,
+        theme: RenderTheme,
+        epoch: u64,
+        result: Result<String, String>,
+    ) {
+        if epoch != self.epoch {
+            return;
+        }
+        self.inflight.remove(&(note.clone(), theme));
+        self.entries.insert((note, theme), result);
     }
 
     /// The watcher's per-path invalidation: both theme columns drop — the
     /// file changed for both alike.
     pub fn invalidate(&mut self, note: &Path) {
-        self.entries.retain(|(path, _), _| path != note);
+        self.expire(|(path, _)| path == note);
     }
 
     /// A rescan's blunt answer: everything may have changed.
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.expire(|_| true);
     }
+
+    /// Expired entries move their last good SVG to the stale shelf; errors
+    /// just drop. The epoch bump dooms every in-flight outcome, so the
+    /// whole in-flight set clears and doomed keys re-queue at their next
+    /// probe.
+    // ponytail: one global epoch — a bump discards unrelated in-flight
+    // compiles too, which re-queue; per-key epochs if that ever thrashes
+    fn expire(&mut self, expired: impl Fn(&(PathBuf, RenderTheme)) -> bool) {
+        self.epoch += 1;
+        self.inflight.clear();
+        let dead: Vec<_> = self
+            .entries
+            .keys()
+            .filter(|key| expired(key))
+            .cloned()
+            .collect();
+        for key in dead {
+            let last_good = self.entries.remove(&key).and_then(Result::ok);
+            if let Some(svg) = last_good {
+                self.stale.insert(key, svg);
+            }
+        }
+    }
+}
+
+/// The one body compile both adapters share: read the file, render it. The
+/// world wants the absolute path; the key stays vault-relative, the shape
+/// the index and the watcher both speak.
+fn compile_body(
+    root: &Path,
+    note: &Path,
+    theme: RenderTheme,
+) -> Result<String, String> {
+    let file = root.join(note);
+    std::fs::read_to_string(&file)
+        .map_err(|error| format!("body: {error}"))
+        .and_then(|text| {
+            render_svg(root, &file, &text, theme).map_err(describe)
+        })
 }
 
 pub fn render_svg(
@@ -387,6 +565,176 @@ mod tests {
         let error =
             world.read(file_id("/templates/template.typ")).unwrap_err();
         assert!(matches!(error, FileError::Realize(_)), "{error:?}");
+    }
+
+    // -- the probe interface: never compiles, queues exactly once ------------
+
+    #[test]
+    fn a_fragment_probe_queues_once_then_serves_what_lands() {
+        let mut cache = FragmentCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let FragmentView::Pending(Some(job)) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("the first probe hands the job over");
+        };
+        let FragmentView::Pending(None) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("a repaint mid-flight queues nothing");
+        };
+        cache.absorb(job.key, Ok("<svg/>".to_string()));
+        let FragmentView::Ready(Ok(svg)) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("the landed outcome answers the next probe");
+        };
+        assert_eq!(svg, "<svg/>");
+    }
+
+    #[test]
+    fn a_fragment_job_compiles_like_the_synchronous_render() {
+        let vault =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let note = vault.join("permanent/zettelkasten.typ");
+        let FragmentView::Pending(Some(job)) = FragmentCache::default().probe(
+            &vault,
+            &note,
+            "= titre\n",
+            RenderTheme::Paper,
+        ) else {
+            panic!("a fresh cache queues the compile");
+        };
+        let inline = FragmentCache::default().render(
+            &vault,
+            &note,
+            "= titre\n",
+            RenderTheme::Paper,
+        );
+        assert_eq!(job.compile(), inline);
+        assert!(inline.expect("a heading compiles").contains("<svg"));
+    }
+
+    #[test]
+    fn a_body_probe_queues_once_and_a_late_outcome_lands() {
+        let mut cache = BodyCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let BodyView::Pending {
+            stale: None,
+            job: Some(job),
+        } = cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("a first probe has no stale SVG and hands the job over");
+        };
+        let BodyView::Pending { job: None, .. } =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("a repaint mid-flight queues nothing");
+        };
+        cache.absorb(
+            job.note.clone(),
+            job.theme,
+            job.epoch,
+            Ok("<svg/>".to_string()),
+        );
+        let BodyView::Ready(Ok(svg)) =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the landed outcome answers the next probe");
+        };
+        assert_eq!(svg, "<svg/>");
+    }
+
+    #[test]
+    fn an_invalidated_body_serves_its_last_good_svg_while_pending() {
+        let mut cache = BodyCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let BodyView::Pending { job: Some(job), .. } =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the first probe queues");
+        };
+        cache.absorb(job.note, job.theme, job.epoch, Ok("<old/>".to_string()));
+
+        cache.invalidate(note);
+        let BodyView::Pending {
+            stale: Some(stale),
+            job: Some(fresh),
+        } = cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the invalidated body re-queues with its last good SVG");
+        };
+        assert_eq!(stale, "<old/>");
+        cache.absorb(
+            fresh.note,
+            fresh.theme,
+            fresh.epoch,
+            Ok("<new/>".into()),
+        );
+        let BodyView::Ready(Ok(svg)) =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the recompile lands");
+        };
+        assert_eq!(svg, "<new/>");
+    }
+
+    #[test]
+    fn an_outcome_from_before_the_invalidation_is_dropped() {
+        let mut cache = BodyCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let BodyView::Pending {
+            job: Some(doomed), ..
+        } = cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the first probe queues");
+        };
+        cache.invalidate(note);
+        cache.absorb(
+            doomed.note,
+            doomed.theme,
+            doomed.epoch,
+            Ok("<compiled-from-the-old-file/>".to_string()),
+        );
+        let BodyView::Pending { .. } =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the doomed outcome never lands; the probe re-queues");
+        };
+    }
+
+    #[test]
+    fn an_expired_error_drops_instead_of_shelving() {
+        let mut cache = BodyCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let BodyView::Pending { job: Some(job), .. } =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("the first probe queues");
+        };
+        cache.absorb(job.note, job.theme, job.epoch, Err("broke".to_string()));
+        cache.clear();
+        let BodyView::Pending { stale: None, .. } =
+            cache.probe(root, note, RenderTheme::Dark)
+        else {
+            panic!("an error is nothing to keep showing");
+        };
+    }
+
+    #[test]
+    fn a_body_job_compiles_what_the_synchronous_path_would() {
+        let vault =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let note = Path::new("permanent/zettelkasten.typ");
+        let BodyView::Pending { job: Some(job), .. } =
+            BodyCache::default().probe(&vault, note, RenderTheme::Paper)
+        else {
+            panic!("a fresh cache queues the compile");
+        };
+        let inline =
+            BodyCache::default().render(&vault, note, RenderTheme::Paper);
+        assert_eq!(job.compile(), inline);
+        assert!(inline.expect("the fixture note compiles").contains("<svg"));
     }
 
     fn fixture_world() -> VaultWorld {

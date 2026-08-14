@@ -1,4 +1,4 @@
-use note_system::{capture, time, ui, vault, watch};
+use note_system::{capture, compute, time, ui, vault, watch};
 
 fn main() {
     // `wl-paste | app --capture`: a short-lived headless process that writes
@@ -30,6 +30,11 @@ fn main() {
         // a watcher that will not start leaves the app on the index it
         // loaded at launch, which is what it had before this existed
         .with_context(watcher_feed(root.as_deref()))
+        // the compute tier: typst compiles and index surveys run on two
+        // worker lanes instead of the UI thread; the headless tests omit
+        // this and get the inline adapter
+        // (adr/2026-08-compute-tier-worker-seam.md)
+        .with_context(compute::threaded())
         // called from the keydown handler, where the runtime context that
         // window() reads is current
         .with_context(ui::Closer(std::sync::Arc::new(|| {

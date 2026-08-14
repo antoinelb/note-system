@@ -56,13 +56,20 @@ impl Positions {
     /// Write-temp-then-rename through the persist seam: the ceiling the
     /// debounced-autosave ADR recorded is closed — a crash mid-save leaves
     /// the previous placements, never a truncated file
-    /// (adr/2026-08-atomic-persist-seam.md).
+    /// (adr/2026-08-atomic-persist-seam.md). The parent is ensured first:
+    /// positions are user data living in `.index/`, and on a threaded
+    /// launch the debounce can fire before the first survey creates that
+    /// directory (adr/2026-08-startup-survey-async.md).
     pub fn save(&self) -> Result<(), std::io::Error> {
         let lines: String = self
             .placed
             .iter()
             .map(|(id, (x, y))| format!("{id} {x} {y}\n"))
             .collect();
+        self.path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()?;
         crate::persist::write_atomic(&self.path, &lines).map(|_| ())
     }
 }
@@ -184,10 +191,34 @@ mod tests {
     }
 
     #[test]
-    fn save_reports_an_unwritable_path() {
+    fn save_recreates_a_missing_index_directory() {
+        // the threaded launch can debounce a save before the first survey
+        // creates `.index/`; the save owns its parent instead of failing
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".index/positions");
+        let positions = Positions::load(&path);
+        positions.save().expect("the save creates its parent");
+        assert!(path.exists());
+    }
+
+    /// The editor tests' `lock` twin: parent creation is refused by
+    /// locking the grandparent. Callers unlock before the tempdir drops.
+    fn lock(dir: &Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(dir)
+            .expect("the dir exists")
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(dir, permissions)
+            .expect("the dir permissions are set");
+    }
+
+    #[test]
+    fn save_reports_a_parent_that_cannot_be_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        lock(dir.path(), true);
         let positions =
             Positions::load(&dir.path().join("no-such-dir/positions"));
         assert!(positions.save().is_err());
+        lock(dir.path(), false);
     }
 }

@@ -13,16 +13,18 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::blocks;
 use crate::caret;
+use crate::compute::{self, ComputeFeed, Job, Outcome};
 use crate::domain::{NoteCategory, NoteType};
 use crate::editor::{Deletion, Editor};
-use crate::index::{Index, IndexError, TableNote};
+use crate::index::{Index, TableNote};
 use crate::keymap;
 use crate::links;
 use crate::logs::{self, Selection};
-use crate::loops;
 use crate::palette;
 use crate::positions::Positions;
-use crate::render::{BodyCache, FragmentCache, RenderTheme};
+use crate::render::{
+    BodyCache, BodyView, FragmentCache, FragmentView, RenderTheme,
+};
 use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
@@ -141,7 +143,6 @@ struct RootCommands {
 pub fn App() -> Element {
     let vault = use_context::<VaultRoot>();
     let today = use_context::<Today>();
-    let loaded = use_hook(|| load(vault.0));
     // shared down the tree: the shell compiles note fragments in the
     // current theme's palette column
     let mut light = use_context_provider(|| Signal::new(false));
@@ -189,11 +190,19 @@ pub fn App() -> Element {
                 }
             },
             {
-                match loaded {
-                    Ok((root, notes, loops, table, edges)) => {
-                        rsx! { Shell { root, notes, loops, table, edges, today: today.0 } }
+                // the vault-error takeover survives only for a missing
+                // root — an index that will not build is a notice and a
+                // degraded glyph, never a dead screen: the .typ files are
+                // intact (adr/2026-08-startup-survey-async.md)
+                match &vault.0 {
+                    Some(root) => {
+                        rsx! { Shell { root: root.clone(), today: today.0 } }
                     }
-                    Err(msg) => rsx! { div { class: "vault-error", "{msg}" } },
+                    None => rsx! {
+                        div { class: "vault-error",
+                            "no vault: define NOTE_VAULT or HOME"
+                        }
+                    },
                 }
             }
         }
@@ -204,31 +213,30 @@ pub fn App() -> Element {
 /// pane with its scale chain and "captured today" block, month-grid jump
 /// panel. Everything it decides comes from `logs`; the component is wiring.
 #[component]
-fn Shell(
-    root: PathBuf,
-    notes: Vec<(String, NoteType)>,
-    loops: Vec<String>,
-    table: Vec<TableNote>,
-    edges: Vec<(String, String)>,
-    today: Date,
-) -> Element {
-    // the editor opens today's note before the signal takes the notes list;
-    // the initializer runs once, so the launch open costs no signal write
+fn Shell(root: PathBuf, today: Date) -> Element {
+    // the compute tier this shell submits to: `main` injects the threaded
+    // adapter, the headless tests inject a scripted one or nothing and get
+    // inline (adr/2026-08-compute-tier-worker-seam.md)
+    let feed = use_hook(|| {
+        try_consume_context::<ComputeFeed>().unwrap_or_else(compute::inline)
+    });
+    // the editor opens today's note by a stat, not the survey — the file
+    // is the truth and the threaded launch has no survey yet
+    // (adr/2026-08-startup-survey-async.md)
     let mut editor = use_signal({
         let root = root.clone();
         let id = time::day_id(today);
-        let exists = notes.iter().any(|(existing, _)| existing == &id);
-        move || open_selected(&root, exists, &id)
+        move || open_selected(&root, time_note_path(&root, &id).exists(), &id)
     });
-    let mut notes = use_signal(|| notes);
+    let mut notes = use_signal(Vec::new);
     // the open loops themselves; the ember shows how many there are and the
     // overlay shows which (adr/2026-08-loops-list-overlay.md)
-    let mut loops = use_signal(|| loops);
+    let mut loops = use_signal(Vec::new);
     // the table's notes, third rider on the same survey the watcher refreshes
-    let mut table_notes = use_signal(|| table);
+    let mut table_notes = use_signal(Vec::<TableNote>::new);
     // the link edges, the survey's fourth rider — the constellation redraws
     // whenever the watcher redraws the cards (adr/2026-08-edges-svg-under-cards.md)
-    let mut edges = use_signal(|| edges);
+    let mut edges = use_signal(Vec::new);
     // canvas positions, read once here and touched by nothing but the user's
     // drag (adr/2026-07-positions-separate-file.md)
     let mut positions = use_signal({
@@ -270,6 +278,40 @@ fn Shell(
     // the body cache, its table-side sibling: per-note SVGs living until
     // the watcher invalidates them (adr/2026-08-body-cache-per-note-svg.md)
     let bodies = use_hook(|| Rc::new(RefCell::new(BodyCache::default())));
+    // the compiles' repaint tick: the drain bumps it once per landed burst,
+    // and the shell reading it below is what re-renders the fresh SVGs in —
+    // the caches themselves stay plain memo stores
+    let mut compiled = use_signal(|| 0u64);
+    // the launch survey (adr/2026-08-startup-survey-async.md): the inline
+    // adapter answers before the first paint — the synchronous launch of
+    // old — while the threaded one mounts the shell empty and lands the
+    // survey like a watcher batch, through the drain below
+    use_hook({
+        let root = root.clone();
+        let feed = feed.clone();
+        move || {
+            if !feed.inline {
+                (feed.submit)(compute::rescan(&root, false));
+                return;
+            }
+            match compute::refresh(&root, &[watch::VaultChange::Rescan]) {
+                Ok((time_notes, open, table, links)) => {
+                    notes.set(time_notes);
+                    loops.set(open);
+                    table_notes.set(table);
+                    edges.set(links);
+                }
+                // no escalation inline: retrying the same rescan in the
+                // same breath proves nothing; the watcher's next batch is
+                // the retry
+                Err(message) => {
+                    let mut status = status.write();
+                    status.report(Notice::watcher_failed(&message));
+                    status.set_liveness(Liveness::Degraded);
+                }
+            }
+        }
+    });
     // absent in headless tests that don't inject a fake: mouse presses then
     // land at the block's end and the clipboard chords quietly decline
     let hit = try_consume_context::<HitProbe>();
@@ -369,27 +411,28 @@ fn Shell(
     use_hook(move || register.0.borrow_mut().replace(quit_flush));
 
     // the vault watcher, if one was handed over: every batch it debounces
-    // updates the index and refreshes what the screen derives from it — the
-    // rail and the open loops (adr/2026-08-watcher-feeds-the-ui.md). Taken
-    // out of its cell once; a second render finds `None` and starts nothing.
-    // Liveness is established here and only here: Watching when the
+    // invalidates the stale bodies and rides the compute tier as a survey
+    // job — the index work itself left this thread with C3
+    // (adr/2026-08-compute-tier-worker-seam.md); the outcome lands on the
+    // drain below (adr/2026-08-watcher-feeds-the-ui.md). Taken out of its
+    // cell once; a second render finds `None` and starts nothing.
+    // Liveness is established here and on the drain: Watching when the
     // receiver is taken, Unwatched when there is none to take, Degraded
-    // when a batch fails — and a failed batch queues a rescan so the state
-    // heals instead of lingering
-    // (adr/2026-08-failed-batch-escalates-to-rescan.md).
+    // when a survey fails.
     use_hook({
         let root = root.clone();
         let bodies = bodies.clone();
+        let feed = feed.clone();
         move || {
-            let Some(feed) = try_consume_context::<VaultFeed>() else {
+            let Some(watched) = try_consume_context::<VaultFeed>() else {
                 return;
             };
-            if let Some(reason) = &feed.trouble {
+            if let Some(reason) = &watched.trouble {
                 status.write().report(Notice::unwatched(reason));
                 return;
             }
             let taken =
-                feed.changes.lock().ok().and_then(|mut cell| cell.take());
+                watched.changes.lock().ok().and_then(|mut cell| cell.take());
             let Some(mut changes) = taken else { return };
             status.write().set_liveness(Liveness::Watching);
             spawn(async move {
@@ -417,42 +460,103 @@ fn Shell(
                             }
                         }
                     }
-                    // a failed batch degrades the liveness and escalates to
-                    // one bounded rescan — the watcher's own doctrine,
-                    // applied around it: updates were lost, so the index
-                    // can no longer be trusted
-                    // (adr/2026-08-failed-batch-escalates-to-rescan.md).
-                    // The rescan's success flows into the same arm as a
-                    // clean batch, where degradation resolves.
-                    let survey = refresh(&root, &batch).or_else(|message| {
-                        {
-                            let mut status = status.write();
-                            status.report(Notice::watcher_failed(&message));
-                            status.set_liveness(Liveness::Degraded);
-                        }
-                        bodies.borrow_mut().clear();
-                        refresh(&root, &[watch::VaultChange::Rescan])
+                    (feed.submit)(Job::Survey {
+                        root: root.clone(),
+                        batch,
+                        escalated: false,
                     });
-                    match survey {
-                        Ok((time_notes, open, table, links)) => {
-                            notes.set(time_notes);
-                            loops.set(open);
-                            table_notes.set(table);
-                            edges.set(links);
-                            // reaching here is the degradation's
-                            // resolution, whether by clean batch or by the
-                            // escalated rescan
-                            if status.peek().liveness() == Liveness::Degraded {
-                                let mut status = status.write();
-                                status.resolve(Source::Watcher);
-                                status.set_liveness(Liveness::Watching);
+                }
+            });
+        }
+    });
+
+    // the compute tier's drain: every outcome lands here — compiles into
+    // their caches (one repaint tick per burst), surveys into the signals
+    // the screens derive from. A failed survey degrades the liveness and
+    // escalates to one bounded rescan — the watcher's own doctrine, applied
+    // around it (adr/2026-08-failed-batch-escalates-to-rescan.md); the
+    // escalation's success resolves the degradation like any clean batch.
+    // Taken out of its cell once, like the watcher's receiver.
+    use_hook({
+        let root = root.clone();
+        let feed = feed.clone();
+        let fragments = fragments.clone();
+        let bodies = bodies.clone();
+        move || {
+            let taken =
+                feed.outcomes.lock().ok().and_then(|mut cell| cell.take());
+            let Some(mut outcomes) = taken else { return };
+            spawn(async move {
+                // absorb outcomes in bursts before repainting once: a
+                // theme toggle or a bodies zoom lands dozens together
+                let mut burst = Vec::new();
+                loop {
+                    burst.clear();
+                    if outcomes.recv_many(&mut burst, 64).await == 0 {
+                        break;
+                    }
+                    let mut landed = false;
+                    for outcome in burst.drain(..) {
+                        match outcome {
+                            Outcome::Fragment { key, result } => {
+                                fragments.borrow_mut().absorb(key, result);
+                                landed = true;
+                            }
+                            Outcome::Body {
+                                note,
+                                theme,
+                                epoch,
+                                result,
+                            } => {
+                                bodies
+                                    .borrow_mut()
+                                    .absorb(note, theme, epoch, result);
+                                landed = true;
+                            }
+                            Outcome::Survey {
+                                result: Ok((time_notes, open, table, links)),
+                                ..
+                            } => {
+                                notes.set(time_notes);
+                                loops.set(open);
+                                table_notes.set(table);
+                                edges.set(links);
+                                // reaching here is the degradation's
+                                // resolution, whether by clean batch or by
+                                // the escalated rescan
+                                if status.peek().liveness()
+                                    == Liveness::Degraded
+                                {
+                                    let mut status = status.write();
+                                    status.resolve(Source::Watcher);
+                                    status.set_liveness(Liveness::Watching);
+                                }
+                            }
+                            Outcome::Survey {
+                                result: Err(message),
+                                escalated,
+                            } => {
+                                {
+                                    let mut status = status.write();
+                                    status.report(Notice::watcher_failed(
+                                        &message,
+                                    ));
+                                    status.set_liveness(Liveness::Degraded);
+                                }
+                                // updates were lost, so nothing derived
+                                // can be trusted — but a rescan that
+                                // itself failed escalates no further
+                                if !escalated {
+                                    bodies.borrow_mut().clear();
+                                    (feed.submit)(compute::rescan(
+                                        &root, true,
+                                    ));
+                                }
                             }
                         }
-                        Err(second) => {
-                            status
-                                .write()
-                                .report(Notice::watcher_failed(&second));
-                        }
+                    }
+                    if landed {
+                        *compiled.write() += 1;
                     }
                 }
             });
@@ -1092,6 +1196,9 @@ fn Shell(
     } else {
         RenderTheme::Dark
     };
+    // reading the tick is what re-renders landed compiles in — the probes
+    // below answer Ready only because the drain bumped this
+    let _ = compiled.read();
     // the one notice line, read from the one owner: highest severity
     // standing, latest among equals (adr/2026-08-status-surface-owns-notices.md)
     let notice = status.read().line().cloned();
@@ -1245,6 +1352,7 @@ fn Shell(
     // (adr/2026-08-sheet-reuses-the-one-editor.md)
     let blocks_view = {
         let root = root.clone();
+        let feed = feed.clone();
         let fragments = fragments.clone();
         let sink = sink.clone();
         let hit = hit.clone();
@@ -1256,6 +1364,7 @@ fn Shell(
                 &root,
                 theme,
                 &mut fragments.borrow_mut(),
+                !feed.inline,
             )?;
             Some(rsx! {
                 div { class: "note-blocks",
@@ -1532,6 +1641,30 @@ fn Shell(
                                         }
                                     }
                                 },
+                                Pane::Pending { start, text, job } => {
+                                    // the compile rides the tier (at most
+                                    // once — the probe dedups) while the
+                                    // block shows its raw source, dimmed,
+                                    // until the SVG lands
+                                    // (adr/2026-08-async-caches-pending-stale.md)
+                                    if let Some(job) = job {
+                                        (feed.submit)(Job::Fragment(job));
+                                    }
+                                    rsx! {
+                                        div {
+                                            key: "{start}",
+                                            class: "block block-pending",
+                                            onclick: {
+                                                let fragments = fragments.clone();
+                                                move |_| {
+                                                    editor.write().activate(start);
+                                                    fragments.borrow_mut().sweep();
+                                                }
+                                            },
+                                            div { class: "pending-source", "{text}" }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2634,9 +2767,15 @@ fn Shell(
                             if zoom() == table::Zoom::Bodies {
                                 div { class: "card-body",
                                     {
-                                        match bodies.borrow_mut().render(&root, &card.path, theme) {
-                                            Ok(svg) => rsx! {
+                                        match card_body(&bodies, &feed, &root, &card.path, theme) {
+                                            Ok(Some(svg)) => rsx! {
                                                 div { class: "note", dangerous_inner_html: "{svg}" }
+                                            },
+                                            // nothing compiled yet, fresh or
+                                            // stale: a quiet gap until the
+                                            // SVG lands
+                                            Ok(None) => rsx! {
+                                                div { class: "body-pending" }
                                             },
                                             Err(msg) => rsx! {
                                                 p { class: "render-error", "{msg}" }
@@ -2953,92 +3092,6 @@ fn Chrome(
     }
 }
 
-/// What one look at the index yields: the rail's time notes, the open loops
-/// themselves rather than a count of them, the table's cards-to-be, and the
-/// link edges the canvas draws between them.
-type Survey = (
-    Vec<(String, NoteType)>,
-    Vec<String>,
-    Vec<TableNote>,
-    Vec<(String, String)>,
-);
-
-/// What the shell mounts with: the vault root and that survey.
-type Loaded = (
-    PathBuf,
-    Vec<(String, NoteType)>,
-    Vec<String>,
-    Vec<TableNote>,
-    Vec<(String, String)>,
-);
-
-fn load(root: Option<PathBuf>) -> Result<Loaded, String> {
-    match root {
-        Some(root) => match load_notes(&root) {
-            Ok((notes, loops, table, edges)) => {
-                Ok((root, notes, loops, table, edges))
-            }
-            Err(err) => Err(format!("the index could not be built: {err:?}")),
-        },
-        None => Err("no vault: define NOTE_VAULT or HOME".to_string()),
-    }
-}
-
-fn load_notes(root: &Path) -> Result<Survey, IndexError> {
-    let notes = crate::index::scan_vault(root)?;
-    let index_path = root.join(".index");
-    std::fs::create_dir_all(&index_path)?;
-    let mut index = Index::open(&index_path.join("index.db"))?;
-    index.rebuild(&notes)?;
-    survey(&index)
-}
-
-/// What the shell needs from a built index: the rail's time notes and the
-/// ember's count. Separate from `load_notes` so its error arms stay
-/// reachable — after a successful rebuild they only fire on a sabotaged
-/// database.
-fn survey(index: &Index) -> Result<Survey, IndexError> {
-    Ok((
-        index.time_notes()?,
-        open_loops(index)?,
-        index.table_notes()?,
-        index.link_edges()?,
-    ))
-}
-
-/// One watcher batch applied: the index catches up with the files, then the
-/// screen catches up with the index. Opening the index per batch matches
-/// every other read in this module — the batches arrive debounced, seldom,
-/// and one at a time.
-fn refresh(
-    root: &Path,
-    batch: &[watch::VaultChange],
-) -> Result<Survey, String> {
-    absorb(root, batch).map_err(|err| format!("watching the vault: {err:?}"))
-}
-
-/// Open, apply, re-read: every step reports the same way, so the caller has
-/// one message to show rather than three.
-fn absorb(
-    root: &Path,
-    batch: &[watch::VaultChange],
-) -> Result<Survey, IndexError> {
-    let mut index = Index::open(&root.join(".index/index.db"))?;
-    watch::apply(&mut index, root, batch)?;
-    survey(&index)
-}
-
-/// The open loops themselves, not a count of them: the chrome's ember shows
-/// this list's length and clicking it shows the list, so the two cannot
-/// drift apart (adr/2026-08-loops-list-overlay.md).
-fn open_loops(index: &Index) -> Result<Vec<String>, IndexError> {
-    Ok(loops::lines(
-        &index.typeless_notes()?,
-        &index.dangling_links()?,
-        &index.unsummarized_captures()?,
-    ))
-}
-
 /// The selected note's editor: opened when the index says the note exists,
 /// closed otherwise — selection ≠ existence, so an empty selection must not
 /// touch the filesystem.
@@ -3087,8 +3140,9 @@ fn sheet_backlinks(root: &Path, own: &str) -> Result<usize, String> {
 }
 
 /// One centre-pane slot: the active block as raw source for the textarea,
-/// every other as its cached fragment, tagged with its start byte so a
-/// click activates by coordinate rather than by shiftable index.
+/// every other as its cached fragment — or, on the queued adapter, its
+/// dimmed source while the compile is out — tagged with its start byte so
+/// a click activates by coordinate rather than by shiftable index.
 enum Pane {
     Source {
         start: usize,
@@ -3098,6 +3152,11 @@ enum Pane {
         start: usize,
         rendered: Result<String, String>,
     },
+    Pending {
+        start: usize,
+        text: String,
+        job: Option<crate::render::FragmentJob>,
+    },
 }
 
 fn block_panes(
@@ -3105,6 +3164,7 @@ fn block_panes(
     root: &Path,
     theme: RenderTheme,
     cache: &mut FragmentCache,
+    queued: bool,
 ) -> Option<Vec<Pane>> {
     let (file, text) = editor.note()?;
     Some(
@@ -3122,6 +3182,28 @@ fn block_panes(
                             .unwrap_or("")
                             .to_string(),
                     }
+                } else if queued {
+                    // the threaded adapter: never compile in the frame —
+                    // probe, and hand a miss's job up for the tier
+                    // (adr/2026-08-compute-tier-worker-seam.md)
+                    match cache.probe(
+                        root,
+                        file,
+                        &blocks::fragment_source(text, block),
+                        theme,
+                    ) {
+                        FragmentView::Ready(rendered) => {
+                            Pane::Fragment { start, rendered }
+                        }
+                        FragmentView::Pending(job) => Pane::Pending {
+                            start,
+                            text: text
+                                .get(block.content())
+                                .unwrap_or("")
+                                .to_string(),
+                            job,
+                        },
+                    }
                 } else {
                     Pane::Fragment {
                         start,
@@ -3136,6 +3218,31 @@ fn block_panes(
             })
             .collect(),
     )
+}
+
+/// One card's body at the Bodies zoom: the SVG to show (fresh, or stale
+/// while its recompile is out), nothing yet, or the compile's error. A
+/// miss queues the compile — through the tier when queued, in place when
+/// inline (adr/2026-08-async-caches-pending-stale.md).
+fn card_body(
+    bodies: &Rc<RefCell<BodyCache>>,
+    feed: &ComputeFeed,
+    root: &Path,
+    note: &Path,
+    theme: RenderTheme,
+) -> Result<Option<String>, String> {
+    if feed.inline {
+        return bodies.borrow_mut().render(root, note, theme).map(Some);
+    }
+    match bodies.borrow_mut().probe(root, note, theme) {
+        BodyView::Ready(result) => result.map(Some),
+        BodyView::Pending { stale, job } => {
+            if let Some(job) = job {
+                (feed.submit)(Job::Body(job));
+            }
+            Ok(stale)
+        }
+    }
 }
 
 /// The open link picker's fixed half: the index snapshot the query filters,
@@ -3306,6 +3413,8 @@ mod tests {
     use dioxus::prelude::VirtualDom;
 
     use super::*;
+    use crate::compute::{open_loops, survey};
+    use crate::index::IndexError;
 
     /// Only a typst-rendered note carries the SVG namespace — the chrome's
     /// rsx icons don't — so this is the "a note is rendered" marker.
@@ -3364,12 +3473,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unbuildable_index_shows_the_vault_error() {
+    fn an_unbuildable_index_degrades_instead_of_dying() {
+        // the .typ files may be fine even when the index is not, so a
+        // failed launch survey is a notice and a degraded glyph, never the
+        // vault-error takeover (adr/2026-08-startup-survey-async.md)
         let dir = tempfile::tempdir().expect("a temp dir is available");
         let (dom, _, _, _) = rendered_app(Some(dir.path().join("missing")));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("vault-error"), "{html}");
-        assert!(html.contains("the index could not be built"), "{html}");
+        assert!(!html.contains("vault-error"), "{html}");
+        assert!(html.contains("indexing the vault"), "{html}");
+        assert!(html.contains("liveness-degraded"), "{html}");
     }
 
     // -- the theme: one keystroke, one attribute -----------------------------
@@ -6308,48 +6421,6 @@ mod tests {
         assert!(html.contains(">2026-07-23<"), "{html}");
     }
 
-    // -- load_notes: the error edges behind the vault-error screen -----------
-
-    #[test]
-    fn a_missing_vault_fails_at_the_scan() {
-        let dir = tempfile::tempdir().expect("a temp dir is available");
-        let error = load_notes(&dir.path().join("missing")).unwrap_err();
-        assert!(matches!(error, IndexError::Io(_)), "{error:?}");
-    }
-
-    #[test]
-    fn a_file_squatting_the_index_directory_fails_at_creation() {
-        let dir = tempfile::tempdir().expect("a temp dir is available");
-        std::fs::write(dir.path().join(".index"), "not a directory")
-            .expect("the squatting file is written");
-        let error = load_notes(dir.path()).unwrap_err();
-        assert!(matches!(error, IndexError::Io(_)), "{error:?}");
-    }
-
-    #[test]
-    fn a_directory_squatting_the_database_fails_at_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is available");
-        std::fs::create_dir_all(dir.path().join(".index/index.db"))
-            .expect("the squatting directory is created");
-        let error = load_notes(dir.path()).unwrap_err();
-        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
-    }
-
-    #[test]
-    fn a_read_only_database_fails_at_the_rebuild() {
-        let vault = temp_vault();
-        load_notes(vault.path()).expect("the first build succeeds");
-        let db = vault.path().join(".index/index.db");
-        let mut permissions = std::fs::metadata(&db)
-            .expect("the database exists after the first build")
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&db, permissions)
-            .expect("the database is made read-only");
-        let error = load_notes(vault.path()).unwrap_err();
-        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
-    }
-
     #[test]
     fn a_sabotaged_notes_table_fails_the_survey_and_the_count() {
         let vault = temp_vault();
@@ -6566,7 +6637,7 @@ mod tests {
         std::fs::create_dir(vault.path().join(".index/index.db"))
             .expect("a directory squats the database path");
         feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
-        assert!(dioxus_ssr::render(&dom).contains("watching the vault"));
+        assert!(dioxus_ssr::render(&dom).contains("indexing the vault"));
     }
 
     #[test]
@@ -6586,7 +6657,7 @@ mod tests {
                 path: PathBuf::from("capture/impossible.typ"),
             }],
         );
-        assert!(dioxus_ssr::render(&dom).contains("watching the vault"));
+        assert!(dioxus_ssr::render(&dom).contains("indexing the vault"));
     }
 
     #[test]
@@ -6603,7 +6674,7 @@ mod tests {
         // an empty batch changes nothing, so the failure can only be the
         // re-read the screen is refreshed from
         feed_batch(&mut dom, &sender, vec![]);
-        assert!(dioxus_ssr::render(&dom).contains("watching the vault"));
+        assert!(dioxus_ssr::render(&dom).contains("indexing the vault"));
     }
 
     #[test]
@@ -6667,7 +6738,7 @@ mod tests {
         feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("liveness-degraded"), "{html}");
-        assert!(html.contains("watching the vault"), "{html}");
+        assert!(html.contains("indexing the vault"), "{html}");
 
         // the squat removed, the next batch rebuilds from disk and the
         // arrival resolves the degradation without a gesture
@@ -6677,7 +6748,7 @@ mod tests {
         feed_batch(&mut dom, &sender, vec![watch::VaultChange::Rescan]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("liveness-watching"), "healed: {html}");
-        assert!(!html.contains("watching the vault"), "resolved: {html}");
+        assert!(!html.contains("indexing the vault"), "resolved: {html}");
     }
 
     #[test]
@@ -6685,7 +6756,7 @@ mod tests {
         // every other test mounts this way; the shell must simply not watch
         let vault = temp_vault();
         let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
-        assert!(!dioxus_ssr::render(&dom).contains("watching the vault"));
+        assert!(!dioxus_ssr::render(&dom).contains("indexing the vault"));
     }
 
     #[test]
@@ -6708,6 +6779,322 @@ mod tests {
         assert!(
             dioxus_ssr::render(&dom).contains("rail-id"),
             "it still renders"
+        );
+    }
+
+    #[test]
+    fn a_drain_already_taken_starts_no_second_task() {
+        // the outcomes cell arrives empty, as it would on a second shell —
+        // the `a_feed_already_taken` twin for the compute tier
+        let vault = temp_vault();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(Some(
+            vault.path().to_path_buf(),
+        ))));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(ComputeFeed {
+            submit: Arc::new(|_| {}),
+            outcomes: Arc::new(Mutex::new(None)),
+            inline: false,
+        }));
+        with_reactor(|| dom.rebuild_to_vec());
+        assert!(
+            dioxus_ssr::render(&dom).contains("selected missing"),
+            "it still renders"
+        );
+    }
+
+    // -- the compute tier: the queued adapter, played by hand ----------------
+
+    /// The compute tier a test can hold: submitted jobs pile up unrun, and
+    /// the test decides what lands — by running a job for real or by
+    /// fabricating an outcome outright (adr/2026-08-compute-tier-worker-seam.md).
+    struct HeldCompute {
+        jobs: Arc<Mutex<Vec<Job>>>,
+        outcomes: tokio::sync::mpsc::UnboundedSender<Outcome>,
+    }
+
+    impl HeldCompute {
+        /// Every job submitted since the last take, in submit order.
+        fn take(&self) -> Vec<Job> {
+            std::mem::take(
+                &mut *self.jobs.lock().expect("the job list is healthy"),
+            )
+        }
+
+        /// Lands one outcome on the shell's drain — settle to see it.
+        fn land(&self, outcome: Outcome) {
+            self.outcomes
+                .send(outcome)
+                .expect("the shell holds the drain");
+        }
+
+        /// Plays the worker: runs every queued job, lands the results and
+        /// settles the drain.
+        fn work(&self, dom: &mut VirtualDom) {
+            for job in self.take() {
+                self.land(compute::run(job));
+            }
+            block_on(settle(dom));
+        }
+    }
+
+    /// The app under the queued adapter, with a watcher channel beside it:
+    /// the threaded launch, minus the threads.
+    fn scripted_app(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        HeldCompute,
+        tokio::sync::mpsc::UnboundedSender<Vec<watch::VaultChange>>,
+    ) {
+        set_event_converter(Box::new(TestEvents));
+        let jobs = Arc::new(Mutex::new(Vec::new()));
+        let queued = jobs.clone();
+        let (outcome_sender, outcome_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(VaultFeed {
+            changes: Arc::new(Mutex::new(Some(receiver))),
+            trouble: None,
+        }));
+        dom.insert_any_root_context(Box::new(ComputeFeed {
+            submit: Arc::new(move |job| {
+                queued.lock().expect("the job list is healthy").push(job);
+            }),
+            outcomes: Arc::new(Mutex::new(Some(outcome_receiver))),
+            inline: false,
+        }));
+        let mutations = with_reactor(|| dom.rebuild_to_vec());
+        let clicks = listeners(&mutations, "click");
+        (
+            dom,
+            clicks,
+            HeldCompute {
+                jobs,
+                outcomes: outcome_sender,
+            },
+            sender,
+        )
+    }
+
+    #[test]
+    fn a_queued_launch_mounts_empty_then_the_survey_lands() {
+        let vault = temp_vault();
+        let (mut dom, _, held, _sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        let empty = dioxus_ssr::render(&dom);
+        // the rail knows only the selection (a `missing` row until the
+        // survey says otherwise), never the other days
+        assert!(
+            empty.contains("selected missing"),
+            "the rail waits: {empty}"
+        );
+        assert!(!empty.contains("2026-07-21"), "{empty}");
+        assert!(!empty.contains("vault-error"), "{empty}");
+
+        // the boot queued the survey first, then the open note's fragments
+        let jobs = held.take();
+        assert!(
+            matches!(
+                jobs.first(),
+                Some(Job::Survey {
+                    escalated: false,
+                    ..
+                })
+            ),
+            "the launch survey is queued"
+        );
+        assert!(
+            jobs[1..].iter().all(|job| matches!(job, Job::Fragment(_))),
+            "the open note's compiles ride behind it"
+        );
+        let survey = jobs
+            .into_iter()
+            .next()
+            .expect("the launch queue starts with the survey");
+        held.land(compute::run(survey));
+        block_on(settle(&mut dom));
+        let surveyed = dioxus_ssr::render(&dom);
+        assert!(
+            surveyed.contains(r#"<span class="rail-id">2026-07-23</span>"#),
+            "the survey filled the rail: {surveyed}"
+        );
+        // the fragments are still out: their blocks hold as dimmed source,
+        // and the repaint queued nothing twice
+        assert!(surveyed.contains("block-pending"), "{surveyed}");
+        assert!(held.take().is_empty(), "the in-flight set dedups");
+    }
+
+    #[test]
+    fn an_open_note_holds_dimmed_source_until_its_fragments_land() {
+        let vault = temp_vault();
+        let (mut dom, clicks, held, _sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        let before = dioxus_ssr::render(&dom);
+        assert!(before.contains("block-pending"), "{before}");
+        assert!(before.contains("pending-source"), "{before}");
+        assert!(!before.contains(RENDERED_NOTE), "{before}");
+
+        // a pending block activates like any other: the preamble opens as
+        // source and the heading block goes pending in its place
+        // (registration runs the grid first, then the one pending block,
+        // the two crumb jumps and the rail's selected row)
+        click(&mut dom, clicks[clicks.len() - 4]);
+        let activated = dioxus_ssr::render(&dom);
+        assert!(
+            activated.contains(r#"<span data-start="0">#import"#),
+            "the preamble is the active block now: {activated}"
+        );
+
+        held.work(&mut dom);
+        let after = dioxus_ssr::render(&dom);
+        assert!(after.contains(RENDERED_NOTE), "the SVGs landed: {after}");
+        assert!(!after.contains("block-pending"), "{after}");
+
+        // dropping the tier closes the drain: the task ends instead of
+        // waiting on a dead channel
+        drop(held);
+        block_on(settle(&mut dom));
+    }
+
+    #[test]
+    fn a_fragment_that_fails_off_thread_reports_in_its_block() {
+        let vault = temp_vault();
+        let (mut dom, _, held, _sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        for job in held.take() {
+            match job {
+                // the first fragment lands broken, the rest for real
+                Job::Fragment(fragment) => {
+                    held.land(Outcome::Fragment {
+                        key: fragment.key,
+                        result: Err("le typo".to_string()),
+                    });
+                }
+                job => held.land(compute::run(job)),
+            }
+        }
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("render-error"), "{html}");
+        assert!(html.contains("le typo"), "{html}");
+    }
+
+    #[test]
+    fn a_failed_survey_degrades_escalates_once_and_heals() {
+        let vault = temp_vault();
+        let (mut dom, _, held, _sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        held.take();
+        held.land(Outcome::Survey {
+            result: Err("indexing the vault: boom".to_string()),
+            escalated: false,
+        });
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("indexing the vault: boom"), "{html}");
+        assert!(html.contains("liveness-degraded"), "{html}");
+        let jobs = held.take();
+        let [
+            Job::Survey {
+                batch,
+                escalated: true,
+                ..
+            },
+        ] = jobs.as_slice()
+        else {
+            panic!("the drain escalates exactly one rescan");
+        };
+        assert_eq!(batch.as_slice(), &[watch::VaultChange::Rescan]);
+
+        // a rescan that itself fails escalates no further
+        held.land(Outcome::Survey {
+            result: Err("indexing the vault: encore".to_string()),
+            escalated: true,
+        });
+        block_on(settle(&mut dom));
+        assert!(held.take().is_empty(), "no escalation loop");
+        assert!(dioxus_ssr::render(&dom).contains("liveness-degraded"));
+
+        // a later good survey resolves the degradation without a gesture
+        held.land(compute::run(compute::rescan(vault.path(), false)));
+        block_on(settle(&mut dom));
+        let healed = dioxus_ssr::render(&dom);
+        assert!(healed.contains("liveness-watching"), "{healed}");
+        assert!(!healed.contains("indexing the vault"), "{healed}");
+    }
+
+    #[test]
+    fn a_zoomed_body_lands_late_and_stays_stale_while_recompiling() {
+        let vault = temp_vault();
+        let (mut dom, clicks, held, sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        held.work(&mut dom);
+
+        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        centre_alpha(&mut dom, pane);
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        let pending = dioxus_ssr::render(&dom);
+        assert!(pending.contains("body-pending"), "{pending}");
+        assert!(!pending.contains(RENDERED_NOTE), "{pending}");
+
+        // a repaint while the compile is out queues nothing twice: an
+        // unrelated landing forces the re-render, and the probe answers
+        // pending without a job
+        let queued = held.take();
+        held.land(Outcome::Fragment {
+            key: 0,
+            result: Ok(String::new()),
+        });
+        block_on(settle(&mut dom));
+        assert!(
+            held.take().is_empty(),
+            "the in-flight body queued no sibling"
+        );
+        for job in queued {
+            held.land(compute::run(job));
+        }
+        block_on(settle(&mut dom));
+        let compiled = dioxus_ssr::render(&dom);
+        assert!(compiled.contains(RENDERED_NOTE), "{compiled}");
+        assert!(!compiled.contains("body-pending"), "{compiled}");
+
+        // alpha breaks on disk; the batch invalidates its body, and the
+        // stale SVG holds the slot while the recompile is out
+        std::fs::write(
+            vault.path().join("permanent/alpha.typ"),
+            format!("{}#let x = (\n", note("alpha")),
+        )
+        .expect("the note is broken in place");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Permanent,
+                path: PathBuf::from("permanent/alpha.typ"),
+            }],
+        );
+        held.work(&mut dom);
+        let stale = dioxus_ssr::render(&dom);
+        assert!(stale.contains(RENDERED_NOTE), "the stale holds: {stale}");
+        assert!(!stale.contains("body-pending"), "{stale}");
+        assert!(!stale.contains("render-error"), "{stale}");
+
+        held.work(&mut dom);
+        let after = dioxus_ssr::render(&dom);
+        assert!(
+            after.contains("render-error"),
+            "the recompile reports: {after}"
         );
     }
 

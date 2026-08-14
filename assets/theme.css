@@ -299,6 +299,25 @@ body {
   user-select: none;
 }
 
+/* a block whose compile is still out on the compute tier: its raw source
+   in the prose face, dimmed, until the SVG lands
+   (adr/2026-08-async-caches-pending-stale.md) */
+.block-pending .pending-source {
+  margin: 4px 0;
+  padding: 8px;
+  color: var(--ink-muted);
+  font: 18px "Cormorant Garamond", serif;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* a body the tier has not answered yet, with no stale SVG to stand in:
+   a quiet gap the size the SVG will take */
+.body-pending {
+  height: 100%;
+}
+
 /* an empty line still occupies its line box, so the caret can rest on it */
 .source-line {
   min-height: 27px;

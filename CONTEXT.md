@@ -55,6 +55,24 @@ _Avoid_: connection status, sync state, health
 The mark on the chrome line rendering liveness in the same place in every state — dim when Watching, bright when not.
 _Avoid_: indicator, icon (unqualified)
 
+## Compute
+
+**Compute tier**:
+The seam every typst compile and index survey crosses instead of running on the UI thread; jobs go out, outcomes land back.
+_Avoid_: background worker (unqualified), async layer
+
+**Survey**:
+What one look at the built index yields — the rail's time notes, the open loops, the table's notes, the link edges — re-read whole per batch.
+_Avoid_: refresh (that is the act), query results
+
+**Pending**:
+A block or card body whose compile has not landed: the block shows its dimmed source, the body its stale SVG or a quiet gap.
+_Avoid_: loading, spinner state
+
+**Stale**:
+The last good SVG a card body keeps showing while its recompile is out; never an error, and gone once the fresh result lands.
+_Avoid_: cached copy (everything here is cached), placeholder
+
 ## Persistence
 
 **Atomic write**:
