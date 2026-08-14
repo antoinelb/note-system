@@ -150,12 +150,15 @@ impl From<VirtualizeError> for RenderError {
 
 /// One queued fragment compile: everything `render_svg` needs, carried to
 /// the compute tier, plus the content-addressed key the outcome lands back
-/// under (adr/2026-08-compute-tier-worker-seam.md). Content-addressing is
-/// why fragments need no staleness guard: a result is valid for its key
-/// forever, however late it lands.
+/// under (adr/2026-08-compute-tier-worker-seam.md). Content-addressing
+/// makes a result valid for its key however late it lands — except across
+/// a template change, the one compile input the key never carries, so the
+/// job also rides the cache's epoch
+/// (adr/2026-08-template-touch-clears-caches.md).
 #[derive(Debug)]
 pub struct FragmentJob {
     pub key: u64,
+    pub epoch: u64,
     root: PathBuf,
     note: PathBuf,
     source: String,
@@ -193,6 +196,11 @@ pub struct FragmentCache {
     entries: HashMap<u64, Result<String, String>>,
     touched: HashSet<u64>,
     inflight: HashSet<u64>,
+    /// Bumped by `clear` when the template changes: the template is the one
+    /// compile input outside the content-addressed key, so across its edits
+    /// every cached and in-flight result is wrong for its key
+    /// (adr/2026-08-template-touch-clears-caches.md).
+    epoch: u64,
 }
 
 impl FragmentCache {
@@ -230,6 +238,7 @@ impl FragmentCache {
         if self.inflight.insert(key) {
             FragmentView::Pending(Some(FragmentJob {
                 key,
+                epoch: self.epoch,
                 root: root.to_path_buf(),
                 note: note.to_path_buf(),
                 source: source.to_string(),
@@ -242,8 +251,18 @@ impl FragmentCache {
 
     /// A worker outcome landing. A key swept while its compile was out is
     /// re-inserted here and swept again next resegmentation — harmless,
-    /// content-addressing means the value is right whenever it arrives.
-    pub fn absorb(&mut self, key: u64, result: Result<String, String>) {
+    /// content-addressing means the value is right whenever it arrives —
+    /// unless the template changed since it was queued: then its epoch is
+    /// old and the result is dropped whole.
+    pub fn absorb(
+        &mut self,
+        key: u64,
+        epoch: u64,
+        result: Result<String, String>,
+    ) {
+        if epoch != self.epoch {
+            return;
+        }
         self.inflight.remove(&key);
         self.entries.insert(key, result);
     }
@@ -251,6 +270,16 @@ impl FragmentCache {
     pub fn sweep(&mut self) {
         self.entries.retain(|key, _| self.touched.contains(key));
         self.touched.clear();
+    }
+
+    /// A template change: every result, cached or in flight, compiled
+    /// against a file that no longer says that. The bump dooms late
+    /// outcomes; clearing in-flight lets the next probe re-queue.
+    pub fn clear(&mut self) {
+        self.epoch += 1;
+        self.entries.clear();
+        self.touched.clear();
+        self.inflight.clear();
     }
 }
 
@@ -583,13 +612,53 @@ mod tests {
         else {
             panic!("a repaint mid-flight queues nothing");
         };
-        cache.absorb(job.key, Ok("<svg/>".to_string()));
+        cache.absorb(job.key, job.epoch, Ok("<svg/>".to_string()));
         let FragmentView::Ready(Ok(svg)) =
             cache.probe(root, note, "= titre", RenderTheme::Dark)
         else {
             panic!("the landed outcome answers the next probe");
         };
         assert_eq!(svg, "<svg/>");
+    }
+
+    #[test]
+    fn a_cleared_fragment_cache_drops_the_outcomes_it_doomed() {
+        // the template changed while the compile was out: same key, wrong
+        // pixels — the epoch bump keeps the late landing out
+        let mut cache = FragmentCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let FragmentView::Pending(Some(doomed)) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("the first probe hands the job over");
+        };
+        cache.clear();
+        cache.absorb(doomed.key, doomed.epoch, Ok("<old/>".to_string()));
+        let FragmentView::Pending(Some(fresh)) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("nothing landed, so the cleared cache re-queues");
+        };
+        assert_eq!(fresh.key, doomed.key, "the key is content-addressed");
+        assert!(fresh.epoch > doomed.epoch, "the clear moved the epoch");
+    }
+
+    #[test]
+    fn a_cleared_fragment_cache_forgets_what_was_ready() {
+        let mut cache = FragmentCache::default();
+        let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
+        let FragmentView::Pending(Some(job)) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("the first probe hands the job over");
+        };
+        cache.absorb(job.key, job.epoch, Ok("<svg/>".to_string()));
+        cache.clear();
+        let FragmentView::Pending(Some(_)) =
+            cache.probe(root, note, "= titre", RenderTheme::Dark)
+        else {
+            panic!("the ready entry compiled against the old template");
+        };
     }
 
     #[test]

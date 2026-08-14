@@ -30,6 +30,11 @@ pub enum VaultChange {
         path: PathBuf,
     },
     Removed(PathBuf),
+    /// A file under `templates/` changed. The index reads no templates, but
+    /// every compile does — the change kind exists so the render caches hear
+    /// about the one input their keys never carry
+    /// (adr/2026-08-template-touch-clears-caches.md).
+    Template,
     Rescan,
 }
 
@@ -74,6 +79,8 @@ pub fn apply(
                 touch(index, root, *category, path)?
             }
             VaultChange::Removed(path) => index.remove_note(path)?,
+            // templates never reach the index; the change is for the caches
+            VaultChange::Template => {}
         }
     }
     Ok(())
@@ -93,6 +100,11 @@ fn changes_of(root: &Path, event: &DebouncedEvent) -> Vec<VaultChange> {
     if event.need_rescan() {
         return vec![VaultChange::Rescan];
     }
+    let template_touched = event
+        .event
+        .paths
+        .iter()
+        .any(|path| template_path(root, path));
     let note_paths = event
         .event
         .paths
@@ -100,13 +112,13 @@ fn changes_of(root: &Path, event: &DebouncedEvent) -> Vec<VaultChange> {
         .filter_map(|path| note_path(root, path))
         .collect::<Vec<_>>();
 
-    if note_paths.is_empty() {
+    if note_paths.is_empty() && !template_touched {
         return Vec::new();
     }
 
-    match event.event.kind {
+    let mut changes = match event.event.kind {
         EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_)) => {
-            Vec::new()
+            return Vec::new();
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
             let first_change = event
@@ -136,7 +148,11 @@ fn changes_of(root: &Path, event: &DebouncedEvent) -> Vec<VaultChange> {
         EventKind::Modify(ModifyKind::Name(_)) => vec![VaultChange::Rescan],
         EventKind::Create(_) | EventKind::Modify(_) => touched(note_paths),
         EventKind::Any | EventKind::Other => vec![VaultChange::Rescan],
+    };
+    if template_touched {
+        changes.push(VaultChange::Template);
     }
+    changes
 }
 
 fn note_path(root: &Path, path: &Path) -> Option<(NoteCategory, PathBuf)> {
@@ -148,6 +164,13 @@ fn note_path(root: &Path, path: &Path) -> Option<(NoteCategory, PathBuf)> {
         relative.parent().unwrap_or(Path::new("")).to_str()?,
     )?;
     Some((category, relative.to_path_buf()))
+}
+
+fn template_path(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|relative| {
+        relative.starts_with("templates")
+            && relative.extension() == Some(OsStr::new("typ"))
+    })
 }
 
 fn removed(note_paths: Vec<(NoteCategory, PathBuf)>) -> Vec<VaultChange> {
@@ -529,6 +552,60 @@ mod tests {
         assert_eq!(
             classify(root(), batch),
             vec![touched("permanent/a.typ"), removed("time/b.typ")]
+        );
+    }
+
+    // ---------------------------------------------------------- templates
+
+    #[test]
+    fn writing_or_removing_a_template_reports_a_template_touch() {
+        let kinds = [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Remove(RemoveKind::File),
+        ];
+        for kind in kinds {
+            assert_eq!(
+                classify_one(kind, &["templates/template.typ"]),
+                vec![VaultChange::Template],
+                "{kind:?} changes what every compile reads"
+            );
+        }
+    }
+
+    #[test]
+    fn reading_a_template_asks_for_nothing() {
+        assert_eq!(
+            classify_one(
+                EventKind::Access(notify::event::AccessKind::Read),
+                &["templates/template.typ"],
+            ),
+            Vec::new(),
+            "a read cannot change what the template says"
+        );
+    }
+
+    #[test]
+    fn a_non_typ_file_under_templates_is_not_a_template() {
+        assert_eq!(
+            classify_one(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                &["templates/notes.txt"],
+            ),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn one_event_touching_a_note_and_a_template_reports_both() {
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(
+            DataChange::Content,
+        )))
+        .add_path(root().join("permanent/a.typ"))
+        .add_path(root().join("templates/template.typ"));
+        assert_eq!(
+            classify_event(event),
+            vec![touched("permanent/a.typ"), VaultChange::Template]
         );
     }
 

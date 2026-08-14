@@ -127,17 +127,26 @@ fn index_writes_do_not_wake_the_watcher() {
 }
 
 #[test]
-fn editing_a_template_does_not_wake_the_watcher() {
-    let (dir, _index) = temp_vault();
+fn editing_a_template_wakes_the_watcher_for_the_caches() {
+    // templates never reach the index, but every compile reads them: the
+    // change kind exists so the render caches can clear
+    // (adr/2026-08-template-touch-clears-caches.md)
+    let (dir, mut index) = temp_vault();
     let watcher = VaultWatcher::start(dir.path()).expect("start watcher");
 
     std::fs::write(dir.path().join("templates/daily.typ"), "#let daily = 1")
         .expect("write template");
 
+    let batch = watcher
+        .changes
+        .recv_timeout(DELIVERY)
+        .expect("the template edit reaches the batch");
     assert!(
-        watcher.changes.recv_timeout(QUIET_GAP).is_err(),
-        "templates/ is not a note category"
+        batch.contains(&VaultChange::Template),
+        "the batch names the template touch: {batch:?}"
     );
+    apply(&mut index, dir.path(), &batch)
+        .expect("a template touch applies as an index no-op");
 }
 
 // ---------------------------------------------------------------- fallbacks

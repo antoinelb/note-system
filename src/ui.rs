@@ -421,6 +421,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // when a survey fails.
     use_hook({
         let root = root.clone();
+        let fragments = fragments.clone();
         let bodies = bodies.clone();
         let feed = feed.clone();
         move || {
@@ -446,16 +447,22 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         status.set_liveness(Liveness::Unwatched);
                         break;
                     };
-                    // the body cache hears about every change first, so the
-                    // repaint the survey triggers re-renders fresh bodies
-                    // (adr/2026-08-body-cache-per-note-svg.md)
+                    // the caches hear about every change first, so the
+                    // repaint the survey triggers re-renders fresh pixels
+                    // (adr/2026-08-body-cache-per-note-svg.md). A template
+                    // edit — and a rescan, whose lost events could have
+                    // been one — clears the fragments too: the template is
+                    // the compile input their keys never carry
+                    // (adr/2026-08-template-touch-clears-caches.md)
                     for change in &batch {
                         match change {
                             watch::VaultChange::Touched { path, .. }
                             | watch::VaultChange::Removed(path) => {
                                 bodies.borrow_mut().invalidate(path);
                             }
-                            watch::VaultChange::Rescan => {
+                            watch::VaultChange::Template
+                            | watch::VaultChange::Rescan => {
+                                fragments.borrow_mut().clear();
                                 bodies.borrow_mut().clear();
                             }
                         }
@@ -498,8 +505,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     let mut landed = false;
                     for outcome in burst.drain(..) {
                         match outcome {
-                            Outcome::Fragment { key, result } => {
-                                fragments.borrow_mut().absorb(key, result);
+                            Outcome::Fragment { key, epoch, result } => {
+                                fragments
+                                    .borrow_mut()
+                                    .absorb(key, epoch, result);
                                 landed = true;
                             }
                             Outcome::Body {
@@ -6978,6 +6987,7 @@ mod tests {
                 Job::Fragment(fragment) => {
                     held.land(Outcome::Fragment {
                         key: fragment.key,
+                        epoch: fragment.epoch,
                         result: Err("le typo".to_string()),
                     });
                 }
@@ -6988,6 +6998,33 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
         assert!(html.contains("le typo"), "{html}");
+    }
+
+    #[test]
+    fn a_template_touch_recompiles_the_open_notes_blocks() {
+        let vault = temp_vault();
+        let (mut dom, _, held, sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        held.work(&mut dom);
+        let ready = dioxus_ssr::render(&dom);
+        assert!(!ready.contains("pending-source"), "{ready}");
+
+        // the template changed: every cached pixel compiled against the
+        // old one (adr/2026-08-template-touch-clears-caches.md)
+        feed_batch(&mut dom, &sender, vec![watch::VaultChange::Template]);
+        for job in held.take() {
+            held.land(compute::run(job));
+        }
+        block_on(settle(&mut dom));
+        let pending = dioxus_ssr::render(&dom);
+        assert!(
+            pending.contains("pending-source"),
+            "the cleared blocks show their source again: {pending}"
+        );
+
+        held.work(&mut dom);
+        let again = dioxus_ssr::render(&dom);
+        assert!(!again.contains("pending-source"), "{again}");
     }
 
     #[test]
@@ -7054,6 +7091,7 @@ mod tests {
         let queued = held.take();
         held.land(Outcome::Fragment {
             key: 0,
+            epoch: 0,
             result: Ok(String::new()),
         });
         block_on(settle(&mut dom));

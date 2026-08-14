@@ -48,6 +48,7 @@ pub enum Job {
 pub enum Outcome {
     Fragment {
         key: u64,
+        epoch: u64,
         result: Result<String, String>,
     },
     Body {
@@ -68,6 +69,7 @@ pub fn run(job: Job) -> Outcome {
     match job {
         Job::Fragment(job) => Outcome::Fragment {
             key: job.key,
+            epoch: job.epoch,
             result: job.compile(),
         },
         Job::Body(job) => Outcome::Body {
