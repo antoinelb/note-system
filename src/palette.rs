@@ -31,6 +31,7 @@ pub enum CommandId {
     FilterCards,
     JumpToNote,
     ArrangeCluster,
+    Undo,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -46,7 +47,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 21] = [
+pub const COMMANDS: [Command; 22] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -161,6 +162,15 @@ pub const COMMANDS: [Command; 21] = [
         label: "arrange cluster",
         chord: None,
     },
+    // found by "undo"; the rendered row wears the register's own words
+    // for what it would take back — "undo delete <id>", "undo arrange"
+    // (adr/2026-08-app-level-undo-register.md). Chordless like delete:
+    // the reverse of a summon-and-name is a summon-and-name.
+    Command {
+        id: CommandId::Undo,
+        label: "undo",
+        chord: None,
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
@@ -183,6 +193,10 @@ pub struct Context {
     /// pair exists only while there is a side to pick
     /// (adr/2026-08-external-edit-conflict-commands.md).
     pub conflict: bool,
+    /// Whether the undo register holds anything: with nothing to take
+    /// back, "undo" would be a visible dead command
+    /// (adr/2026-08-app-level-undo-register.md).
+    pub undoable: bool,
 }
 
 /// The rows a query leaves: the available commands whose label contains the
@@ -222,6 +236,8 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::ArrangeCluster => context.sheet_open,
         // no conflict, no sides to pick
         CommandId::KeepMine | CommandId::TakeDisk => context.conflict,
+        // nothing held, nothing to take back
+        CommandId::Undo => context.undoable,
         _ => true,
     }
 }
@@ -237,6 +253,7 @@ mod tests {
         sheet_open: false,
         at_bodies: false,
         conflict: false,
+        undoable: false,
     };
     const READING: Context = Context {
         block_active: false,
@@ -244,6 +261,7 @@ mod tests {
         sheet_open: false,
         at_bodies: false,
         conflict: false,
+        undoable: false,
     };
     const AT_TABLE: Context = Context {
         block_active: false,
@@ -251,6 +269,7 @@ mod tests {
         sheet_open: false,
         at_bodies: false,
         conflict: false,
+        undoable: false,
     };
     const AT_SHEET: Context = Context {
         block_active: false,
@@ -258,6 +277,7 @@ mod tests {
         sheet_open: true,
         at_bodies: false,
         conflict: false,
+        undoable: false,
     };
     const AT_BODIES: Context = Context {
         block_active: false,
@@ -265,6 +285,7 @@ mod tests {
         sheet_open: false,
         at_bodies: true,
         conflict: false,
+        undoable: false,
     };
     const CONFLICTED: Context = Context {
         conflict: true,
@@ -303,6 +324,7 @@ mod tests {
                         && *label != "jump to note"
                         && *label != "keep mine"
                         && *label != "take disk"
+                        && *label != "undo"
                 })
                 .collect::<Vec<_>>()
         );
@@ -311,7 +333,7 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 11);
+        assert_eq!(visible.len(), COMMANDS.len() - 12);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
     }
@@ -324,6 +346,7 @@ mod tests {
             sheet_open: false,
             at_bodies: false,
             conflict: false,
+            undoable: false,
         };
         const EDITING_AT_SHEET: Context = Context {
             block_active: true,
@@ -331,6 +354,7 @@ mod tests {
             sheet_open: true,
             at_bodies: false,
             conflict: false,
+            undoable: false,
         };
         // the logs show the block; the bare table hides it behind the
         // screen; the sheet shows it again
@@ -372,6 +396,16 @@ mod tests {
         assert_eq!(labels(&filter("disk", READING)), Vec::<&str>::new());
         assert_eq!(labels(&filter("mine", CONFLICTED)), vec!["keep mine"]);
         assert_eq!(labels(&filter("disk", CONFLICTED)), vec!["take disk"]);
+    }
+
+    #[test]
+    fn undo_exists_only_with_something_to_undo() {
+        const UNDOABLE: Context = Context {
+            undoable: true,
+            ..READING
+        };
+        assert_eq!(labels(&filter("undo", READING)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("undo", UNDOABLE)), vec!["undo"]);
     }
 
     #[test]
@@ -435,7 +469,8 @@ mod tests {
                 "notices",
                 "keep mine",
                 "take disk",
-                "arrange cluster"
+                "arrange cluster",
+                "undo"
             ]
         );
         let mut names: Vec<&str> =

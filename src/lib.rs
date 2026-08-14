@@ -24,6 +24,7 @@ pub mod table;
 pub mod template;
 pub mod time;
 pub mod ui;
+pub mod undo;
 pub mod vault;
 pub mod vim;
 pub mod watch;

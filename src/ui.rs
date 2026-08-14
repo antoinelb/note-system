@@ -28,6 +28,7 @@ use crate::render::{
 use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
+use crate::undo;
 use crate::vim;
 use crate::watch;
 
@@ -337,6 +338,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // query and highlight in their own
     // (adr/2026-08-command-palette-overlay-shape.md)
     let mut palette = use_signal(|| None::<Palette>);
+    // the app-level undo register: the before-images delete and arrange
+    // leave behind (adr/2026-08-app-level-undo-register.md)
+    let mut undo_register = use_signal(undo::Register::default);
     let mut palette_query = use_signal(String::new);
     let mut palette_highlighted = use_signal(|| 0usize);
 
@@ -748,6 +752,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // remove, the sheet still deserves to close
             let file =
                 editor.peek().note().map(|(file, _)| file.to_path_buf());
+            // the before-image, taken while the file still answers: its
+            // text and its card's coordinates are everything the undo
+            // restores (adr/2026-08-app-level-undo-register.md)
+            let intent = file.as_ref().and_then(|file| {
+                std::fs::read_to_string(file).ok().map(|text| {
+                    undo::Intent::Delete {
+                        path: file.clone(),
+                        id: own.clone(),
+                        text,
+                        position: positions.peek().get(&own),
+                    }
+                })
+            });
             if let Some(file) = file
                 && let Err(error) = std::fs::remove_file(&file)
             {
@@ -755,6 +772,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     .write()
                     .report(Notice::delete_failed(&error.to_string()));
                 return;
+            }
+            if let Some(intent) = intent {
+                undo_register.write().push(intent);
             }
             sheet.set(None);
             positions.write().remove(&own);
@@ -923,6 +943,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             let ids: Vec<String> =
                 seed.iter().map(|(id, _)| id.clone()).collect();
             let laid = crate::arrange::arrange(&ids, &edges.peek(), &seed);
+            // the before-image: every card about to move, at its prior
+            // coordinates — `None` for an auto-placed card, whose reverse
+            // is unpinning; an arrange that moved nothing leaves nothing
+            // to take back (adr/2026-08-app-level-undo-register.md)
+            let before = (!laid.is_empty()).then(|| undo::Intent::Arrange {
+                prior: laid
+                    .iter()
+                    .map(|(id, _)| (id.clone(), positions.peek().get(id)))
+                    .collect(),
+            });
+            before
+                .into_iter()
+                .for_each(|intent| undo_register.write().push(intent));
             // one write: one repaint, one debounce restart
             positions.with_mut(|store| {
                 for (id, (x, y)) in &laid {
@@ -930,6 +963,47 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 }
             });
         }
+    });
+
+    // the last destruction, taken back
+    // (adr/2026-08-app-level-undo-register.md): a deleted note returns
+    // exactly as it left — `create_new`, never a clobber of a path that
+    // holds a living file again — and an arrange returns every card it
+    // moved. The card itself reappears when the watcher converges, the
+    // same trust the delete's own landing half leans on. The palette hides
+    // the command when the register is empty, so the pop is combinator-fed
+    // rather than guarded.
+    let undo_last = use_callback(move |()| {
+        let intent = undo_register.write().pop();
+        intent.into_iter().for_each(|intent| match intent {
+            undo::Intent::Delete {
+                path,
+                id,
+                text,
+                position,
+            } => match crate::persist::create_new(&path, &text) {
+                Ok(()) => {
+                    if let Some((x, y)) = position {
+                        positions.write().set(&id, x, y);
+                    }
+                }
+                Err(error) => {
+                    status
+                        .write()
+                        .report(Notice::undo_failed(&error.to_string()));
+                }
+            },
+            undo::Intent::Arrange { prior } => {
+                positions.with_mut(|store| {
+                    for (id, at) in &prior {
+                        match at {
+                            Some((x, y)) => store.set(id, *x, *y),
+                            None => store.remove(id),
+                        }
+                    }
+                });
+            }
+        });
     });
 
     // the small movements, lifted so chord, button, wheel and palette all
@@ -1121,6 +1195,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             sheet_open: sheet.peek().is_some(),
             at_bodies: *zoom.peek() == table::Zoom::Bodies,
             conflict: status.peek().has(Source::Conflict),
+            undoable: undo_register.peek().label().is_some(),
         }));
     });
 
@@ -1190,6 +1265,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 palette::CommandId::ArrangeCluster => {
                     arrange_cluster.call(());
                 }
+                palette::CommandId::Undo => undo_last.call(()),
             }
         });
 
@@ -1829,9 +1905,24 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 sheet_open: frozen.sheet_open,
                 at_bodies: frozen.at_bodies,
                 conflict: frozen.conflict,
+                undoable: frozen.undoable,
             },
         );
-        (frozen, matches)
+        // the undo row wears the register's words for what it would take
+        // back; every other row keeps its registry label
+        // (adr/2026-08-app-level-undo-register.md)
+        let rows: Vec<(&palette::Command, String)> = matches
+            .into_iter()
+            .map(|command| {
+                let label = match command.id {
+                    palette::CommandId::Undo => undo_register.read().label(),
+                    _ => None,
+                }
+                .unwrap_or_else(|| command.label.to_string());
+                (command, label)
+            })
+            .collect();
+        (frozen, rows)
     });
     // the creator's rows, the same clone-out; only step 1 has rows to filter
     let open_creator_view = creator().map(|frozen| {
@@ -2204,7 +2295,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     Key::Enter => {
                                         // no matches: the keystroke does
                                         // nothing rather than guessing
-                                        if let Some(command) = matches.get(palette_highlighted()) {
+                                        if let Some((command, _)) = matches.get(palette_highlighted()) {
                                             run_command.call((frozen, command.id));
                                         }
                                     }
@@ -2226,16 +2317,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         if rows.is_empty() {
                             div { class: "picker-empty", "no matching command" }
                         }
-                        for (rank, command) in rows.into_iter().enumerate() {
+                        for (rank, (command, label)) in rows.into_iter().enumerate() {
                             div {
-                                key: "{command.label}",
+                                key: "{label}",
                                 class: "palette-row",
                                 class: if rank == palette_highlighted() { "selected" },
                                 onclick: {
                                     let id = command.id;
                                     move |_| run_command.call((frozen, id))
                                 },
-                                span { class: "palette-label", "{command.label}" }
+                                span { class: "palette-label", "{label}" }
                                 if let Some(chord) = command.chord {
                                     span { class: "palette-chord", "{chord}" }
                                 }
@@ -3286,6 +3377,9 @@ struct Palette {
     /// pair exists only while there is a side to pick
     /// (adr/2026-08-external-edit-conflict-commands.md).
     conflict: bool,
+    /// Whether the undo register held anything: an empty register hides
+    /// the command (adr/2026-08-app-level-undo-register.md).
+    undoable: bool,
 }
 
 /// The open create overlay's fixed half — the `Palette` idiom with one more
@@ -9229,6 +9323,163 @@ mod tests {
         // simply closes
         assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
         assert!(vault.path().join("permanent/alpha.typ").exists());
+    }
+
+    // -- the undo register (adr/2026-08-app-level-undo-register.md) ----------
+
+    #[test]
+    fn undo_after_delete_restores_the_file_and_its_position() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // a jittered click pins the position before the delete takes it
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (103.0, 98.0));
+        mouse(&mut dom, "mouseup", pane, (103.0, 98.0));
+        let path = vault.path().join("permanent/alpha.typ");
+        let original =
+            std::fs::read_to_string(&path).expect("the note is readable");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(!path.exists(), "the delete landed");
+
+        // the row wears the register's words, and running it restores the
+        // note exactly as it left — text and card both
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        assert!(
+            palette_labels(&dom).contains(&"undo delete alpha".to_string()),
+            "{:?}",
+            palette_labels(&dom)
+        );
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the note is back"),
+            original
+        );
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert!(saved.contains("alpha "), "the position returned: {saved}");
+
+        // spent: the register is empty and the command hides again
+        let _ = open_palette(&mut dom, keys);
+        assert!(
+            !palette_labels(&dom)
+                .iter()
+                .any(|label| label.contains("undo")),
+            "{:?}",
+            palette_labels(&dom)
+        );
+    }
+
+    #[test]
+    fn an_undo_onto_a_recreated_note_refuses_and_reports() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        // the path holds a living file again: the register never clobbers
+        let path = vault.path().join("permanent/alpha.typ");
+        std::fs::write(&path, "= imposteur\n").expect("the note is reborn");
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        // the bare table carries no notice line; the logs pane does
+        click(&mut dom, clicks[CHROME_LOGS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("undo:"), "the refusal surfaced: {html}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the reborn note stands"),
+            "= imposteur\n"
+        );
+    }
+
+    #[test]
+    fn undo_of_an_unpinned_delete_restores_no_position() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            vault.path().join("permanent/alpha.typ").exists(),
+            "the note is back"
+        );
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the idle tick still writes the store");
+        assert!(
+            !saved.contains("alpha"),
+            "an unpinned card comes back unpinned: {saved}"
+        );
+    }
+
+    #[test]
+    fn undo_arrange_returns_every_card_it_moved() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            linking(note("beta"), "alpha"),
+        )
+        .expect("the linking note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // alpha pinned by hand, beta auto-placed beside it
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (103.0, 98.0));
+        mouse(&mut dom, "mouseup", pane, (103.0, 98.0));
+        block_on(settle(&mut dom));
+        let before =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the pin persisted");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "arrange");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        let arranged =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the arrange persisted");
+        assert!(arranged.contains("beta "), "the arrange pinned beta");
+
+        // the reverse: alpha back to its hand-picked spot, beta unpinned
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        assert!(
+            palette_labels(&dom).contains(&"undo arrange".to_string()),
+            "{:?}",
+            palette_labels(&dom)
+        );
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        let after =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the undo persisted");
+        assert_eq!(after, before, "every card returned: {after}");
     }
 
     #[test]

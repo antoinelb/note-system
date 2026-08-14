@@ -59,6 +59,7 @@ pub enum Source {
     Delete,
     Create,
     Index,
+    Undo,
 }
 
 /// Whether the index tracks the vault — rendered by the chrome's liveness
@@ -278,6 +279,17 @@ impl Notice {
             severity: Severity::Warning,
             source: Source::Delete,
             text: format!("delete: {detail} — the note is still on disk"),
+        }
+    }
+
+    /// An undo that could not restore its note — most often because the
+    /// path holds a living file again; the register never overwrites one
+    /// (adr/2026-08-app-level-undo-register.md).
+    pub fn undo_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Undo,
+            text: format!("undo: {detail}"),
         }
     }
 

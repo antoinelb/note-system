@@ -73,6 +73,16 @@ _Avoid_: loading, spinner state
 The last good SVG a card body keeps showing while its recompile is out; never an error, and gone once the fresh result lands.
 _Avoid_: cached copy (everything here is cached), placeholder
 
+## Actions
+
+**Undo register**:
+The bounded, in-memory stack of before-images the note-level destructions (delete, arrange) leave behind; one palette command takes the last one back.
+_Avoid_: history (that is the editor's vim-grain one), trash
+
+**Before-image**:
+What an intent holds at the moment of destruction — a deleted note's text and card coordinates, an arrange's prior positions — everything its reverse needs.
+_Avoid_: snapshot (unqualified), backup
+
 ## Persistence
 
 **Atomic write**:
