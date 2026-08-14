@@ -95,12 +95,13 @@ Both screens carry the open-loops ember in the top line; clicking it opens a fla
 
 ## Friction system
 
-One **open-loops panel**, always accessible, showing three kinds of debt:
+One **open-loops panel**, always accessible, showing the kinds of debt:
 
 1. Captures without a self-written summary.
 2. AI-suggested links neither written nor dismissed.
 3. Dangling `#l(..)` references to notes that don't exist.
 4. Notes with missing or unparseable `#meta` (typeless notes) — load-bearing now that type lives only in metadata, not in the path.
+5. Notes the index could not read cleanly — malformed `#meta` fields, a parse truncated at its node cap — read back from the anomalies the index records (`adr/2026-08-anomalies-join-the-loops.md`).
 
 Nothing blocks saving or writing; the debt is simply always visible.
 The list itself carries no ages, no grouping and no per-item actions (`adr/2026-07-debt-counter-then-list.md`) — age surfaces on the table instead, in the capture card's own label ("capture · 3 d"), which is v1.

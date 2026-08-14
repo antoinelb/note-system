@@ -458,6 +458,39 @@ impl Index {
             },
         )
     }
+
+    /// Every note carrying an anomaly, one row per (note, family) — the
+    /// malformed `#meta` the parser recorded, the truncations the walk
+    /// hit — read back for the loops list
+    /// (adr/2026-08-anomalies-join-the-loops.md); until then the table
+    /// was write-only. The family is already the loops-list label.
+    pub fn anomalies(&self) -> Result<Vec<(PathBuf, String)>, IndexError> {
+        let kinds = query_rows(
+            &self.connection,
+            concat!(
+                "SELECT DISTINCT note_path, kind ",
+                "FROM anomalies ORDER BY note_path, kind"
+            ),
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        // the kinds fold into the two loops-list families, deduplicated in
+        // query order — a note with five malformed fields is one problem
+        // ponytail: linear contains — the list is as small as the debt
+        let mut families: Vec<(PathBuf, String)> = Vec::new();
+        for (path, kind) in kinds {
+            let family = if kind == "truncated" {
+                "truncated"
+            } else {
+                "malformed meta"
+            };
+            let entry = (PathBuf::from(path), family.to_string());
+            if !families.contains(&entry) {
+                families.push(entry);
+            }
+        }
+        Ok(families)
+    }
 }
 
 pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
@@ -484,6 +517,7 @@ pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
                     title: parsed_note.title,
                     links: parsed_note.links,
                     summarized: parsed_note.summarized,
+                    truncated: parsed_note.truncated,
                 })
             }
         }
@@ -603,6 +637,17 @@ fn insert_note(
                 "VALUES (?1, ?2, ?3, ?4)"
             ),
             rusqlite::params![note.path.to_string_lossy(), kind, field, raw],
+        )?;
+    }
+    // note-level, not a meta anomaly: a truncated walk may have missed the
+    // `#meta` itself (adr/2026-08-anomalies-join-the-loops.md)
+    if note.truncated {
+        transaction.execute(
+            concat!(
+                "INSERT INTO anomalies (note_path, kind, field, raw)",
+                "VALUES (?1, 'truncated', NULL, NULL)"
+            ),
+            rusqlite::params![note.path.to_string_lossy()],
         )?;
     }
     Ok(())
@@ -1347,6 +1392,59 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_truncation_row_surfaces_on_its_own() {
+        // rich_note's meta anomalies would hit the refusal first; a note
+        // whose only anomaly is the truncation reaches the second insert
+        let (_dir, mut index) = temp_index();
+        refuse(
+            &index,
+            move |action| matches!(action, AuthAction::Insert { table_name } if *table_name == "anomalies"),
+        );
+        let mut bare = rich_note();
+        if let MetaStatus::Present(meta) = &mut bare.meta {
+            meta.anomalies.clear();
+        }
+        assert!(matches!(index.rebuild(&[bare]), Err(IndexError::Sqlite(_))));
+    }
+
+    #[test]
+    fn anomalies_report_rows_that_will_not_decode() {
+        // one blob per column read, so each `?` in the closure fires; the
+        // pragma lets the orphan rows land without a parent note
+        for plant in [
+            "PRAGMA foreign_keys = off;
+             INSERT INTO anomalies (note_path, kind)
+             VALUES (x'00', 'malformed-field');",
+            "PRAGMA foreign_keys = off;
+             INSERT INTO anomalies (note_path, kind)
+             VALUES ('permanent/host.typ', x'00');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the blob row");
+            assert!(matches!(index.anomalies(), Err(IndexError::Sqlite(_))));
+        }
+    }
+
+    #[test]
+    fn anomalies_read_back_one_row_per_note_and_family() {
+        let (_dir, mut index) = temp_index();
+        index.rebuild(&[rich_note()]).expect("seed the index");
+        assert_eq!(
+            index.anomalies().expect("the anomalies read"),
+            vec![
+                (
+                    PathBuf::from("permanent/rich.typ"),
+                    "malformed meta".to_string()
+                ),
+                (PathBuf::from("permanent/rich.typ"), "truncated".to_string()),
+            ],
+            "three meta anomalies fold into one family row"
+        );
+    }
+
+    #[test]
     fn query_paths_reports_a_parameter_count_mismatch() {
         let (_dir, index) = temp_index();
         assert!(matches!(
@@ -1543,6 +1641,7 @@ mod tests {
                 target: NoteId("elsewhere".to_string()),
             }],
             summarized: true,
+            truncated: true,
         }
     }
 }

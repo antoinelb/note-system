@@ -9,9 +9,11 @@ use crate::index::DanglingLink;
 use crate::logs::STILL_OPEN;
 
 /// Every open loop, one line each, in query order: typeless notes, then
-/// dangling links, then captures still owing their summary
-/// (`adr/2026-08-loops-list-overlay.md`). The count in the chrome is this
-/// list's length, so the ember and the list cannot disagree.
+/// dangling links, then captures still owing their summary, then the
+/// notes the index could not read cleanly
+/// (`adr/2026-08-loops-list-overlay.md`,
+/// `adr/2026-08-anomalies-join-the-loops.md`). The count in the chrome is
+/// this list's length, so the ember and the list cannot disagree.
 ///
 /// Notes are named by their stem, which is their id — the label the rest of
 /// the app shows them under. The tag after the `·` says which loop it is,
@@ -21,6 +23,7 @@ pub fn lines(
     typeless: &[PathBuf],
     dangling: &[DanglingLink],
     unsummarized: &[PathBuf],
+    anomalous: &[(PathBuf, String)],
 ) -> Vec<String> {
     let typeless = typeless
         .iter()
@@ -31,7 +34,14 @@ pub fn lines(
     let unsummarized = unsummarized
         .iter()
         .map(|path| format!("{} · {STILL_OPEN}", stem_of(path)));
-    typeless.chain(dangling).chain(unsummarized).collect()
+    let anomalous = anomalous
+        .iter()
+        .map(|(path, family)| format!("{} · {family}", stem_of(path)));
+    typeless
+        .chain(dangling)
+        .chain(unsummarized)
+        .chain(anomalous)
+        .collect()
 }
 
 #[cfg(test)]
@@ -54,18 +64,30 @@ mod tests {
                 &[PathBuf::from("permanent/mystere.typ")],
                 &[dangling("time/2026-07-22.typ", "fantome")],
                 &[PathBuf::from("capture/capture-articles-zettel.typ")],
+                &[
+                    (
+                        PathBuf::from("permanent/bancal.typ"),
+                        "malformed meta".to_string(),
+                    ),
+                    (
+                        PathBuf::from("permanent/fleuve.typ"),
+                        "truncated".to_string(),
+                    ),
+                ],
             ),
             vec![
                 "mystere · typeless".to_string(),
                 "2026-07-22 → fantome · dangling".to_string(),
                 "capture-articles-zettel · still open".to_string(),
+                "bancal · malformed meta".to_string(),
+                "fleuve · truncated".to_string(),
             ]
         );
     }
 
     #[test]
     fn a_vault_with_nothing_open_lists_nothing() {
-        assert_eq!(lines(&[], &[], &[]), Vec::<String>::new());
+        assert_eq!(lines(&[], &[], &[], &[]), Vec::<String>::new());
     }
 
     #[test]
@@ -74,7 +96,8 @@ mod tests {
             &[PathBuf::from("a.typ"), PathBuf::from("b.typ")],
             &[dangling("c.typ", "x"), dangling("c.typ", "y")],
             &[PathBuf::from("d.typ")],
+            &[(PathBuf::from("e.typ"), "malformed meta".to_string())],
         );
-        assert_eq!(list.len(), 5, "the count is the list: {list:?}");
+        assert_eq!(list.len(), 6, "the count is the list: {list:?}");
     }
 }

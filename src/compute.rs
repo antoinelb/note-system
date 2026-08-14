@@ -209,6 +209,7 @@ pub fn open_loops(index: &Index) -> Result<Vec<String>, IndexError> {
         &index.typeless_notes()?,
         &index.dangling_links()?,
         &index.unsummarized_captures()?,
+        &index.anomalies()?,
     ))
 }
 

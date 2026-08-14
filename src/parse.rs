@@ -20,6 +20,11 @@ pub struct ParsedNote {
     /// Whether the note's `== Summary` section has anything in it. Only
     /// captures are ever asked, but every note is parsed the same way.
     pub summarized: bool,
+    /// Whether the walk hit its node cap before the tree ended: whatever
+    /// lay beyond — links, even the `#meta` — was never seen, and the
+    /// index records that instead of staying silent
+    /// (adr/2026-08-anomalies-join-the-loops.md).
+    pub truncated: bool,
 }
 
 pub fn parse_note(source: &str) -> ParsedNote {
@@ -64,6 +69,7 @@ pub fn parse_note(source: &str) -> ParsedNote {
         title,
         links,
         summarized: summarized(&root),
+        truncated: !stack.is_empty(),
     }
 }
 
@@ -412,6 +418,19 @@ mod tests {
             stack.extend(node.children().rev());
         }
         panic!("no named argument found in the probe source");
+    }
+
+    #[test]
+    fn a_note_past_the_node_cap_reports_its_truncation() {
+        // enough headings to exhaust the walk, with the link beyond the
+        // cap: before adr/2026-08-anomalies-join-the-loops.md the loss
+        // was silent
+        let mut source = "= t\n\n".repeat(MAX_NODES / 2);
+        source.push_str("#l(\"perdu\")\n");
+        let parsed = parse_note(&source);
+        assert!(parsed.truncated, "the walk gave up before the end");
+        assert_eq!(parsed.links, vec![], "the far link was never seen");
+        assert!(!parse_note("= titre\n").truncated);
     }
 
     #[test]

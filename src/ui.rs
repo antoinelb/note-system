@@ -3989,6 +3989,27 @@ mod tests {
         assert!(html.contains(r#"class="ember">3</span>"#), "{html}");
     }
 
+    #[test]
+    fn a_note_the_index_reads_dirty_joins_the_loops() {
+        // the anomaly the index records is debt to see, not a silent
+        // default (adr/2026-08-anomalies-join-the-loops.md)
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/bancal.typ"),
+            "#meta(id: 42)\n\n= Bancal\n",
+        )
+        .expect("the malformed note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[EMBER]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("bancal · malformed meta"),
+            "the dirty read shows beside the typeless debt it caused: {html}"
+        );
+        assert!(html.contains("bancal · typeless"), "{html}");
+    }
+
     // -- the two screens: icons, chords, palette entries ---------------------
 
     #[test]
@@ -6541,6 +6562,19 @@ mod tests {
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE links");
         let error = survey(&index).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_vanished_anomalies_table_fails_only_the_loops_last_leg() {
+        // the one sabotage the three sibling loops queries survive: only
+        // the anomalies read fails (adr/2026-08-anomalies-join-the-loops.md)
+        let vault = temp_vault();
+        let index = sabotaged_index(vault.path(), "DROP TABLE anomalies");
+        assert!(index.typeless_notes().is_ok());
+        assert!(index.dangling_links().is_ok());
+        assert!(index.unsummarized_captures().is_ok());
+        let error = open_loops(&index).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 

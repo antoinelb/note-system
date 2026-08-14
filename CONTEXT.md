@@ -25,6 +25,10 @@ _Avoid_: toolbar, header, status bar
 The count of open loops shown on the chrome line.
 _Avoid_: badge, debt counter
 
+**Anomaly**:
+A fact the index records about a note it could not read cleanly — a malformed `#meta` field, a walk truncated at its cap — surfaced as open-loops debt.
+_Avoid_: parse error (nothing fails), warning (that is a notice severity)
+
 ## Status
 
 **Status**:

@@ -856,6 +856,7 @@ fn note(
             })
             .collect(),
         summarized: false,
+        truncated: false,
     }
 }
 
@@ -880,6 +881,7 @@ fn anomalous_note() -> Note {
         title: None,
         links: vec![],
         summarized: false,
+        truncated: false,
     }
 }
 

@@ -145,6 +145,10 @@ pub struct Note {
     /// Only captures are asked, and an unsummarized one is open-loops debt
     /// (adr/2026-08-summarized-nonempty-summary-section.md).
     pub summarized: bool,
+    /// The parse hit its node cap: links or meta beyond it were never
+    /// seen, indexed as an anomaly rather than silence
+    /// (adr/2026-08-anomalies-join-the-loops.md).
+    pub truncated: bool,
 }
 
 /// A note's filename without its extension, which is its id for every note
