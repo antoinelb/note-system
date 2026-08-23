@@ -1369,7 +1369,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             keymap::Action::Insert(text) => {
                 editor.write().insert_at_caret(&text);
             }
-            keymap::Action::NewLine => editor.write().insert_at_caret("\n"),
+            keymap::Action::NewLine => editor.write().insert_newline(),
             keymap::Action::Backspace => {
                 editor.write().delete_at_caret(Deletion::Back);
             }
@@ -5763,6 +5763,22 @@ mod tests {
         assert!(
             dioxus_ssr::render(&dom).contains(r#"class="caret-box""#),
             "the box is back"
+        );
+    }
+
+    #[test]
+    fn insert_mode_enter_completes_a_quote_line() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        retype(&mut dom, sink, "> Une idée _importante_. _Simone Weil_\n");
+
+        assert_eq!(
+            source_of(&dom),
+            "#quote(block: true, attribution: [Simone Weil])\
+             [Une idée _importante_.]\n"
         );
     }
 

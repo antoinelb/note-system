@@ -91,6 +91,20 @@
   set text(font: "Cormorant Garamond", size: 13.5pt, fill: palette.ink)
   set par(leading: 0.75em)
   show heading.where(level: 1): set text(size: 24pt, weight: 600)
+  // Quotes use a non-colour rule as well as the muted palette role, so the
+  // boundary survives every theme and greyscale reproduction.
+  show quote.where(block: true): it => block(
+    width: 100%,
+    above: 0pt,
+    below: 0pt,
+    inset: (left: 8pt),
+    stroke: (left: 0.5pt + palette.muted),
+  )[
+    #it.body#if it.attribution != none {
+      h(0.35em)
+      emph(it.attribution)
+    }
+  ]
   // `- [ ]` renders as an open task circle, `- [x]` as a done one with the
   // text struck; in markup the brackets are plain text, so the match reads
   // the item's leading children (adr/2026-07-checklist-rendering.md)

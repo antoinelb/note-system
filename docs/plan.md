@@ -78,6 +78,8 @@ Both screens carry the open-loops ember in the top line; clicking it opens a fla
 ## Editor
 
 - **Hybrid block editing from v0**: the block containing the cursor shows raw typst source; all other blocks show rendered output. Per-block (not per-line) because typst constructs span lines and only compile as complete expressions.
+- In insert mode, Enter completes a line shaped as `> quote _attribution_` into a native block `#quote`, with only a trailing emphasized span becoming attribution.
+  The shared template renders block quotes with a muted left rule, so the shorthand stays valid vanilla typst rather than becoming a second file syntax (`adr/2026-08-greater-than-expands-to-quote.md`).
 - Rendering: embed the typst compiler (Rust crate) — compile note → SVG, cache per note, invalidate on edit. Fast enough at this scale.
   Compiles, index surveys and vault scans run on a compute tier — worker threads behind one seam — never on the UI thread; a block whose compile is pending shows its dimmed source, a card body keeps its last good SVG (`adr/2026-08-compute-tier-worker-seam.md`, `adr/2026-08-async-caches-pending-stale.md`).
 - **Vim later, but architected for now**: keep a clean separation between the text buffer/edit-command layer and the widget layer, so a modal keymap can be inserted without rewriting the editor. No mature code-editor widget exists for Dioxus; the editor is built on primitives and is the highest-effort component of the project.
