@@ -242,18 +242,6 @@ impl Notice {
         }
     }
 
-    /// A watcher that died mid-session — same consequence, said at the
-    /// moment it becomes true.
-    pub fn watcher_stopped() -> Notice {
-        Notice {
-            severity: Severity::Warning,
-            source: Source::Watcher,
-            text: "the vault is no longer watched — outside edits \
-                   will not appear"
-                .to_string(),
-        }
-    }
-
     /// A vault whose skeleton would not seed: the default templates the
     /// binary carries could not land, so creating notes may fail too
     /// (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
@@ -504,7 +492,6 @@ mod tests {
                 .text
                 .contains("outside edits")
         );
-        assert!(Notice::watcher_stopped().text.contains("no longer"));
         assert_eq!(Notice::captured("c-1").text, "captured c-1");
         assert!(Notice::capture_failed("boom").text.starts_with("capture:"));
         assert!(Notice::delete_failed("boom").text.contains("still on disk"));

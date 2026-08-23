@@ -466,12 +466,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             spawn(async move {
                 loop {
                     let Some(batch) = changes.recv().await else {
-                        // the sender died mid-session: the screen keeps the
-                        // index it has, and the glyph says so instead of
-                        // freezing quietly in the past
-                        let mut status = status.write();
-                        status.report(Notice::watcher_stopped());
-                        status.set_liveness(Liveness::Unwatched);
+                        // The screen keeps the index it has, while the
+                        // liveness glyph carries the stopped watcher's state.
+                        status.write().set_liveness(Liveness::Unwatched);
                         break;
                     };
                     // the caches hear about every change first, so the
@@ -7018,7 +7015,7 @@ mod tests {
     }
 
     #[test]
-    fn a_watcher_that_stops_ends_the_task_rather_than_spinning() {
+    fn a_watcher_that_stops_is_silent_and_ends_the_task() {
         let vault = temp_vault();
         let (mut dom, _, sender) =
             watched_app(Some(vault.path().to_path_buf()));
@@ -7029,9 +7026,10 @@ mod tests {
             html.contains("rail-id"),
             "the screen stands, it just stops hearing about the vault"
         );
-        // and it says so: the glyph fills and the notice names the loss
+        // the glyph carries the state without interrupting the note
         assert!(html.contains("liveness-unwatched"), "{html}");
-        assert!(html.contains("no longer watched"), "{html}");
+        assert!(!html.contains("no longer watched"), "{html}");
+        assert!(!html.contains("notice-warning"), "{html}");
     }
 
     #[test]
