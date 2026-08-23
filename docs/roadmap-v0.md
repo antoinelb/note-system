@@ -9,7 +9,7 @@ UI direction for every screen below: `design/wireframes-v0.md` (Part I) and `adr
 
 ## How we work
 
-- The only goal is building the note system (`adr/2026-07-goal-build-only.md`) — Codex is the primary implementation agent, Claude remains supported in parallel, and Antoine directs and decides (`adr/2026-08-codex-and-claude-run-in-parallel.md`).
+- The only goal is building the note system (`adr/2026-07-goal-build-only.md`) — Claude is the implementation agent and Antoine directs and decides (`adr/2026-08-implementation-is-claudes-job.md`, `adr/2026-08-codex-removed.md`).
 - Items marked **→ ADR** are decisions to take together at the start of the task, then record in `docs/adr/`.
 - A phase is done when its exit criterion holds and `make test` passes with 100% coverage (phases 2+); a shortfall on regions is diagnosed per instantiation before writing any test (`adr/2026-07-coverage-100-percent-lines.md`).
 - Per-task loop: discuss approach → decisions become ADRs → implement with tests until green → commit.
