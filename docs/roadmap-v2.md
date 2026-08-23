@@ -33,7 +33,7 @@ This is the editor's second iceberg (`plan.md` § Known risks 1 still applies); 
 - [x] The textarea's free features, hand-rolled — the exact costs `adr/2026-07-hybrid-active-block-textarea.md` priced in when it deferred them:
   - [x] key handling and key repeat;
   - [x] selection: Shift-arrows, mouse drag, a drawn highlight (phase 4's visual mode will reuse the drawing);
-  - [x] clipboard: Ctrl+C/X/V through injected seams — the `navigator.clipboard` pattern capture already uses, plus a write seam;
+  - [x] clipboard: Ctrl+C/X/V through injected seams — native reads on one bounded worker (`adr/2026-08-clipboard-reads-are-native.md`), plus the existing write seam;
   - [x] **French dead-key composition** (`^` + `e` → `ê`) via composition events on a hidden IME sink (`adr/2026-08-hidden-ime-sink.md`) — spike-verified on WebKitGTK before implementation.
 - [x] The caret seams dissolve: `CaretProbe` and `CaretWriter` retired with their staleness rules — slides, the link picker and every overlay read and write app state directly; a `HitProbe` seam answers mouse geometry, which stays the webview's.
 - [x] ~~Undo cannot lapse~~ **Phase 0 ships without undo** (`adr/2026-08-no-stopgap-undo-in-phase-0.md`): the textarea's native undo already died on every remount, so the stopgap was cut with the user; vim-grain undo is born in phase 5.

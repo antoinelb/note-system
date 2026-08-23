@@ -60,6 +60,7 @@ pub enum Source {
     Create,
     Index,
     Undo,
+    Clipboard,
 }
 
 /// Whether the index tracks the vault — rendered by the chrome's liveness
@@ -268,6 +269,18 @@ impl Notice {
             severity: Severity::Warning,
             source: Source::Capture,
             text: format!("capture: {detail}"),
+        }
+    }
+
+    /// A native clipboard read that did not yield text. The note is
+    /// untouched, and another copy/paste attempt is the recovery path.
+    pub fn clipboard_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Clipboard,
+            text: format!(
+                "clipboard: {detail} — no text was read; copy it again and retry"
+            ),
         }
     }
 
@@ -494,6 +507,11 @@ mod tests {
         );
         assert_eq!(Notice::captured("c-1").text, "captured c-1");
         assert!(Notice::capture_failed("boom").text.starts_with("capture:"));
+        assert!(
+            Notice::clipboard_failed("denied")
+                .text
+                .starts_with("clipboard: denied")
+        );
         assert!(Notice::delete_failed("boom").text.contains("still on disk"));
         assert!(Notice::create_failed("boom").text.starts_with("create:"));
         assert_eq!(

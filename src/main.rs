@@ -1,4 +1,6 @@
-use note_system::{capture, compute, template, time, ui, vault, watch};
+use note_system::{
+    capture, clipboard, compute, template, time, ui, vault, watch,
+};
 
 fn main() {
     // `wl-paste | app --capture`: a short-lived headless process that writes
@@ -21,6 +23,7 @@ fn main() {
     }
 
     let root = vault::vault_path();
+    let clipboard = clipboard::native();
 
     // a fresh root gets its skeleton and the embedded default templates
     // before the watcher starts, so the very first launch is usable; the
@@ -65,17 +68,12 @@ fn main() {
         // read again only when a capture is stamped, which is the one thing
         // that needs the time of day (adr/2026-08-capture-timestamp-ids.md)
         .with_context(ui::Now(std::sync::Arc::new(jiff::Zoned::now)))
-        // in-app capture reads what is on the clipboard; a webview that
-        // refuses the read captures nothing rather than an empty note
-        .with_context(ui::Clipboard(std::sync::Arc::new(|| {
-            Box::pin(async {
-                dioxus::document::eval(
-                    "return await navigator.clipboard.readText();",
-                )
-                .await
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_string))
-            })
+        // Native reads bypass WebKitGTK's disabled JavaScript clipboard
+        // permission and stay off the UI thread. The same seam serves
+        // ordinary paste, vim's register and in-app capture.
+        .with_context(ui::Clipboard(std::sync::Arc::new(move || {
+            let clipboard = clipboard.clone();
+            Box::pin(async move { clipboard.read_text().await })
         })))
         // Ctrl+C's half of the clipboard: sent over the eval channel rather
         // than interpolated, so arbitrary note text cannot break the script

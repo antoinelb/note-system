@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 dioxus = { version = "0.7", features = ["desktop"] }
 jiff = "0.2"
 unicode-segmentation = "1"

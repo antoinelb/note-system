@@ -77,16 +77,14 @@ pub type Written = Pin<Box<dyn Future<Output = ()>>>;
 #[derive(Clone)]
 pub struct ClipboardWrite(pub Arc<dyn Fn(String) -> Written + Send + Sync>);
 
-/// How the in-app capture chord reads what is on the clipboard: `main`
-/// injects a JS `navigator.clipboard.readText()`, the headless tests inject
-/// a scripted fake — the `CaretProbe` pattern again
-/// (adr/2026-08-capture-headless-second-process.md). `None` is a clipboard
-/// that would not answer, and captures nothing.
+/// How ordinary paste, vim's register and in-app capture read the system
+/// clipboard: `main` injects the native worker, and headless tests inject a
+/// scripted result. Failures carry their reason to the status surface.
 #[derive(Clone)]
 pub struct Clipboard(
     #[allow(clippy::type_complexity)]
     pub  Arc<
-        dyn Fn() -> Pin<Box<dyn Future<Output = Option<String>>>>
+        dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, String>>>>
             + Send
             + Sync,
     >,
@@ -1199,7 +1197,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             let Some(now) = now.clone() else { return };
             let root = root.clone();
             spawn(async move {
-                let Some(pasted) = (clipboard.0)().await else {
+                let Some(pasted) =
+                    clipboard_answer((clipboard.0)().await, status)
+                else {
                     return;
                 };
                 // one clock read stamps both halves, so a capture cannot
@@ -1414,7 +1414,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // will not answer pastes nothing
                 if let Some(clipboard) = clipboard.clone() {
                     spawn(async move {
-                        if let Some(text) = (clipboard.0)().await {
+                        if let Some(text) =
+                            clipboard_answer((clipboard.0)().await, status)
+                        {
                             editor.write().insert_at_caret(&text);
                         }
                     });
@@ -1475,7 +1477,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             continue;
                         };
                         spawn(async move {
-                            let Some(clip) = (clipboard.0)().await else {
+                            let Some(clip) = clipboard_answer(
+                                (clipboard.0)().await,
+                                status,
+                            ) else {
                                 return;
                             };
                             if clip.is_empty() {
@@ -3361,6 +3366,24 @@ fn open_selected(root: &Path, exists: bool, id: &str) -> Editor {
     }
 }
 
+/// Turns the native boundary's explicit result into the editor's optional
+/// text and keeps the status source aligned with the latest read outcome.
+fn clipboard_answer(
+    answer: Result<String, String>,
+    mut status: Signal<Status>,
+) -> Option<String> {
+    match answer {
+        Ok(text) => {
+            status.write().resolve(Source::Clipboard);
+            Some(text)
+        }
+        Err(detail) => {
+            status.write().report(Notice::clipboard_failed(&detail));
+            None
+        }
+    }
+}
+
 /// The open template's name, when the one editor holds a file under
 /// `templates/` — the whole "template mode", derived from the buffer's own
 /// path rather than tracked beside it
@@ -3708,6 +3731,7 @@ fn captured_lines(root: &Path, day: &str) -> Result<Vec<String>, String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::any::Any;
+    use std::collections::VecDeque;
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
 
@@ -5814,7 +5838,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, written) = clipboard_app(
             Some(vault.path().to_path_buf()),
-            Some("collée\n".to_string()),
+            Ok("collée\n".to_string()),
         );
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
@@ -5909,10 +5933,8 @@ mod tests {
         assert_eq!(source_of(&dom), "", "nothing to paste, nothing pasted");
 
         // and with a seam whose read answers emptiness, the same
-        let (mut dom, clicks, _) = clipboard_app(
-            Some(vault.path().to_path_buf()),
-            Some(String::new()),
-        );
+        let (mut dom, clicks, _) =
+            clipboard_app(Some(vault.path().to_path_buf()), Ok(String::new()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
         press(
@@ -5926,10 +5948,44 @@ mod tests {
     }
 
     #[test]
-    fn a_clipboard_read_answering_nothing_pastes_nothing() {
+    fn a_successful_read_resolves_the_clipboard_warning() {
         let vault = temp_vault();
-        let (mut dom, clicks, _) =
-            clipboard_app(Some(vault.path().to_path_buf()), None);
+        let (mut dom, clicks) = clipboard_script_app(
+            Some(vault.path().to_path_buf()),
+            VecDeque::from([
+                Err("read denied".to_string()),
+                Ok("recovered".to_string()),
+            ]),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(dioxus_ssr::render(&dom).contains("clipboard: read denied"));
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(source_of(&dom).contains("recovered"));
+        assert!(!dioxus_ssr::render(&dom).contains("clipboard: read denied"));
+    }
+
+    #[test]
+    fn a_clipboard_read_failure_leaves_the_note_and_says_why() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Err("read denied".to_string()),
+        );
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
         press(
@@ -5940,6 +5996,11 @@ mod tests {
         );
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("clipboard: read denied — no text was read"),
+            "the failed read must not stay silent: {html}"
+        );
     }
 
     #[test]
@@ -6356,7 +6417,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, written) = clipboard_app(
             Some(vault.path().to_path_buf()),
-            Some("collé".to_string()),
+            Ok("collé".to_string()),
         );
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
@@ -6457,9 +6518,11 @@ mod tests {
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before, "nothing moved without seams");
 
-        // a paste whose read answers nothing pastes nothing
-        let (mut dom, clicks, _) =
-            clipboard_app(Some(vault.path().to_path_buf()), None);
+        // a paste whose read fails leaves the note alone and reports above
+        let (mut dom, clicks, _) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Err("read denied".to_string()),
+        );
         let (_, sink) = activate_heading(&mut dom, &clicks);
         press(
             &mut dom,
@@ -6469,6 +6532,11 @@ mod tests {
         );
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("clipboard: read denied — no text was read"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -7720,7 +7788,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
-            Some("collé du navigateur".to_string()),
+            Ok("collé du navigateur".to_string()),
             Some(CAPTURED_AT),
         );
         capture_chord(&mut dom, &keys);
@@ -7743,7 +7811,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
-            Some("deux fois".to_string()),
+            Ok("deux fois".to_string()),
             Some(CAPTURED_AT),
         );
         capture_chord(&mut dom, &keys);
@@ -7763,19 +7831,24 @@ mod tests {
         };
         let before = count();
 
-        // a clipboard that answers nothing captures nothing
+        // a clipboard read failure captures nothing
         let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
-            None,
+            Err("read denied".to_string()),
             Some(CAPTURED_AT),
         );
         capture_chord(&mut dom, &keys);
         assert_eq!(count(), before);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("clipboard: read denied — no text was read"),
+            "{html}"
+        );
 
         // nor does one with no clock to stamp the note by
         let (mut dom, _, keys) = capture_app(
             Some(vault.path().to_path_buf()),
-            Some("sans horloge".to_string()),
+            Ok("sans horloge".to_string()),
             None,
         );
         capture_chord(&mut dom, &keys);
@@ -7800,7 +7873,7 @@ mod tests {
             .count();
         let (mut dom, clicks, keys) = capture_app(
             Some(vault.path().to_path_buf()),
-            Some("pour la capture".to_string()),
+            Ok("pour la capture".to_string()),
             Some(CAPTURED_AT),
         );
         activate_heading(&mut dom, &clicks);
@@ -8485,7 +8558,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, _, keydowns) = capture_app(
             Some(vault.path().to_path_buf()),
-            Some("pris du web".to_string()),
+            Ok("pris du web".to_string()),
             Some(CAPTURED_AT),
         );
         let (input, palette_keys) =
@@ -10229,7 +10302,7 @@ mod tests {
     /// way a headless run without it would find things.
     fn capture_app(
         root: Option<PathBuf>,
-        pasted: Option<String>,
+        pasted: Result<String, String>,
         now: Option<&str>,
     ) -> (VirtualDom, Vec<ElementId>, Vec<ElementId>) {
         set_event_converter(Box::new(TestEvents));
@@ -10300,7 +10373,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn clipboard_app(
         root: Option<PathBuf>,
-        pasted: Option<String>,
+        pasted: Result<String, String>,
     ) -> (
         VirtualDom,
         Vec<ElementId>,
@@ -10332,6 +10405,34 @@ mod tests {
         let mutations = dom.rebuild_to_vec();
         let clicks = listeners(&mutations, "click");
         (dom, clicks, written)
+    }
+
+    /// A sequence of clipboard outcomes for recovery assertions.
+    fn clipboard_script_app(
+        root: Option<PathBuf>,
+        pasted: VecDeque<Result<String, String>>,
+    ) -> (VirtualDom, Vec<ElementId>) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        let pasted = Arc::new(std::sync::Mutex::new(pasted));
+        dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
+            move || {
+                let answer = pasted
+                    .lock()
+                    .expect("the clipboard script")
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        Err("clipboard script exhausted".to_string())
+                    });
+                Box::pin(async move { answer })
+            },
+        ))));
+        let mutations = dom.rebuild_to_vec();
+        (dom, listeners(&mutations, "click"))
     }
 
     /// Like `press`, but hands back the mutations it caused — how the
