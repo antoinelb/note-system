@@ -108,6 +108,14 @@ pub struct VaultFeed {
     pub trouble: Option<String>,
 }
 
+/// What `main`'s pre-launch seeding of the vault skeleton had to say:
+/// `None` when every default template landed or already stood, the failure
+/// otherwise — carried in so the status surface can report it, a desktop
+/// app's stderr being nowhere
+/// (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
+#[derive(Clone)]
+pub struct SeedTrouble(pub Option<String>);
+
 /// The clock a capture is stamped by, injected like `Today` and read only
 /// when one is written (adr/2026-08-capture-timestamp-ids.md). `Today` is
 /// the date every screen is drawn from and is read once at launch; a
@@ -363,6 +371,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut jump = use_signal(|| None::<Jump>);
     let mut jump_query = use_signal(String::new);
     let mut jump_highlighted = use_signal(|| 0usize);
+    // the edit-template picker, palette-summoned and logs-only
+    // (adr/2026-08-template-editing-in-the-one-editor.md)
+    let mut template_picker = use_signal(|| None::<TemplatePicker>);
+    let mut template_query = use_signal(String::new);
+    let mut template_highlighted = use_signal(|| 0usize);
     // the modal layer, one signal beside the editor's so both mounts share
     // the mode and it survives slides and activations
     // (adr/2026-08-escape-ladder-editor-wide-mode.md)
@@ -413,6 +426,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // once is enough: the Callback's identity is stable across re-renders,
     // only its captured closure is refreshed
     use_hook(move || register.0.borrow_mut().replace(quit_flush));
+
+    // what the pre-launch seeding had to say, if `main` ran one: a vault
+    // that would not take the default templates is reported once, here
+    use_hook(move || {
+        if let Some(SeedTrouble(Some(reason))) =
+            try_consume_context::<SeedTrouble>()
+        {
+            status.write().report(Notice::seed_failed(&reason));
+        }
+    });
 
     // the vault watcher, if one was handed over: every batch it debounces
     // invalidates the stale bodies and rides the compute tier as a survey
@@ -869,6 +892,41 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         close_filter.call(());
     });
 
+    // the template picker's opening half: the directory listed at the
+    // moment it opens — templates are never in the index, so the
+    // filesystem is the authority
+    // (adr/2026-08-template-editing-in-the-one-editor.md)
+    let open_templates = use_callback({
+        let root = root.clone();
+        move |()| match template_names(&root) {
+            Ok(entries) => {
+                template_query.set(String::new());
+                template_highlighted.set(0);
+                template_picker.set(Some(TemplatePicker { entries }));
+            }
+            Err(msg) => status.write().report(Notice::index(msg)),
+        }
+    });
+    let close_templates = use_callback(move |()| template_picker.set(None));
+    // the landing half, the sheet's flush discipline: the buffer reaches
+    // disk before it is replaced, and a failed save keeps the current note
+    // open with its error rather than dropping the text
+    let edit_template = use_callback({
+        let root = root.clone();
+        let fragments = fragments.clone();
+        move |name: String| {
+            if !editor.write().flush() {
+                return;
+            }
+            close_templates.call(());
+            editor.set(Editor::open(
+                root.join("templates").join(format!("{name}.typ")),
+            ));
+            vim.write().note_opened();
+            fragments.borrow_mut().sweep();
+        }
+    });
+
     // the jump overlay's opening half: completions narrowed to notes with
     // cards — the table never hosts the rest
     // (adr/2026-08-jump-ctrl-o-centres-viewport.md)
@@ -1026,9 +1084,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let go_table = use_callback(move |()| {
         // the block stays active behind the screen switch — the cursor
         // belongs to the note, and returning to the logs finds it again
-        // (adr/2026-08-cursor-always-in-the-note.md); only the picker
-        // closes, its input being about to unmount
+        // (adr/2026-08-cursor-always-in-the-note.md); only the pickers
+        // close, their inputs being about to unmount
         picker.set(None);
+        template_picker.set(None);
         screen.set(Screen::Table);
     });
     let go_logs = use_callback(move |()| {
@@ -1071,6 +1130,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 || picker.read().is_some()
                 || filter_picker.read().is_some()
                 || jump.read().is_some()
+                || template_picker.read().is_some()
                 || search_prompt();
             let target = if editing && !listing {
                 sink.borrow().clone()
@@ -1266,6 +1326,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     arrange_cluster.call(());
                 }
                 palette::CommandId::Undo => undo_last.call(()),
+                palette::CommandId::EditTemplate => {
+                    open_templates.call(());
+                }
             }
         });
 
@@ -1287,9 +1350,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // the one notice line, read from the one owner: highest severity
     // standing, latest among equals (adr/2026-08-status-surface-owns-notices.md)
     let notice = status.read().line().cloned();
+    // the open template, if the one editor holds one: derived from the
+    // buffer's own path, never tracked beside it — it gates the pieces of
+    // the logs pane that belong to the selected note
+    // (adr/2026-08-template-editing-in-the-one-editor.md)
+    let template_open = open_template(&editor.read(), &root);
     // the footer belongs to the logs' selected note; over the table the
     // editor holds the sheet's, whose backlinks the sheet counts itself
-    let footer = (screen() == Screen::Logs)
+    let footer = (screen() == Screen::Logs && template_open.is_none())
         .then(|| link_footer(&root, &editor.read(), &id, &note_list))
         .flatten();
 
@@ -1896,6 +1964,78 @@ fn Shell(root: PathBuf, today: Date) -> Element {
 
     // the palette's rows, cloned out the same way; which commands exist at
     // all was decided at open (adr/2026-08-palette-birth-command-list.md)
+    // the edit-template picker, the jump overlay's grammar over a
+    // directory listing (adr/2026-08-template-editing-in-the-one-editor.md)
+    let template_view = move || -> Element {
+        match template_picker() {
+            Some(frozen) => {
+                let needle = template_query.read().to_lowercase();
+                let rows: Vec<String> = frozen
+                    .entries
+                    .iter()
+                    .filter(|name| name.to_lowercase().contains(&needle))
+                    .cloned()
+                    .collect();
+                let keys_rows = rows.clone();
+                rsx! {
+                div { class: "command-palette",
+                    div { class: "palette-head type-label", "edit template" }
+                    input {
+                        class: "picker-query",
+                        placeholder: "template…",
+                        onmounted: move |event| async move {
+                            let _ = event.set_focus(true).await;
+                        },
+                        oninput: move |event| {
+                            template_query.set(event.value());
+                            template_highlighted.set(0);
+                        },
+                        onkeydown: move |event: KeyboardEvent| {
+                            let key = event.key();
+                            let last = keys_rows.len().saturating_sub(1);
+                            match key {
+                                Key::Escape => close_templates.call(()),
+                                Key::Enter => {
+                                    // no matches: the keystroke does
+                                    // nothing rather than guessing
+                                    if let Some(name) = keys_rows.get(template_highlighted()) {
+                                        edit_template.call(name.clone());
+                                    }
+                                }
+                                Key::ArrowDown => {
+                                    template_highlighted.set((template_highlighted() + 1).min(last));
+                                }
+                                Key::ArrowUp => {
+                                    template_highlighted.set(template_highlighted().saturating_sub(1));
+                                }
+                                _ => {}
+                            }
+                            if !event.modifiers().ctrl() {
+                                event.stop_propagation();
+                            }
+                        },
+                    }
+                    if rows.is_empty() {
+                        div { class: "picker-empty", "no matching template" }
+                    }
+                    for (rank, name) in rows.into_iter().enumerate() {
+                        div {
+                            key: "{name}",
+                            class: "picker-row",
+                            class: if rank == template_highlighted() { "selected" },
+                            onclick: {
+                                let name = name.clone();
+                                move |_| edit_template.call(name.clone())
+                            },
+                            span { class: "picker-id", "{name}" }
+                        }
+                    }
+                }
+                }
+            }
+            None => rsx! {},
+        }
+    };
     let open_palette = palette().map(|frozen| {
         let matches = palette::filter(
             &palette_query.read(),
@@ -1930,8 +2070,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let notice = creator_notice();
         (frozen, matches, notice)
     });
-    let captured = (exists && scale == NoteType::Daily)
-        .then(|| captured_lines(&root, &id));
+    let captured =
+        (exists && scale == NoteType::Daily && template_open.is_none())
+            .then(|| captured_lines(&root, &id));
     // reading the signals here is what repaints the table on a drag write,
     // a watcher batch and a filter change alike — and why an auto-placed
     // card follows its links live until a drag pins it
@@ -2004,6 +2145,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         let fragments = fragments.clone();
         move |event: KeyboardEvent| {
+            // read before the match: a guard's borrow would still be held
+            // when an arm writes the editor back
+            let over_template = open_template(&editor.peek(), &root).is_some();
             match event.key() {
                 // the notices overlay is a destination you leave, like the
                 // loops list below it on the ladder
@@ -2011,6 +2155,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // the open-loops list is a destination you leave; escape
                 // reaches here only when no block owns it
                 Key::Escape if loops_open() => loops_open.set(false),
+                // an open template is a destination you leave too: the
+                // centre pane goes back to the selected note
+                // (adr/2026-08-template-editing-in-the-one-editor.md)
+                Key::Escape if over_template => {
+                    let target = selected.peek().clone();
+                    select.call(target);
+                }
                 // the ladder's bottom: with nothing left to close, Escape
                 // acknowledges the visible notice — the explicit gesture a
                 // critical requires (adr/2026-08-status-surface-owns-notices.md);
@@ -2046,6 +2197,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     if character == "l"
                         && event.modifiers().ctrl()
                         && picker.peek().is_none()
+                        && template_picker.peek().is_none()
                         && editor.peek().active().is_some() =>
                 {
                     open_picker.call(());
@@ -2060,7 +2212,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && event.modifiers().ctrl()
                         && palette.peek().is_none()
                         && picker.peek().is_none()
-                        && creator.peek().is_none() =>
+                        && creator.peek().is_none()
+                        && template_picker.peek().is_none() =>
                 {
                     // the webview answers a bare Ctrl+P with a print dialog
                     event.prevent_default();
@@ -2074,7 +2227,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && event.modifiers().ctrl()
                         && creator.peek().is_none()
                         && palette.peek().is_none()
-                        && picker.peek().is_none() =>
+                        && picker.peek().is_none()
+                        && template_picker.peek().is_none() =>
                 {
                     // the webview's own Ctrl+N would open a window
                     event.prevent_default();
@@ -2516,19 +2670,26 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 }
                 section { class: "centre",
                     div { class: "crumbs",
-                        for crumb in crumbs {
-                            {
-                                match crumb.target {
-                                    Some(target) => rsx! {
-                                        span {
-                                            class: "crumb crumb-link",
-                                            onclick: move |_| select.call(target.clone()),
-                                            "{crumb.label}"
-                                        }
-                                    },
-                                    None => rsx! {
-                                        span { class: "crumb", "{crumb.label}" }
-                                    },
+                        // an open template wears its own crumbs: it has no
+                        // scale chain to climb
+                        if let Some(name) = &template_open {
+                            span { class: "crumb", "templates" }
+                            span { class: "crumb", "{name}" }
+                        } else {
+                            for crumb in crumbs {
+                                {
+                                    match crumb.target {
+                                        Some(target) => rsx! {
+                                            span {
+                                                class: "crumb crumb-link",
+                                                onclick: move |_| select.call(target.clone()),
+                                                "{crumb.label}"
+                                            }
+                                        },
+                                        None => rsx! {
+                                            span { class: "crumb", "{crumb.label}" }
+                                        },
+                                    }
                                 }
                             }
                         }
@@ -2556,7 +2717,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         }
                     }
                     {picker_view()}
-                        {search_view()}
+                    {template_view()}
                     {search_view()}
                     // the ember's destination: what the count is made of, and
                     // nothing else — no ages, no grouping, no per-item actions
@@ -3203,6 +3364,21 @@ fn open_selected(root: &Path, exists: bool, id: &str) -> Editor {
     }
 }
 
+/// The open template's name, when the one editor holds a file under
+/// `templates/` — the whole "template mode", derived from the buffer's own
+/// path rather than tracked beside it
+/// (adr/2026-08-template-editing-in-the-one-editor.md).
+fn open_template(editor: &Editor, root: &Path) -> Option<String> {
+    let (path, _) = editor.note()?;
+    let relative = path.strip_prefix(root.join("templates")).ok()?;
+    Some(
+        relative
+            .to_string_lossy()
+            .trim_end_matches(".typ")
+            .to_string(),
+    )
+}
+
 /// A time note's id is its stem, so the path needs no index round-trip.
 fn time_note_path(root: &Path, id: &str) -> PathBuf {
     root.join(NoteCategory::Time.as_dir())
@@ -3403,6 +3579,33 @@ struct FilterPicker {
 #[derive(Clone, PartialEq)]
 struct Jump {
     entries: Vec<links::Completion>,
+}
+
+/// The edit-template overlay's frozen half: the directory listing at the
+/// moment it opened (adr/2026-08-template-editing-in-the-one-editor.md).
+#[derive(Clone, PartialEq)]
+struct TemplatePicker {
+    entries: Vec<String>,
+}
+
+/// Every template the picker can offer, listed at the moment it opens:
+/// templates are never in the index (`scan_vault` walks only the category
+/// dirs), so the directory itself is the authority.
+fn template_names(root: &Path) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(root.join("templates"))
+        .map_err(|err| format!("templates: {err}"))?;
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_suffix(".typ")
+                .map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 /// Every tag the filter can offer, read at the moment the overlay opens —
@@ -6858,6 +7061,241 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_seeding_is_a_notice_on_screen() {
+        // main hands the seed failure over like the watcher's start
+        // failure (adr/2026-08-templates-seeded-from-embedded-fixtures.md)
+        let vault = temp_vault();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(Some(
+            vault.path().to_path_buf(),
+        ))));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(SeedTrouble(Some(
+            "permission denied".to_string(),
+        ))));
+        with_reactor(|| dom.rebuild_to_vec());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("templates: permission denied"), "{html}");
+    }
+
+    #[test]
+    fn a_clean_seeding_reports_nothing() {
+        let vault = temp_vault();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(Some(
+            vault.path().to_path_buf(),
+        ))));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(SeedTrouble(None)));
+        with_reactor(|| dom.rebuild_to_vec());
+        assert!(!dioxus_ssr::render(&dom).contains("templates:"));
+    }
+
+    #[test]
+    fn the_palette_lists_the_templates_and_escape_closes_the_picker() {
+        let vault = temp_vault();
+        // a stray non-typ file is not a template
+        std::fs::write(vault.path().join("templates/readme.md"), "notes")
+            .expect("the stray file is written");
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, picker_keys) =
+            open_template_picker(&mut dom, keys[LOGS_KEYS]);
+        assert_eq!(
+            picker_ids(&dom),
+            [
+                "capture", "concept", "daily", "seasonal", "template",
+                "weekly"
+            ]
+        );
+
+        // an overlay is up: the summoning chords refuse to stack another
+        press(&mut dom, picker_keys, ctrl_p(), Modifiers::CONTROL);
+        press(&mut dom, picker_keys, ctrl_n(), Modifiers::CONTROL);
+        press(&mut dom, picker_keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("command…"), "{html}");
+        assert!(!html.contains("link to…"), "{html}");
+
+        // a query nothing matches leaves a message, and enter does nothing
+        type_into(&mut dom, input, "xyzzy");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching template"), "{html}");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains("no matching template"));
+
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("no matching template"), "{html}");
+        assert!(picker_ids(&dom).is_empty(), "{html}");
+    }
+
+    #[test]
+    fn a_template_opens_in_the_centre_pane_wearing_its_own_crumbs() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let before = dioxus_ssr::render(&dom);
+        assert!(before.contains("links-footer"), "{before}");
+        assert!(before.contains("captured today"), "{before}");
+
+        let (_input, picker_keys) =
+            open_template_picker(&mut dom, keys[LOGS_KEYS]);
+        // the arrows move the highlight: down, down, up lands on the
+        // second row — "concept"
+        press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"<span class="crumb">templates</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="crumb">concept</span>"#),
+            "{html}"
+        );
+        // the selected note's furniture leaves with the note
+        assert!(!html.contains("links-footer"), "{html}");
+        assert!(!html.contains("captured today"), "{html}");
+        // the template's own source stands in the pane, placeholders and all
+        assert!(source_of(&dom).contains("{{title}}"), "{}", source_of(&dom));
+
+        // escape hands the pane back to the selected note
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        let back = dioxus_ssr::render(&dom);
+        assert!(
+            !back.contains(r#"<span class="crumb">templates</span>"#),
+            "{back}"
+        );
+        assert!(back.contains("2026-07-23"), "{back}");
+        assert!(back.contains("links-footer"), "{back}");
+    }
+
+    #[test]
+    fn a_clicked_row_opens_its_template() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "edit template");
+        let opened = press_for_mutations(
+            &mut dom,
+            palette_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        // the rows are the dispatch's only click listeners, in list order
+        click(&mut dom, listeners(&opened, "click")[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"<span class="crumb">capture</span>"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn an_edited_template_reaches_the_disk() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, picker_keys) =
+            open_template_picker(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "daily");
+        // the chosen template opens with its last block awake — the woken
+        // widget's sink is in the same mutations (`activate_block`)
+        let woken = press_for_mutations(
+            &mut dom,
+            picker_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        let sink = listeners(&woken, "keydown")[0];
+        retype(&mut dom, sink, "= le modèle refait\n");
+        block_on(settle(&mut dom));
+        let text =
+            std::fs::read_to_string(vault.path().join("templates/daily.typ"))
+                .expect("the template is readable");
+        assert!(text.contains("le modèle refait"), "{text}");
+        assert!(
+            !text.contains("= {{id}}"),
+            "the heading was replaced: {text}"
+        );
+    }
+
+    #[test]
+    fn a_buffer_that_will_not_flush_keeps_the_template_from_opening() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let file = vault.path().join("time/2026-07-23.typ");
+        edit_behind(&file, "= repris dehors\n");
+        retype(&mut dom, sink, "= à moi\n");
+        block_on(settle(&mut dom));
+
+        let (_input, picker_keys) = open_template_picker(&mut dom, sink);
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        // the flush refused: the conflict stands, the template stayed shut
+        assert!(html.contains("changed on disk"), "{html}");
+        assert!(
+            !html.contains(r#"<span class="crumb">templates</span>"#),
+            "{html}"
+        );
+        // the picker is still up, waiting on the conflict's resolution
+        assert!(!picker_ids(&dom).is_empty(), "{html}");
+    }
+
+    #[test]
+    fn a_missing_templates_directory_is_a_notice_not_a_crash() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_dir_all(vault.path().join("templates"))
+            .expect("the directory is removed");
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "edit template");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("templates:"), "{html}");
+        assert!(picker_ids(&dom).is_empty(), "{html}");
+    }
+
+    #[test]
+    fn switching_to_the_table_closes_the_template_picker() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_input, picker_keys) =
+            open_template_picker(&mut dom, keys[LOGS_KEYS]);
+        // the chord bubbles through the overlay to the pane: the screen
+        // switches and the picker, its input about to unmount, closes
+        press(
+            &mut dom,
+            picker_keys,
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(picker_ids(&dom).is_empty());
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("2".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(picker_ids(&dom).is_empty());
+    }
+
+    #[test]
     fn a_degraded_watcher_heals_when_a_batch_lands_again() {
         let vault = temp_vault();
         let (mut dom, _, sender) =
@@ -7878,6 +8316,7 @@ mod tests {
                 "go to table",
                 "new note",
                 "notices",
+                "edit template",
             ],
             "the note opened editing, so the caret commands stand; the \
              screen already stood on is not offered, and no sheet backs \
@@ -7900,7 +8339,7 @@ mod tests {
         let (_, keys) = activate_heading(&mut dom, &clicks);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 12, "{labels:?}");
+        assert_eq!(labels.len(), 13, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -10329,6 +10768,27 @@ mod tests {
         let inputs = listeners(&mutations, "input");
         let keydowns = listeners(&mutations, "keydown");
         mount(dom, listeners(&mutations, "mounted")[0]);
+        (inputs[0], keydowns[0])
+    }
+
+    /// Runs "edit template" from the palette and returns the template
+    /// picker's (input, keydown) targets from the dispatch's mutations —
+    /// `open_palette`, one overlay deeper.
+    fn open_template_picker(
+        dom: &mut VirtualDom,
+        keys: ElementId,
+    ) -> (ElementId, ElementId) {
+        let (input, palette_keys) = open_palette(dom, keys);
+        type_into(dom, input, "edit template");
+        let opened = press_for_mutations(
+            dom,
+            palette_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        let inputs = listeners(&opened, "input");
+        let keydowns = listeners(&opened, "keydown");
+        mount(dom, listeners(&opened, "mounted")[0]);
         (inputs[0], keydowns[0])
     }
 

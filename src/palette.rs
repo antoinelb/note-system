@@ -32,6 +32,7 @@ pub enum CommandId {
     JumpToNote,
     ArrangeCluster,
     Undo,
+    EditTemplate,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -47,7 +48,7 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 22] = [
+pub const COMMANDS: [Command; 23] = [
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
@@ -171,6 +172,13 @@ pub const COMMANDS: [Command; 22] = [
         label: "undo",
         chord: None,
     },
+    // chordless: reshaping what every future note looks like is rare and
+    // deliberate (adr/2026-08-template-editing-in-the-one-editor.md)
+    Command {
+        id: CommandId::EditTemplate,
+        label: "edit template",
+        chord: None,
+    },
 ];
 
 /// What was true when the palette opened — decides which commands exist at
@@ -238,6 +246,10 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::KeepMine | CommandId::TakeDisk => context.conflict,
         // nothing held, nothing to take back
         CommandId::Undo => context.undoable,
+        // the template opens in the logs' centre pane — the one full-page
+        // surface the shared editor has off the table
+        // (adr/2026-08-template-editing-in-the-one-editor.md)
+        CommandId::EditTemplate => !context.on_table,
         _ => true,
     }
 }
@@ -418,6 +430,15 @@ mod tests {
     }
 
     #[test]
+    fn edit_template_hides_on_the_table() {
+        assert_eq!(labels(&filter("template", AT_TABLE)), Vec::<&str>::new());
+        assert_eq!(
+            labels(&filter("template", READING)),
+            vec!["edit template"]
+        );
+    }
+
+    #[test]
     fn the_screen_commands_hide_where_they_stand() {
         let on_logs = labels(&filter("", READING));
         assert!(on_logs.contains(&"go to table"));
@@ -470,7 +491,8 @@ mod tests {
                 "keep mine",
                 "take disk",
                 "arrange cluster",
-                "undo"
+                "undo",
+                "edit template"
             ]
         );
         let mut names: Vec<&str> =

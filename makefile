@@ -26,11 +26,12 @@ test:
 # a persistent scratch vault outside the repo, seeded from the fixtures:
 # running against the fixtures themselves pollutes canonical test data
 # (adr/2026-07-dev-test-vault-locations.md). Notes persist across runs;
-# the app-owned templates refresh every run so template changes propagate.
+# the app seeds any missing template at startup from its embedded
+# defaults, and in-app template edits persist
+# (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
 DEV_VAULT := $(HOME)/.local/share/note-system/dev-vault
 
 run:
 	@mkdir -p $(dir $(DEV_VAULT))
 	@test -d $(DEV_VAULT) || cp -r $(VAULT) $(DEV_VAULT)
-	@cp $(VAULT)/templates/*.typ $(DEV_VAULT)/templates/
 	NOTE_VAULT=$(DEV_VAULT) cargo run

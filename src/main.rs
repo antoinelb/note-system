@@ -1,4 +1,4 @@
-use note_system::{capture, compute, time, ui, vault, watch};
+use note_system::{capture, compute, template, time, ui, vault, watch};
 
 fn main() {
     // `wl-paste | app --capture`: a short-lived headless process that writes
@@ -22,9 +22,19 @@ fn main() {
 
     let root = vault::vault_path();
 
+    // a fresh root gets its skeleton and the embedded default templates
+    // before the watcher starts, so the very first launch is usable; the
+    // failure rides into the status surface like the watcher's
+    // (adr/2026-08-templates-seeded-from-embedded-fixtures.md)
+    let seeding = root
+        .as_deref()
+        .and_then(|root| template::seed(root).err())
+        .map(|err| format!("{err:?}"));
+
     dioxus::LaunchBuilder::new()
         .with_cfg(dioxus::desktop::Config::new().with_menu(None))
         .with_context(ui::VaultRoot(root.clone()))
+        .with_context(ui::SeedTrouble(seeding))
         // the watcher's own thread forwards its batches into the async
         // channel the shell awaits (adr/2026-08-watcher-feeds-the-ui.md);
         // a watcher that will not start leaves the app on the index it

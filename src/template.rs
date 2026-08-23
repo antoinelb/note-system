@@ -50,6 +50,99 @@ pub fn create_capture(
     )
 }
 
+/// Writes the skeleton a fresh vault is missing: `templates/`, the four
+/// category directories, and every default template that is not already
+/// there. Existing files are never touched — `create_new` makes the
+/// existence check and the write one operation, so a user-edited template
+/// survives every launch
+/// (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
+pub fn seed(vault: &Path) -> Result<(), TemplateError> {
+    let templates = vault.join("templates");
+    let categories = [
+        NoteCategory::Time,
+        NoteCategory::Permanent,
+        NoteCategory::Capture,
+        NoteCategory::Generated,
+    ];
+    let dirs = std::iter::once(templates.clone()).chain(
+        categories
+            .iter()
+            .map(|category| vault.join(category.as_dir())),
+    );
+    for dir in dirs {
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| TemplateError::Io(dir.clone(), err))?;
+    }
+    for (name, text) in DEFAULTS {
+        let path = templates.join(format!("{name}.typ"));
+        match crate::persist::create_new(&path, text) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(TemplateError::Io(path, err)),
+        }
+    }
+    Ok(())
+}
+
+/// The templates the binary carries: verbatim copies of the fixture
+/// vault's, embedded at compile time so the fixtures stay the single
+/// source of truth and `make check-vault` their compile gate
+/// (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
+const DEFAULTS: [(&str, &str); 13] = [
+    (
+        "template",
+        include_str!("../tests/fixtures/vault/templates/template.typ"),
+    ),
+    (
+        "person",
+        include_str!("../tests/fixtures/vault/templates/person.typ"),
+    ),
+    (
+        "organisation",
+        include_str!("../tests/fixtures/vault/templates/organisation.typ"),
+    ),
+    (
+        "source",
+        include_str!("../tests/fixtures/vault/templates/source.typ"),
+    ),
+    (
+        "concept",
+        include_str!("../tests/fixtures/vault/templates/concept.typ"),
+    ),
+    (
+        "claim",
+        include_str!("../tests/fixtures/vault/templates/claim.typ"),
+    ),
+    (
+        "idea",
+        include_str!("../tests/fixtures/vault/templates/idea.typ"),
+    ),
+    (
+        "personal",
+        include_str!("../tests/fixtures/vault/templates/personal.typ"),
+    ),
+    (
+        "project",
+        include_str!("../tests/fixtures/vault/templates/project.typ"),
+    ),
+    (
+        "daily",
+        include_str!("../tests/fixtures/vault/templates/daily.typ"),
+    ),
+    (
+        "weekly",
+        include_str!("../tests/fixtures/vault/templates/weekly.typ"),
+    ),
+    (
+        "seasonal",
+        include_str!("../tests/fixtures/vault/templates/seasonal.typ"),
+    ),
+    (
+        "capture",
+        include_str!("../tests/fixtures/vault/templates/capture.typ"),
+    ),
+];
+
 fn kebab_id(title: &str) -> String {
     let mut id = String::with_capacity(title.len());
     for char in title.to_lowercase().chars() {
@@ -259,35 +352,136 @@ mod tests {
     }
 
     #[test]
-    fn the_fixture_time_templates_instantiate_cleanly() {
-        // read the real fixture templates, so a placeholder typo in either
-        // file fails this build instead of the first "today" in production
-        for (name, note_type, id) in [
-            ("weekly", NoteType::Weekly, "2026-w31"),
-            ("seasonal", NoteType::Seasonal, "2026-autumn"),
+    fn seed_builds_a_fresh_vault_and_is_idempotent() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        seed(dir.path()).expect("first seed");
+        seed(dir.path()).expect("second seed finds everything in place");
+        for sub in ["templates", "time", "permanent", "capture", "generated"] {
+            assert!(dir.path().join(sub).is_dir(), "{sub}");
+        }
+        for (name, text) in DEFAULTS {
+            let written = std::fs::read_to_string(
+                dir.path().join(format!("templates/{name}.typ")),
+            )
+            .expect("the seeded template is readable");
+            assert_eq!(written, text, "{name}");
+        }
+    }
+
+    #[test]
+    fn seed_never_touches_an_edited_template() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        seed(dir.path()).expect("first seed");
+        let edited = dir.path().join("templates/concept.typ");
+        std::fs::write(&edited, "= Mine\n").expect("edit the template");
+        seed(dir.path()).expect("reseed");
+        assert_eq!(
+            std::fs::read_to_string(&edited).expect("read it back"),
+            "= Mine\n"
+        );
+    }
+
+    #[test]
+    fn an_unwritable_root_fails_seeding_visibly() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        lock(dir.path(), true);
+        let result = seed(dir.path());
+        lock(dir.path(), false);
+        assert!(
+            matches!(result, Err(TemplateError::Io(path, _)) if path == dir.path().join("templates"))
+        );
+    }
+
+    #[test]
+    fn an_unwritable_templates_dir_fails_seeding_visibly() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let templates = dir.path().join("templates");
+        std::fs::create_dir(&templates).expect("create templates dir");
+        lock(&templates, true);
+        let result = seed(dir.path());
+        lock(&templates, false);
+        assert!(
+            matches!(result, Err(TemplateError::Io(path, _)) if path == templates.join("template.typ"))
+        );
+    }
+
+    /// The permission flip as a parameter, so the restoring call is not the
+    /// literal `set_readonly(false)` clippy refuses.
+    fn lock(dir: &Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(dir)
+            .expect("the dir exists")
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(dir, permissions)
+            .expect("the dir permissions are set");
+    }
+
+    #[test]
+    fn every_seeded_template_instantiates_cleanly() {
+        // instantiate each embedded template, so a placeholder typo in any
+        // of them fails this build instead of the first use in production
+        let dir = tempfile::tempdir().expect("create tempdir");
+        seed(dir.path()).expect("seed");
+        let mut written = Vec::new();
+        for note_type in [
+            NoteType::Person,
+            NoteType::Organisation,
+            NoteType::Source,
+            NoteType::Concept,
+            NoteType::Claim,
+            NoteType::Idea,
+            NoteType::Personal,
+            NoteType::Project,
         ] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                    format!("tests/fixtures/vault/templates/{name}.typ"),
-                ),
-            )
-            .expect("read fixture template");
-            let dir = vault_with(name, &text);
-            let path = create(
+            written.push(
+                create(
+                    dir.path(),
+                    &NoteCategory::Permanent,
+                    &note_type,
+                    &format!("A {}", note_type.as_name()),
+                    "2026-07-27",
+                    "",
+                )
+                .expect("create permanent note"),
+            );
+        }
+        for (note_type, id) in [
+            (NoteType::Daily, "2026-07-27"),
+            (NoteType::Weekly, "2026-w31"),
+            (NoteType::Seasonal, "2026-autumn"),
+        ] {
+            written.push(
+                create(
+                    dir.path(),
+                    &NoteCategory::Time,
+                    &note_type,
+                    id,
+                    "2026-07-27",
+                    "",
+                )
+                .expect("create time note"),
+            );
+        }
+        written.push(
+            create_capture(
                 dir.path(),
-                &NoteCategory::Time,
-                &note_type,
-                id,
+                "capture-2026-07-27-120000",
                 "2026-07-27",
-                "",
+                "pasted",
             )
-            .expect("create");
-            assert_eq!(path, dir.path().join(format!("time/{id}.typ")));
-            let written = std::fs::read_to_string(&path).expect("read note");
-            assert!(written.contains(&format!("= {id}")), "{written}");
+            .expect("create capture"),
+        );
+        assert_eq!(
+            written.len(),
+            DEFAULTS.len() - 1,
+            "every template but the shared defs file"
+        );
+        for path in written {
+            let text = std::fs::read_to_string(&path).expect("read note");
             assert!(
-                !written.contains("{{"),
-                "every placeholder filled: {written}"
+                !text.contains("{{"),
+                "every placeholder filled: {}\n{text}",
+                path.display()
             );
         }
     }
@@ -363,6 +557,17 @@ mod tests {
         );
         assert!(
             matches!(result, Err(TemplateError::UnknownTemplate(name)) if name == "daily")
+        );
+    }
+
+    #[test]
+    fn a_capture_without_its_template_is_unknown_template() {
+        // reachable only by deleting the seeded file: `capture::run` seeds
+        // before it instantiates
+        let dir = vault_with("concept", "");
+        let result = create_capture(dir.path(), "capture-x", "2026-07-27", "");
+        assert!(
+            matches!(result, Err(TemplateError::UnknownTemplate(name)) if name == "capture")
         );
     }
 

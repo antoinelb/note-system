@@ -25,6 +25,9 @@ pub fn run(
     input: &mut dyn Read,
 ) -> Result<PathBuf, String> {
     let root = root.ok_or("no vault: define NOTE_VAULT or HOME")?;
+    // a virgin vault is seeded here too: the hotkey must work before the
+    // app has ever opened (adr/2026-08-templates-seeded-from-embedded-fixtures.md)
+    template::seed(&root).map_err(|err| format!("capture: {err:?}"))?;
     let content = read_paste(input)?;
     template::create_capture(
         &root,
@@ -67,7 +70,7 @@ mod tests {
 
     #[test]
     fn a_paste_becomes_a_capture_note_carrying_an_open_loop() {
-        let vault = vault_with_capture_template();
+        let vault = bare_vault();
         let written = run(
             Some(vault.path().to_path_buf()),
             &now(),
@@ -95,7 +98,7 @@ mod tests {
     fn an_empty_paste_is_still_a_capture() {
         // no required fields means no required content either: the hotkey
         // fires before there is anything to say
-        let vault = vault_with_capture_template();
+        let vault = bare_vault();
         let written =
             run(Some(vault.path().to_path_buf()), &now(), &mut "".as_bytes())
                 .expect("the empty capture is written");
@@ -104,7 +107,7 @@ mod tests {
 
     #[test]
     fn a_second_capture_in_the_same_second_is_refused() {
-        let vault = vault_with_capture_template();
+        let vault = bare_vault();
         let root = Some(vault.path().to_path_buf());
         run(root.clone(), &now(), &mut "premier".as_bytes())
             .expect("the first capture is written");
@@ -121,22 +124,48 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_capture_template_is_reported() {
+    fn a_virgin_vault_is_seeded_before_the_paste_lands() {
+        // the very gap that motivated seeding: a hotkey press against a
+        // brand-new root must produce a capture, not an UnknownTemplate
         let vault = tempfile::tempdir().expect("a temp dir is available");
-        std::fs::create_dir_all(vault.path().join("capture"))
-            .expect("the category directory is created");
-        let error = run(
+        let written = run(
             Some(vault.path().to_path_buf()),
             &now(),
             &mut "sans modèle".as_bytes(),
         )
-        .expect_err("no template to instantiate");
-        assert!(error.contains("UnknownTemplate"), "{error}");
+        .expect("the vault is seeded and the capture written");
+        assert!(written.exists());
+        assert!(vault.path().join("templates/capture.typ").exists());
+    }
+
+    #[test]
+    fn an_unwritable_vault_reports_the_failed_seeding() {
+        let vault = tempfile::tempdir().expect("a temp dir is available");
+        lock(vault.path(), true);
+        let result = run(
+            Some(vault.path().to_path_buf()),
+            &now(),
+            &mut "refusé".as_bytes(),
+        );
+        lock(vault.path(), false);
+        let error = result.expect_err("nothing is writable");
+        assert!(error.starts_with("capture:"), "{error}");
+    }
+
+    /// The permission flip as a parameter, so the restoring call is not the
+    /// literal `set_readonly(false)` clippy refuses.
+    fn lock(dir: &Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(dir)
+            .expect("the dir exists")
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(dir, permissions)
+            .expect("the dir permissions are set");
     }
 
     #[test]
     fn input_that_is_not_utf8_is_refused() {
-        let vault = vault_with_capture_template();
+        let vault = bare_vault();
         let error = run(
             Some(vault.path().to_path_buf()),
             &now(),
@@ -148,7 +177,7 @@ mod tests {
 
     #[test]
     fn a_paste_larger_than_the_limit_is_refused() {
-        let vault = vault_with_capture_template();
+        let vault = bare_vault();
         let huge = "x".repeat(MAX_CAPTURE_BYTES as usize + 1);
         let error = run(
             Some(vault.path().to_path_buf()),
@@ -177,20 +206,9 @@ mod tests {
         NOW.parse().expect("the test clock is a valid timestamp")
     }
 
-    /// A vault with just enough to instantiate a capture: the real fixture
-    /// template, so its placeholders and section headings are the ones
-    /// shipped.
-    fn vault_with_capture_template() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("a temp dir is available");
-        for sub in ["templates", "capture"] {
-            std::fs::create_dir_all(dir.path().join(sub))
-                .expect("the directory is created");
-        }
-        std::fs::copy(
-            Path::new("tests/fixtures/vault/templates/capture.typ"),
-            dir.path().join("templates/capture.typ"),
-        )
-        .expect("the fixture capture template is available");
-        dir
+    /// A bare root: `run` seeds the structure and the embedded templates
+    /// itself, so the tests exercise exactly what a fresh vault gets.
+    fn bare_vault() -> tempfile::TempDir {
+        tempfile::tempdir().expect("a temp dir is available")
     }
 }

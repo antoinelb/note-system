@@ -254,6 +254,17 @@ impl Notice {
         }
     }
 
+    /// A vault whose skeleton would not seed: the default templates the
+    /// binary carries could not land, so creating notes may fail too
+    /// (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
+    pub fn seed_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Create,
+            text: format!("templates: {detail} — creating notes may fail"),
+        }
+    }
+
     /// A capture that landed: the id is the receipt
     /// (adr/2026-08-capture-timestamp-ids.md).
     pub fn captured(stem: &str) -> Notice {
