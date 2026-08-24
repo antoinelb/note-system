@@ -1,4 +1,4 @@
-.PHONY: init static test check-vault
+.PHONY: init static test check-vault upgrade
 
 VAULT := tests/fixtures/vault
 
@@ -35,3 +35,6 @@ run:
 	@mkdir -p $(dir $(DEV_VAULT))
 	@test -d $(DEV_VAULT) || cp -r $(VAULT) $(DEV_VAULT)
 	NOTE_VAULT=$(DEV_VAULT) cargo run
+
+upgrade:
+	cargo install --locked --force --path .
