@@ -62,3 +62,4 @@ All UI strings (labels, placeholders, error messages) are English; note content 
 - Never use while loops
 - Code should be structured to avoid expect in the production code as much as possible
 - Running `make test` should give 100% coverage once a feature is done implementing
+- Always delegate commit to a haiku agent
