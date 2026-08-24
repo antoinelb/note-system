@@ -7,8 +7,7 @@ use crate::caret;
 /// The edit-command layer over one open note: the buffer, its block map,
 /// the active block, the caret and the trouble the shell forwards to the
 /// status surface. The widget only forwards events here — the v2 modal
-/// keymap slots in between the two without touching either (plan.md
-/// § Editor, adr/2026-07-hybrid-active-block-textarea.md).
+/// keymap slots in between the two without touching either (adr/2026-07-hybrid-active-block-textarea.md).
 #[derive(Debug, Default)]
 pub struct Editor {
     buffer: Option<Buffer>,

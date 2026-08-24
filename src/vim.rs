@@ -1,5 +1,5 @@
 //! The modal keymap between the widget and the editor — the slot
-//! `editor.rs` names (plan.md § Editor): the sink forwards keys here first,
+//! `editor.rs` names: the sink forwards keys here first,
 //! and the grammar answers with editor intents, a swallow, or a pass back
 //! to the phase-0 keymap. Pure over a snapshot of the note, so every rung,
 //! entry, motion and operator tests headlessly

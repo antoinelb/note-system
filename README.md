@@ -11,7 +11,7 @@ Single user, no accounts, no plugins — it's my system, extended by editing the
 
 **Status: v0 complete** — the logs screen, the hybrid block editor, links and capture.
 The canvas itself is v1.
-Design in [`docs/plan.md`](docs/plan.md), the v0 task list in [`docs/roadmap-v0.md`](docs/roadmap-v0.md), decisions in [`docs/adr/`](docs/adr/).
+Decisions — and the design's intent — in [`docs/adr/`](docs/adr/).
 
 The vault path comes from `$NOTE_VAULT`, falling back to `~/documents/notes`.
 

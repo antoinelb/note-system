@@ -24,7 +24,7 @@ pub struct Card {
     /// Falls back to the id — a card is never blank.
     pub title: String,
     /// The uppercase mono line over the title: the type name, or the
-    /// capture's age ("capture · 3 d", plan.md § Friction system).
+    /// capture's age ("capture · 3 d").
     pub label: String,
     pub kind: NoteCategory,
     /// The 3px bar's CSS class, one of a closed set — never minted from a
@@ -276,7 +276,7 @@ pub const CLICK_SLOP: f64 = 4.0;
 /// (adr/2026-08-new-card-lands-at-viewport-centre.md).
 pub const DEFAULT_VIEWPORT: (f64, f64) = (1280.0, 800.0);
 
-/// The two semantic zoom levels (plan.md § Canvas): titles, and rendered
+/// The two semantic zoom levels: titles, and rendered
 /// bodies at three times the size
 /// (adr/2026-08-body-zoom-scale-and-metrics.md).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

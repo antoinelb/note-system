@@ -1,5 +1,5 @@
 /*
- * Deep field — design/wireframes-v0.md § Palette, § Typography, § Chrome.
+ * Deep field (adr/2026-08-shipped-ui-is-the-spec.md).
  * Every colour in the app lives in this file
  * (adr/2026-07-design-language-own-phase.md); the theme attribute sits on
  * the rendered .app root, not <html>
@@ -17,7 +17,7 @@
   --hairline: #1b1730;
   --hairline-strong: #332c52;
   --ember: #d9b06a;
-  /* the table (design § The table screen, § Palette): card fills, the eight
+  /* the table: card fills, the eight
      type hues — six drawn in the wireframes, organisation and personal
      derived from turn 1's reference hues by the same mute
      (adr/2026-08-light-table-colours-derived.md) */
@@ -36,10 +36,10 @@
   --bar-generated: #6f6a8c;
   --star-bright: #3d3660;
   --star-dim: #332c52;
-  /* real link edges, solid (design § Palette); the node dots where an edge
+  /* real link edges, solid; the node dots where an edge
      meets a card are the --selection role below */
   --edge: #332c52;
-  /* the writing sheet (design § The table screen, state 6b): fill, glow,
+  /* the writing sheet: fill, glow,
      the selection border the raised card and the tether share — one
      wireframe role ("edge node dots / selection border"), one variable */
   --sheet-fill: #171331;
@@ -173,7 +173,7 @@ body {
   color: var(--ember);
 }
 
-/* -- the logs screen: rail · centre · jump (design § The logs screen);
+/* -- the logs screen: rail · centre · jump;
       mockup widths 210/330 and indents 10/20 normalized to multiples
       of 4 ------------------------------------------------------------------ */
 
@@ -323,7 +323,7 @@ body {
   min-height: 27px;
 }
 
-/* the one warm element is the ember and the caret (plan.md § design): a
+/* the one warm element is the ember and the caret (adr/2026-08-shipped-ui-is-the-spec.md): a
    2px bar drawn beside the caret span. The span remounts on every move,
    restarting the blink — solid while typing, the native rhythm. */
 .caret {
@@ -915,7 +915,7 @@ body {
   color: var(--ink-muted);
 }
 
-/* -- type scale: metadata labels (design § Typography) --------------------
+/* -- type scale: metadata labels ------------------------------------------
       kept last so it wins over the scaffolding element styles above */
 
 .type-label {

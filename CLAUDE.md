@@ -10,9 +10,7 @@ Single user, no accounts, no plugins — extended by editing the source.
 
 ## Documents
 
-- `docs/plan.md` — **the standalone source of truth**: design principles, note model, storage layout, screens, editor, canvas, friction system, AI integration, roadmap, risks. Read it before writing code.
-- `docs/design/` — UI direction: the wireframe deck plus `wireframes-v0.md`, its full description — Part I is the operative spec (two screens: the table, v1; the logs, v0 — layout, palette, chrome, states), Part II the decision trail. Read Part I before writing any UI.
-- `docs/adr/` — decision records (see below).
+- `docs/adr/` — decision records, **the only documentation**: the plan and wireframe docs are gone; the what lives in this file and the code, the why lives in the ADRs.
 
 ## Decision records (ADR) — required practice
 
@@ -20,13 +18,13 @@ Every decision taken from now on is documented in its own file under `docs/adr/`
 
 - One decision per file, kebab-case name (e.g. `2026-07-positions-separate-file.md`).
 - Keep it short: context, the decision, alternatives rejected and why.
-- When a decision changes the plan, update `docs/plan.md` *and* add the ADR — the plan carries the **what**, the ADR preserves the **why**.
+- When a decision changes something stated in this file, update CLAUDE.md *and* add the ADR — CLAUDE.md carries the **what**, the ADR preserves the **why**.
 - When you (Claude) participate in a decision with the user, write the ADR as part of the same change; do not let decisions live only in conversation.
 - When committing there's a decision that's unclear, ask the user why something was made the way it was to document it in an ADR.
 
 ## Stack and architecture (decided)
 
-Rust throughout — details and reasoning in `docs/plan.md`:
+Rust throughout — reasoning preserved in the ADRs:
 
 - **UI**: Dioxus 0.7 desktop. **Whenever Dioxus code is written or understood, first read `.claude/dioxus.md`** (Dioxus 0.7 API reference): 0.7 changed every API — `cx`, `Scope`, and `use_state` are gone; use `use_signal`, `#[component]`, `rsx!`, `Routable`, `use_resource`.
 - **Rendering**: the typst compiler embedded as a Rust crate — compile note → SVG, cache per note, invalidate on edit.
@@ -44,7 +42,7 @@ Rust throughout — details and reasoning in `docs/plan.md`:
 
 ## Roadmap
 
-Four versions (`docs/plan.md` § Roadmap):
+Four versions:
 - **v0 — daily driver for writing**: vault structure + `#meta`/`#l` conventions, file CRUD from per-type templates, daily notes, hybrid block editor (fallback: a single pane toggling source ⇄ rendered), the design language (palette + type scale as theme variables, dark and light), the logs screen, link index + backlinks + dangling-link detection, capture notes + open-loops panel.
 - **v1 — the table**: canvas with persistent positions, semantic zoom, modal card editing, filters, auto-placement. The v1 list is the ceiling, not the floor.
 - **v2 — vim**: modal editing layer on the existing buffer architecture.
@@ -53,9 +51,8 @@ Four versions (`docs/plan.md` § Roadmap):
 ## Design
 
 All spacing should use multiples of 4 and be coherent.
-All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`design/wireframes-v0.md` § Part I).
+All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`adr/2026-07-repo-language-english.md`).
 **No colour literal appears outside `assets/theme.css`** — every colour is a custom property, and both themes (dark `:root`, light `:root[data-theme="light"]`) are filled in together (`adr/2026-07-design-language-own-phase.md`).
-On any conflict between `plan.md` and the wireframes, **the wireframes win** (`adr/2026-07-plan-realigned-with-wireframes.md`).
 
 ## Other instructions
 

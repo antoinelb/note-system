@@ -370,7 +370,7 @@ impl Index {
     }
 
     /// Every note the table can show, ordered by id: time is the one
-    /// category that never appears on the canvas (plan.md § Note model),
+    /// category that never appears on the canvas (adr/2026-07-two-screens-table-and-logs.md),
     /// and an id-less note cannot sit on it — positions are keyed by id,
     /// so it stays open-loops debt instead. Duplicate ids are returned
     /// as-is: a collision is an error to see, not to hide

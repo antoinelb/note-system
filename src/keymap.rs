@@ -1,7 +1,7 @@
 //! The widget's keystroke translation: what one key means to the active
 //! block, decided without touching it. This is the seam the v2 modal keymap
 //! grows in — phase 1 slots `Mode` here, between the widget forwarding keys
-//! and the `Editor` applying them (`editor.rs`, plan.md § Editor,
+//! and the `Editor` applying them (`editor.rs`,
 //! adr/2026-08-hidden-ime-sink.md).
 
 use dioxus::html::{Key, Modifiers};

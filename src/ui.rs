@@ -281,7 +281,7 @@ pub fn App() -> Element {
     }
 }
 
-/// The logs screen (design § The logs screen): time rail, rendered centre
+/// The logs screen: time rail, rendered centre
 /// pane with its scale chain and "captured today" block, month-grid jump
 /// panel. Everything it decides comes from `logs`; the component is wiring.
 #[component]
@@ -1429,7 +1429,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
 
     // the sink's keystroke, translated by `keymap::action` and applied —
     // the only code that runs editor ops for typing; the v2 modal layer
-    // slots between the translation and this (editor.rs, plan.md § Editor)
+    // slots between the translation and this (editor.rs)
     let apply_action = use_callback({
         let clipboard = clipboard.clone();
         let clipboard_write = clipboard_write.clone();
@@ -2978,7 +2978,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 }
                 aside {
                     class: "jump",
-                    // months page by scrolling — no ‹ › buttons (design § logs)
+                    // months page by scrolling — no ‹ › buttons (adr/2026-07-month-paging-arrow-keys.md)
                     onwheel: move |event| {
                         let delta = event.delta().strip_units().y;
                         if delta != 0.0 {
@@ -3238,7 +3238,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         {picker_view()}
                         {
                             // backlinks only, as a count ("← 2") — absent at
-                            // zero, the ember's idiom (design § Chrome)
+                            // zero, the ember's idiom (adr/2026-08-shipped-ui-is-the-spec.md)
                             match sheet_footer {
                                 Some(Ok(count)) if count > 0 => rsx! {
                                     div { class: "sheet-footer", "← {count}" }
@@ -3572,7 +3572,7 @@ fn point(event: &MouseEvent, scale: f64) -> (f64, f64) {
     (coordinates.x / scale, coordinates.y / scale)
 }
 
-/// The one-line chrome (design § Chrome): two 14×14 stroked icons, the
+/// The one-line chrome (adr/2026-08-shipped-ui-is-the-spec.md): two 14×14 stroked icons, the
 /// current screen's lit and each a button to its screen
 /// (adr/2026-08-screen-switch-gesture.md), the open-loops ember, and the
 /// liveness glyph. Zero loops renders nothing at all — absence, not a zero
