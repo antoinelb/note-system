@@ -73,6 +73,23 @@ pub struct HitProbe(pub Arc<dyn Fn(f64, f64) -> Hit + Send + Sync>);
 /// goal column, resolved by the only thing that knows where the lines wrap
 /// — and how many of the asked steps the walk actually took before the
 /// drawn lines ran out.
+/// Whether an IME composition owns the keyboard. Input state, unlike the
+/// drawn preview: it is true in every mode, because the commit keystroke
+/// can reach the sink unflagged and the grammar would read it as a real
+/// key (adr/2026-08-hidden-ime-sink.md).
+///
+/// `Closing` is the grace WebKitGTK's doubled end forces: it fires an
+/// empty `compositionend` before the real one and can slip a stray
+/// keydown between them, so the flag cannot drop on the empty end. The
+/// grace is exactly one keystroke, so a composition that genuinely ends
+/// empty — an abort — costs one key and never wedges the editor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Composing {
+    No,
+    Open,
+    Closing,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Landing {
     pub start: usize,
@@ -444,6 +461,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // the mode and it survives slides and activations
     // (adr/2026-08-escape-ladder-editor-wide-mode.md)
     let mut vim = use_signal(vim::Vim::default);
+    // a composition is open — input state, true in every mode, unlike the
+    // preview below which normal mode must never draw. The commit
+    // keystroke can arrive unflagged (the spike's stray keydown,
+    // adr/2026-08-hidden-ime-sink.md), and without this the grammar reads
+    // it as a real key and resets the pending chord: d^ lost its d.
+    let mut composing = use_signal(|| Composing::No);
     // the live IME composition ("^" mid–dead-key), previewed at the caret
     // and absent from the buffer until compositionend commits it
     // (adr/2026-08-hidden-ime-sink.md)
@@ -1837,9 +1860,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     // IME owns it, and an open preview means
                                                     // the IME owns it whatever isComposing
                                                     // says (the spike saw both)
+                                                    let owned = *composing.peek();
+                                                    if owned == Composing::Closing {
+                                                        composing.set(Composing::No);
+                                                    }
                                                     if event.data().is_composing()
                                                         || event.key() == Key::Dead
-                                                        || preview.peek().is_some()
+                                                        || owned != Composing::No
                                                     {
                                                         return;
                                                     }
@@ -1892,6 +1919,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     }
                                                 }},
                                                 oncompositionstart: move |_| {
+                                                    composing.set(Composing::Open);
                                                     // the IME writes; normal mode does not
                                                     if vim.peek().mode == vim::Mode::Insert {
                                                         preview.set(Some(String::new()));
@@ -1909,8 +1937,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     preview.set(None);
                                                     let committed = event.data().data();
                                                     if committed.is_empty() {
+                                                        composing.set(Composing::Closing);
                                                         return;
                                                     }
+                                                    composing.set(Composing::No);
                                                     if vim.peek().mode == vim::Mode::Insert {
                                                         editor.write().insert_at_caret(&committed);
                                                         return;
@@ -6745,6 +6775,59 @@ mod tests {
         assert!(
             !dioxus_ssr::render(&dom).contains(r#"class="compose""#),
             "the preview is gone"
+        );
+    }
+
+    #[test]
+    fn a_dead_key_behind_a_verb_keeps_the_verb() {
+        // the whole real sequence for d^ on a French layout: the dead
+        // key's own keydown, the composition, the commit keystroke —
+        // which WebKitGTK can send UNflagged (the spike's stray keydown)
+        // — then the empty end and the real one. Unguarded, that stray
+        // keydown reads as an unbound key and resets the pending d
+        // (adr/2026-08-hidden-ime-sink.md).
+        fn cut_with(flagged: bool, stray_between_ends: bool) -> String {
+            let vault = temp_vault();
+            let (mut dom, clicks, hit) =
+                hit_app(Some(vault.path().to_path_buf()));
+            let (block, sink) = activate_heading(&mut dom, &clicks);
+            place_caret(&mut dom, block, &hit, 4);
+            press(
+                &mut dom,
+                sink,
+                Key::Character("d".into()),
+                Modifiers::empty(),
+            );
+            press(&mut dom, sink, Key::Dead, Modifiers::empty());
+            compose(&mut dom, sink, "compositionstart", "");
+            compose(&mut dom, sink, "compositionupdate", "^");
+            let commit = Key::Character(" ".into());
+            if !stray_between_ends {
+                if flagged {
+                    press_composing(&mut dom, sink, commit.clone());
+                } else {
+                    press(&mut dom, sink, commit.clone(), Modifiers::empty());
+                }
+            }
+            compose(&mut dom, sink, "compositionend", "");
+            if stray_between_ends {
+                press(&mut dom, sink, commit, Modifiers::empty());
+            }
+            compose(&mut dom, sink, "compositionend", "^");
+            source_of(&dom)
+        }
+
+        let cut = "26-07-23\n#l(\"2026-07-22\")\n";
+        assert_eq!(cut_with(true, false), cut, "flagged commit: d^ cuts");
+        assert_eq!(
+            cut_with(false, false),
+            cut,
+            "unflagged commit: the stray keydown must not eat the d"
+        );
+        assert_eq!(
+            cut_with(false, true),
+            cut,
+            "stray keydown between the two ends: same"
         );
     }
 
