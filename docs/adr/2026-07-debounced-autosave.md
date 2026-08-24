@@ -5,9 +5,9 @@
 The editor had to choose between explicit save, autosave on leave, and debounced autosave.
 Two project constraints narrow it more than taste does:
 
-- `plan.md` § Design principles: **"No hard blocks. All friction mechanisms are soft (visible debt), never save-blockers."**
+- Design principles: **"No hard blocks. All friction mechanisms are soft (visible debt), never save-blockers."**
   Explicit save produces a dirty state, and a dirty state produces a "you have unsaved changes" prompt on navigation — which is a save-blocker in the plainest sense.
-- `design/wireframes-v0.md` § Chrome: the whole app has one line of chrome, and the writing sheet has exactly two lines of its own (the note's meta line, and a backlinks footer).
+- The design's chrome: the whole app has one line of chrome, and the writing sheet has exactly two lines of its own (the note's meta line, and a backlinks footer).
   There is no budget for an unsaved-changes indicator, and no button anywhere for a save affordance to live on.
 
 Typst compilation is also too slow to run per keystroke, so a recompile timer was needed regardless.

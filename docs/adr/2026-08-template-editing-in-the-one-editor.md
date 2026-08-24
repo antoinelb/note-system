@@ -2,7 +2,7 @@
 
 ## Context
 
-Templates are editable notes by design (`docs/plan.md` § time-based notes), but nothing in the app could open one: the editor's five open paths all derive from the logs selection or the index, and templates are never indexed (`scan_vault` walks only the category directories).
+Templates are editable notes by design, but nothing in the app could open one: the editor's five open paths all derive from the logs selection or the index, and templates are never indexed (`scan_vault` walks only the category directories).
 Editing a template meant leaving the app.
 
 ## Decision

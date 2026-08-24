@@ -2,7 +2,7 @@
 
 ## Context
 
-The vim friction batch (`docs/plans/2026-08-23-vim-friction-batch.md`, items 4–6) brings vim-surround's `cs`, `ds`, `ys` and visual `S` to the grammar. Item 4 lands the finder (`motions::surround_spans`) two tasks ahead of the keys that will call it, so the choices below are fixed now and simply consumed later.
+The vim friction batch brings vim-surround's `cs`, `ds`, `ys` and visual `S` to the grammar. Item 4 lands the finder (`motions::surround_spans`) two tasks ahead of the keys that will call it, so the choices below are fixed now and simply consumed later.
 
 ## Decision
 

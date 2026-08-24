@@ -2,7 +2,7 @@
 
 ## Context
 
-Visual mode drew line-wise selections at their raw byte ends, not full lines — noted as friction-backlog at the time (`adr/2026-08-visual-selection-is-the-anchor.md`). The vim friction batch (`docs/plans/2026-08-23-vim-friction-batch.md`, item 3) closes it.
+Visual mode drew line-wise selections at their raw byte ends, not full lines — noted as friction-backlog at the time (`adr/2026-08-visual-selection-is-the-anchor.md`). The vim friction batch item 3 closes it.
 
 ## Decision
 

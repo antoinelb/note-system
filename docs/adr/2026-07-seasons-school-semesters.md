@@ -2,7 +2,7 @@
 
 ## Context
 
-The logs screen shows three time scales side by side (day, week, season), and the season id form was frozen at `2026-summer` by the design's rail rows (`design/wireframes-v0.md` § The logs screen).
+The logs screen shows three time scales side by side (day, week, season), and the season id form was frozen at `2026-summer` by the design's rail rows.
 Nothing anywhere defined the boundaries — what dates `2026-summer` actually covers — and the scale chain (day → ISO week → season) cannot be computed without them.
 
 ## Decision

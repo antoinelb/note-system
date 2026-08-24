@@ -2,7 +2,7 @@
 
 ## Context
 
-The vim friction batch (`docs/plans/2026-08-23-vim-friction-batch.md` item 8) gives plain `j`/`k` vim's real behaviour: stepping one *drawn* line at a time, not one logical (newline-delimited) line. Cormorant Garamond is proportional and the source pane wraps (`.block-active` is `white-space: pre-wrap`), so where a line actually breaks is geometry the grammar cannot see — `src/vim.rs` decides pure over a `View` snapshot of text and byte offsets, never the DOM. Item 7 already drew the boundary: `Act::WalkVisual { down, count, extend }` is what the grammar hands the executor, resolved until now by `walk_visual_fallback`'s logical-line walk alone (`docs/adr` had none yet for that half; this ADR covers both).
+The vim friction batch item 8 gives plain `j`/`k` vim's real behaviour: stepping one *drawn* line at a time, not one logical (newline-delimited) line. Cormorant Garamond is proportional and the source pane wraps (`.block-active` is `white-space: pre-wrap`), so where a line actually breaks is geometry the grammar cannot see — `src/vim.rs` decides pure over a `View` snapshot of text and byte offsets, never the DOM. Item 7 already drew the boundary: `Act::WalkVisual { down, count, extend }` is what the grammar hands the executor, resolved until now by `walk_visual_fallback`'s logical-line walk alone (this ADR covers both).
 
 ## Decision
 
@@ -19,7 +19,7 @@ The vim friction batch (`docs/plans/2026-08-23-vim-friction-batch.md` item 8) gi
   `generation` disowns a walk that resolves after its run was already forgotten: the task compares the stamp it started with before touching the caret or the column.
 - **A probe with nothing left to answer degrades to the logical-line walk for the rest of the count.** No seam injected at all, a miss, the caret already on the note's first or last drawn line, or a landing outside the active block all read as `None` and take the same fallback — `walk_visual_fallback`, the logical walk from item 7, which is also what crosses into the neighbouring block and clamps at the note's ends.
   The seam reports how many steps it took, and the remaining `count - taken` go through one `motions::motion` call, so a reported miss and an absent seam are identical at any count (rendered side by side and compared) and `3j` sitting on a block's last drawn line moves three lines rather than one.
-- **Operator-pending `j`/`k` and the arrow keys keep logical lines** — untouched by this seam, per the batch's own scope (`docs/plans/2026-08-23-vim-friction-batch.md` § Out of scope): `dj`/`yk`/`cj` stay vim's linewise behaviour, and insert mode's arrows stay phase 0's.
+- **Operator-pending `j`/`k` and the arrow keys keep logical lines** — untouched by this seam, per the batch's own scope: `dj`/`yk`/`cj` stay vim's linewise behaviour, and insert mode's arrows stay phase 0's.
 
 ## Rejected
 

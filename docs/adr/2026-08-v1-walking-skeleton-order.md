@@ -12,7 +12,7 @@ Two facts constrain v1 specifically:
 
 ## Decision
 
-Eight phases, dogfooding-first (breakdown in `roadmap-v1.md`):
+Eight phases, dogfooding-first:
 
 0. positions store — the invariant as tested code, before any UI consumes it
 1. table at rest — cards, kinds, pan, drag (wireframe state 6a)

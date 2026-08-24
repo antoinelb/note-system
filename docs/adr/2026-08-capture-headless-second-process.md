@@ -2,7 +2,7 @@
 
 ## Context
 
-`plan.md` § Capture notes wants captures "created instantly via global
+The requirement is captures "created instantly via global
 hotkey or paste", and phase 10 asks explicitly whether that is a true global
 hotkey or "a DE shortcut launching `app --capture` through single-instance
 IPC".

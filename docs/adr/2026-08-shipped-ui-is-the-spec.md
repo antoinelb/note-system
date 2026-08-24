@@ -44,8 +44,15 @@ next redesign re-litigates six turns of iteration.
   shows at all) also remains a live tweak.
 - **Full text is recoverable** at
   `git show ed91492^:docs/design/wireframes-v0.md` (the deck sits beside
-  it). Live-file citations of the deleted docs retarget to this ADR; ADRs
-  written before the deletion keep their citations — they are records.
+  it). Live-file citations of the deleted docs retarget to this ADR.
+- **ADRs cite the deleted docs two ways, and only one of them is dead**
+  (amended 2026-08-24, after the first sweep left ~110 broken pointers
+  behind). A *pointer* — a parenthetical propping up a claim, `(plan.md
+  § Editor)` — retargets to the live ADR that carries the claim, or is
+  dropped and the prose kept. A citation that is the *subject* — recording
+  what a deleted doc said, or an edit made to one — stays verbatim: that is
+  the record, and rewriting it would falsify history. Roadmap phase names
+  survive as prose either way; only the file pointer dies.
 
 ## Rejected
 

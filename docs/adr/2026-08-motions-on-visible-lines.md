@@ -2,7 +2,7 @@
 
 ## Context
 
-v2 phase 2 makes the note navigable at the speed of intent (`roadmap-v2.md` § Phase 2): h j k l, w b e, 0 ^ $, f F t T with ; and ,, gg G — all with counts, note-scoped, char-wise over French text.
+v2 phase 2 makes the note navigable at the speed of intent: h j k l, w b e, 0 ^ $, f F t T with ; and ,, gg G — all with counts, note-scoped, char-wise over French text.
 
 ## Decision
 
@@ -11,7 +11,7 @@ v2 phase 2 makes the note navigable at the speed of intent (`roadmap-v2.md` § P
 - **The normal-mode caret rests on clusters**: a line's deepest position is its final cluster's *start* — `l` and `$` land on the last character, not after it, exactly as vim draws its block cursor. Phase 3's inclusive/exclusive operator spans depend on this convention. Insert entries step off it (`a` appends past the cluster, `A` to the line's true end).
 - **The goal column is cluster-counted and lives in `Vim`**, remembered by j/k runs, forgotten by everything else. Counts multiply into motions (`3j`, `12l`, `2fc`, `[count]gg` to line N, clamped); a count with no motion dies on Escape — the ladder's pending rung — or resets when a phase-0 arrow passes through.
 - **`Editor::place_at`** is every motion's landing: note-global, waking the owning block via the existing activate path when the caret leaves the active one. Phase 5's search lands through the same door.
-- **The span-kind table for phase 3**, recorded now so no motion is revisited: `w b h l 0 ^ $` exclusive; `e f t F T ; ,` inclusive; `j k gg G` linewise.
+- **The span-kind table for phase 3**, recorded now so no motion is revisited: `w b h l 0 ^` exclusive; `$ e f t F T ; ,` inclusive; `j k gg G` linewise. (`$` was first written down here as exclusive; the code has always made it inclusive, which is both vim's behaviour and what lets `d$` reach the line's end. The table is corrected, not the code.)
 
 ## Rejected
 

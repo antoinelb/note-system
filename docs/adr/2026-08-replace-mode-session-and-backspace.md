@@ -2,7 +2,7 @@
 
 ## Context
 
-The vim friction batch adds `R`, vim's replace mode, alongside `s`/`S` (`docs/plans/2026-08-23-vim-friction-batch.md` item 2).
+The vim friction batch adds `R`, vim's replace mode, alongside `s`/`S`.
 Backspace inside a real vim replace session restores whatever character it overwrote — a behaviour phase 0's grammar had to encode as its own state, not a single splice.
 The one register is the system clipboard (`adr/2026-08-one-register-the-clipboard.md`), and every mutating key checkpoints once per change intent (`adr/2026-08-undo-at-vim-grain.md`).
 
@@ -10,7 +10,7 @@ The one register is the system clipboard (`adr/2026-08-one-register-the-clipboar
 
 - `R` opens a session: one `Act::Checkpoint`, the mode becomes `Replace`, and the box caret draws exactly as it does in normal mode.
   This is a deliberate, accepted trade against `adr/2026-08-caret-shape-is-the-mode-indicator.md`: the caret shape is the design's sole mode indicator, real vim draws replace mode with its own caret, and a live `R` session is visually indistinguishable from normal mode here.
-  The box is what `adr/2026-08-caret-shape-is-the-mode-indicator.md` mandates for normal mode ("normal draws the box"); `plan.md` § v2 says only that the caret's shape becomes the mode indicator.
+  The box is what `adr/2026-08-caret-shape-is-the-mode-indicator.md` mandates for normal mode ("normal draws the box").
   Reusing it rather than inventing an `R` shape or a chrome badge is the accepted cost, so a reader hitting this later should know the collision was seen, not missed.
 - Each typed cluster overwrites the cluster under the caret, recording the original it displaced.
 - Past the line's end there is nothing to overwrite, so a keystroke appends instead — the same splice, an empty recorded original.
@@ -28,4 +28,4 @@ The one register is the system clipboard (`adr/2026-08-one-register-the-clipboar
 - **A checkpoint per keystroke** — vim's replace session is one undo step, matching the change-intent grain of `adr/2026-08-undo-at-vim-grain.md`; checkpointing every cluster would make `u` unusable on a long replace run.
 - **A clipboard write per keystroke** — the one register would end up holding only the last overwritten cluster, losing the rest of the session; one write at Escape keeps the whole run available to `p`.
 - **Replaying the dot keystroke by keystroke** — re-running the grammar risks Backspace meeting a different original than the one the first session recorded; a single splice of the recorded string is exact and idempotent.
-- **A count on `R`** — out of scope for this batch (`docs/plans/2026-08-23-vim-friction-batch.md` § Out of scope); no daily-writing friction has asked for it yet.
+- **A count on `R`** — out of scope for this batch; no daily-writing friction has asked for it yet.

@@ -2,7 +2,7 @@
 
 ## Context
 
-v2 phase 4 (`roadmap-v2.md` § Phase 4): see the span before choosing the verb.
+v2 phase 4: see the span before choosing the verb.
 
 ## Decision
 

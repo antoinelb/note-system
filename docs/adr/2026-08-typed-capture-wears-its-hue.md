@@ -2,7 +2,7 @@
 
 ## Context
 
-Capture promotion is editing, not a feature: set `type` in `#meta`, write the summary (`plan.md` § Capture notes) — the file stays in `capture/`, nothing moves it.
+Capture promotion is editing, not a feature: set `type` in `#meta`, write the summary — the file stays in `capture/`, nothing moves it.
 But the card treatment keyed on the directory-derived category: `bar_class` and `label` sent every capture to the grey age-label treatment, so a promoted capture repainted nothing — the roadmap's "the card regains a hue and full fill" was unreachable.
 
 ## Decision

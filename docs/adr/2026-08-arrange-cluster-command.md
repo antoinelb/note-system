@@ -2,7 +2,7 @@
 
 ## Context
 
-Phase 8's on-demand layout: at most a command, force-directed never the default (plan.md § Canvas); the scope, gesture and iteration bound were open.
+Phase 8's on-demand layout: at most a command, force-directed never the default; the scope, gesture and iteration bound were open.
 
 ## Decision
 

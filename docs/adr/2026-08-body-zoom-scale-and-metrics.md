@@ -13,7 +13,7 @@ The deck never drew the bodies state; it is designed here in the phase-6-v0 voca
   With that order the pan stays in canvas units and one division in `point()` keeps every drag and pan correct — the promise kept literally.
   Zooming keeps the canvas point under the viewport centre fixed: `pan' = pan + centre·(1/s' − 1/s)` (`table::rezoom`).
 - **Cards stay 176px logical** (528 on screen); the body is the note's whole rendered SVG in a fixed, clipped area below label and title — body 240px, card 296px tall, ×4 throughout.
-  The SVG fits by `width: 100%` and is never restyled: the template's own typography is the point (plan.md § Canvas).
+  The SVG fits by `width: 100%` and is never restyled: the template's own typography is the point.
 - **Opening a sheet forces titles zoom.**
   The sheet, dim, tether and raised card are titles-zoom viewport constructs (`SHEET_LEFT` math never sees a scale ≠ 1); a click at body zoom zooms out and opens — one legible gesture.
 - Click slop is measured in canvas units after the division — slightly more forgiving at zoom, deliberately.

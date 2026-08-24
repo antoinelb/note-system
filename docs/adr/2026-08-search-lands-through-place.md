@@ -2,7 +2,7 @@
 
 ## Context
 
-`roadmap-v2.md` § Phase 5: `/` search within the note, `n`/`N` to walk matches; a match may live in a rendered block, so landing must activate it — the offset-walking cousin of Ctrl+Enter's `links::link_at`.
+Phase 5: `/` search within the note, `n`/`N` to walk matches; a match may live in a rendered block, so landing must activate it — the offset-walking cousin of Ctrl+Enter's `links::link_at`.
 
 ## Decision
 

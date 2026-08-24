@@ -16,4 +16,4 @@ Ctrl+P is unbound today; no chord moves.
 
 - **v0 polish backlog** — it is a feature with its own design surface (overlay, command registry, tests), not polish; the backlog is for friction found while daily-driving what exists.
 - **Late in v1, once the commands exist** — cheapest per command, but then all of v1 is built without it and naming the accumulated chords becomes exactly the retrofit audit the phase-by-phase rule avoids.
-- **Extending the ceiling silently** — v1's list is the ceiling (`plan.md` § Known risks 4); this ADR is the explicit, user-decided exception that keeps the ceiling meaningful.
+- **Extending the ceiling silently** — v1's list is the ceiling; this ADR is the explicit, user-decided exception that keeps the ceiling meaningful.

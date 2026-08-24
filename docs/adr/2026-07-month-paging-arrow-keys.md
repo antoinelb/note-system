@@ -3,7 +3,7 @@
 ## Context
 
 The wireframes said the jump panel pages months by scrolling only ("no
-chips, no ‹ › buttons", `design/wireframes-v0.md` § The logs screen).
+chips, no ‹ › buttons", `adr/2026-08-shipped-ui-is-the-spec.md`).
 After living with the screen, a 2026-07-28 mockup amended that: the
 calendar header gains ‹ › chevrons and a **today** button, right-aligned
 beside the month label. The mockup is the newer design word and wins.

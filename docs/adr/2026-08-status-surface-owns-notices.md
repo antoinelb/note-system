@@ -2,7 +2,7 @@
 
 ## Context
 
-An architecture review through `docs/interface-rules.md` (AIR) found that the app's entire error surface was `Editor.notice: Option<String>` — single-slot, severity-less, overwritten by any later tick — while a real degraded mode (the watcher failing to start) announced itself only on stderr.
+An architecture review against AIR found that the app's entire error surface was `Editor.notice: Option<String>` — single-slot, severity-less, overwritten by any later tick — while a real degraded mode (the watcher failing to start) announced itself only on stderr.
 Every subsystem (autosave, positions, watcher batches, delete, capture) competed for the one slot, and ~10 `ui.rs` call sites each re-invented `map_err(|err| format!("…{err:?}"))`.
 The wireframes allow almost no chrome: "the only chrome in the whole app is a single top line and one number."
 

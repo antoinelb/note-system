@@ -2,7 +2,7 @@
 
 ## Context
 
-The design was frozen in `design/wireframes-v0.md` (palette, type scale, chrome, five states) and nothing in the codebase reflects it.
+The design was frozen (palette, type scale, chrome, five states) and nothing in the codebase reflects it.
 `find . -name '*.css'` returns nothing; `src/ui.rs` emits `class: "note-list"`, `"viewer"`, `"render-error"` against zero rules; `src/main.rs` has no stylesheet.
 The roadmap had no task for it anywhere — phase 6 (the logs screen) listed layout tasks only, so the palette would have been invented component-by-component while fighting a three-pane layout.
 

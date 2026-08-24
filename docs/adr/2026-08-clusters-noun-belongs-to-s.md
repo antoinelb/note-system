@@ -2,7 +2,7 @@
 
 ## Context
 
-The vim friction batch (`docs/plans/2026-08-23-vim-friction-batch.md`, item 1) adds `s` and `S` to normal mode.
+The vim friction batch item 1 adds `s` and `S` to normal mode.
 Vim itself spells both as compositions of existing verbs — `s` is `cl`, `S` is `cc` — and `src/vim.rs` already funnels every operator application through `finish_operator`, which owns checkpointing, clipboard fill, dot-recording and the change-verb's insert handoff.
 
 ## Decision

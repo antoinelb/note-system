@@ -2,7 +2,7 @@
 
 ## Context
 
-Phase 6 must answer plan.md § Canvas's scale question ("low thousands"): only visible cards render, at either zoom level — body zoom otherwise compiles every note in the vault.
+Phase 6 must answer the scale question ("low thousands"): only visible cards render, at either zoom level — body zoom otherwise compiles every note in the vault.
 Culling needs the viewport's size, which the component cannot ask the window for headlessly.
 
 ## Decision

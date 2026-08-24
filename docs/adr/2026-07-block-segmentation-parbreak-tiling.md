@@ -58,7 +58,7 @@ fences) never contain a top-level `Parbreak`.
 
 - **Line-based or regex segmentation** — typst constructs span lines and
   only compile as complete expressions; the tree is the authority
-  (`plan.md` § Editor, and the phase-2 never-regex rule).
+  (the phase-2 never-regex rule).
 - **Whole-note compile + carving the SVG into per-block regions** — needs
   source→layout position mapping (typst-ide territory) and breaks the
   "active block is plain source" model for no gain at note scale.

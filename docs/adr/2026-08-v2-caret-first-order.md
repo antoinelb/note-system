@@ -2,7 +2,7 @@
 
 ## Context
 
-v2 is the vim layer the editor was architected for since v0 phase 5: the widget forwards events to `Editor`, and "the v2 modal keymap slots in between the two without touching either" (`plan.md` § Editor, `adr/2026-07-buffer-is-path-plus-string.md`).
+v2 is the vim layer the editor was architected for since v0 phase 5: the widget forwards events to `Editor`, and "the v2 modal keymap slots in between the two without touching either" (`adr/2026-07-buffer-is-path-plus-string.md`).
 The active block today is a native `<textarea>` (`adr/2026-07-hybrid-active-block-textarea.md`), which bought composition, clipboard, selection and key repeat for free — at the price that the browser owns the caret.
 WebKitGTK has no `caret-shape`, so that caret is a bar forever, and normal mode's box caret is the mode indicator in a design whose chrome refuses labels.
 The v0 polish backlog already named the homemade widget as v2 groundwork.

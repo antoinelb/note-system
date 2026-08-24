@@ -2,7 +2,7 @@
 
 ## Context
 
-`plan.md` said "AI suggestions live in `.index/`" and § AI integration said "suggestions are stored in the sidecar index only" — written before the index's disposability was made total: `Index::open` discards the database on any version mismatch, `rebuild()` deletes every table, and the app rebuilds on every start (`ui.rs::load_notes`).
+The plan was that "AI suggestions live in `.index/`" and "suggestions are stored in the sidecar index only" — written before the index's disposability was made total: `Index::open` discards the database on any version mismatch, `rebuild()` deletes every table, and the app rebuilds on every start (`ui.rs::load_notes`).
 `adr/2026-07-sqlite-index-schema.md` deferred the question with "positions and suggestions tables are v1/v3 — not created now"; positions got their answer in `adr/2026-07-positions-separate-file.md`.
 Suggestions are AI output that costs a `claude` call to regenerate; dismissals are pure user judgment — "this connection is wrong" — with no upstream to rebuild from at any price.
 A dismissed suggestion that resurfaces after a rebuild is the friction system proposing the same rejected link forever.

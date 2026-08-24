@@ -2,7 +2,7 @@
 
 ## Context
 
-The design's chrome refuses labels (`design/wireframes-v0.md` § Chrome); a "-- INSERT --" line has nowhere to live.
+The design's chrome refuses labels; a "-- INSERT --" line has nowhere to live.
 The owned caret can finally draw the box WebKitGTK never could — the reason the widget was built first (`adr/2026-08-v2-caret-first-order.md`).
 
 ## Decision

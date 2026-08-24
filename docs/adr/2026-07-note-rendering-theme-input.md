@@ -5,7 +5,7 @@
 Rendered notes came out as white typst pages with the palette's light-column
 ink, which the phase-8 block fragments turned into white strips on the dark
 field — and the design forbids white outright ("dusk paper, no white
-anywhere", `design/wireframes-v0.md` § 4a). Templates cannot consume the
+anywhere", `adr/2026-08-shipped-ui-is-the-spec.md`). Templates cannot consume the
 app's CSS variables (`adr/2026-07-theme-attribute-on-app-root.md`), so the
 theme needs another channel into the compile.
 

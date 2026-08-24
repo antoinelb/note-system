@@ -3,7 +3,7 @@
 ## Context
 
 Phase 9 gives `#l` insertion an autocomplete "over note ids/titles from the
-index" (`roadmap-v0.md` § Phase 9).
+index".
 Ids are kebab-case and descriptive — `atomic-notes`, `2026-w30` — and they are
 what `#l("…")` renders, so they alone would already be searchable.
 But the name a note is *thought* of by is its heading ("How to Take Smart
@@ -13,7 +13,7 @@ Notes", "Niklas Luhmann"), and that name was nowhere in the index.
 
 - A note's **title is its first level-1 heading**, extracted by `typst-syntax`
   during the same walk that finds `#meta` and `#l`
-  (`plan.md` § Known risks: a real parse, never regex).
+  (`adr/2026-08-ctrl-enter-opens-time-links.md`: a real parse, never regex).
   Deeper headings (`==`) are sections inside a note, not its name; a heading
   with nothing but whitespace names nothing (`None`).
 - The title lives on **`Note`, not `Meta`**: it is content, derived by

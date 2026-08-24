@@ -2,7 +2,7 @@
 
 ## Context
 
-v2 phase 1 introduces normal and insert modes (`roadmap-v2.md` § Phase 1).
+v2 phase 1 introduces normal and insert modes.
 The modal layer is `src/vim.rs` — the slot `editor.rs` reserved: the sink forwards keys there first; the grammar answers with editor intents (`Act`), a swallow, or a pass back to the phase-0 keymap.
 
 ## Decision
@@ -18,4 +18,4 @@ The modal layer is `src/vim.rs` — the slot `editor.rs` reserved: the sink forw
 
 - **Per-activation mode reset** — a slide mid-thought would eject to normal (or insert), and the roadmap's suggestion was survival.
 - **Insert at launch** — the first cut's choice ("the app opens to write"); reversed above: the vim reflex wants `i` to be the one key away, not `Esc`.
-- **Mode on `Editor`** — the keymap layer is *between* widget and editor by construction (plan.md § Editor); the editor must stay ignorant of modes.
+- **Mode on `Editor`** — the keymap layer is *between* widget and editor by construction; the editor must stay ignorant of modes.

@@ -13,7 +13,7 @@ And roadmap phase 4 plans a note list as the app shell, while no list appears an
 The app has exactly **two screens**, with a button each way: the **table** (spatial canvas of permanent notes) and the **logs** (day, week and season notes on one screen).
 Time notes never appear on the table.
 
-- **The table stays v1.** Nothing in the v0 goal — "daily driver for writing" — needs the canvas, and the table's writing sheet *contains* the editor, so it could not precede the editor phases anyway. Keeping it in v1 also keeps `plan.md` § Known risks 4 (scope creep at v1) contained.
+- **The table stays v1.** Nothing in the v0 goal — "daily driver for writing" — needs the canvas, and the table's writing sheet *contains* the editor, so it could not precede the editor phases anyway. Keeping it in v1 also keeps scope creep at v1 contained.
 - The wireframes are therefore the **v0 + v1 target UI**, not a v0 specification. They govern every v0 choice that touches both screens: greyscale chrome, a single alert hue, type colour only on cards, rendered typst never restyled by the app.
 - **The logs screen becomes a v0 phase of its own.** It needs only rendering, navigation and create-from-template, so it lands right after the editor phase.
 - Consequently **weekly and season notes move into v0** — they were "later" in `plan.md` § Time-based notes, but the logs screen shows all three scales side by side.
@@ -21,7 +21,7 @@ Time notes never appear on the table.
 
 ## Consequences
 
-The split-view fallback declared in `plan.md` § Known risks 1 is unusable inside a ~600 px writing sheet (two ~300 px panes).
+The split-view fallback is unusable inside a ~600 px writing sheet (two ~300 px panes).
 Because the sheet arrives with the table in v1, that tension defers with it: v0's editor is full-window, where split view still works.
 
 ## Alternatives rejected

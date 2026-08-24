@@ -4,7 +4,7 @@
 
 `plan.md` § AI integration says the app "shells out to the `claude` CLI headlessly" but never says *when*.
 The options span a spectrum: a palette command run by hand, a debounced background run after each save, or a scheduled vault sweep (`app --suggest` under a systemd timer).
-Every run costs API money, and the system's ethos is that features earn their way in through demonstrated friction ("as needed" — `roadmap-v2.md`), not through completeness.
+Every run costs API money, and the system's ethos is that features earn their way in through demonstrated friction ("as needed"), not through completeness.
 
 ## Decision
 

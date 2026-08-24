@@ -23,4 +23,4 @@ The canvas already has a stacking rule (DOM order, `adr/2026-08-sheet-stacking-d
 
 - **Per-edge absolutely-positioned divs** — a rotated div per line fights the layout for what SVG states directly.
 - **Filtering placed/dangling in SQL** — the placed set lives in the store and the session fallback, which SQL cannot see; one lookup table in the geometry is the honest join.
-- **Edge routing or curves** — plan.md § Canvas: straight lines, no routing; legibility comes from placement, not splines.
+- **Edge routing or curves** — straight lines, no routing; legibility comes from placement, not splines.

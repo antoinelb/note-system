@@ -1495,6 +1495,30 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
     });
 
+    // One key against the note, through the grammar. The sink only
+    // exists over an open note with a caret, so the zip never comes up
+    // empty; the three callers — the sink's keydown, a committed
+    // composition, and search's synthesized n — all need the same
+    // snapshot, and the editor guard must drop before `vim` is written.
+    let grammar = use_callback(move |(key, modifiers): (Key, Modifiers)| {
+        let snapshot = editor.peek();
+        snapshot.note().zip(snapshot.caret()).map_or(
+            vim::Outcome::Pass,
+            |((_, note_text), at)| {
+                vim.write().handle(
+                    &key,
+                    modifiers,
+                    &vim::View {
+                        text: note_text,
+                        blocks: snapshot.blocks(),
+                        head: at.head,
+                        anchor: at.anchor,
+                    },
+                )
+            },
+        )
+    });
+
     // the grammar's intents, applied in order — the executor never thinks
     // (adr/2026-08-escape-ladder-editor-wide-mode.md)
     let apply_vim = use_callback({
@@ -1821,27 +1845,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     }
                                                     // the grammar speaks first (editor.rs
                                                     // names this slot); Pass hands the key to
-                                                    // the phase-0 keymap unchanged. The sink
-                                                    // only exists over an open note with a
-                                                    // caret, so the zip never comes up empty.
-                                                    let outcome = {
-                                                        let snapshot = editor.peek();
-                                                        snapshot.note().zip(snapshot.caret()).map_or(
-                                                            vim::Outcome::Pass,
-                                                            |((_, note_text), at)| {
-                                                                vim.write().handle(
-                                                                    &event.key(),
-                                                                    event.modifiers(),
-                                                                    &vim::View {
-                                                                        text: note_text,
-                                                                        blocks: snapshot.blocks(),
-                                                                        head: at.head,
-                                                                        anchor: at.anchor,
-                                                                    },
-                                                                )
-                                                            },
-                                                        )
-                                                    };
+                                                    // the phase-0 keymap unchanged
+                                                    let outcome = grammar
+                                                        .call((event.key(), event.modifiers()));
                                                     match outcome {
                                                         vim::Outcome::Acts(acts) => {
                                                             event.prevent_default();
@@ -1898,16 +1904,34 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                 },
                                                 oncompositionend: move |event: Event<CompositionData>| {
                                                     // WebKitGTK can fire an empty end before
-                                                    // the real one (the spike's transcript);
-                                                    // only committed text lands, and only in
-                                                    // insert — a composition a normal-mode key
-                                                    // started is discarded whole
+                                                    // the real one (the spike's transcript), so
+                                                    // the early end commits nothing
                                                     preview.set(None);
                                                     let committed = event.data().data();
-                                                    if !committed.is_empty()
-                                                        && vim.peek().mode == vim::Mode::Insert
-                                                    {
+                                                    if committed.is_empty() {
+                                                        return;
+                                                    }
+                                                    if vim.peek().mode == vim::Mode::Insert {
                                                         editor.write().insert_at_caret(&committed);
+                                                        return;
+                                                    }
+                                                    // outside insert the composition wrote
+                                                    // nothing, so its commit is the only way a
+                                                    // dead key ever reaches the grammar — ^ is
+                                                    // dead on a French layout, and ^ is a
+                                                    // motion. One cluster is one keystroke;
+                                                    // anything longer is a real IME's and stays
+                                                    // discarded whole
+                                                    // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
+                                                    if caret::next_cluster(&committed, 0)
+                                                        != committed.len()
+                                                    {
+                                                        return;
+                                                    }
+                                                    if let vim::Outcome::Acts(acts) = grammar
+                                                        .call((Key::Character(committed), Modifiers::empty()))
+                                                    {
+                                                        apply_vim.call(acts);
                                                     }
                                                 },
                                             }
@@ -2074,24 +2098,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 search_prompt.set(false);
                                 vim.write().commit_search(pattern);
                                 // the first jump is n's, synthesized
-                                let outcome = {
-                                    let snapshot = editor.peek();
-                                    snapshot.note().zip(snapshot.caret()).map_or(
-                                        vim::Outcome::Pass,
-                                        |((_, note_text), at)| {
-                                            vim.write().handle(
-                                                &Key::Character("n".to_string()),
-                                                Modifiers::empty(),
-                                                &vim::View {
-                                                    text: note_text,
-                                                    blocks: snapshot.blocks(),
-                                                    head: at.head,
-                                                    anchor: at.anchor,
-                                                },
-                                            )
-                                        },
-                                    )
-                                };
+                                let outcome = grammar.call((
+                                    Key::Character("n".to_string()),
+                                    Modifiers::empty(),
+                                ));
                                 if let vim::Outcome::Acts(acts) = outcome {
                                     apply_vim.call(acts);
                                 }
@@ -6739,6 +6749,53 @@ mod tests {
     }
 
     #[test]
+    fn a_normal_mode_composition_reaches_the_grammar() {
+        // ^ is a dead key on a French layout, so it never arrives as a
+        // keydown at all — only as a committed composition, which normal
+        // mode used to discard whole
+        // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, sink) = activate_heading(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, 4);
+        let before = source_of(&dom);
+
+        // the two ends WebKitGTK can fire that mean nothing
+        compose(&mut dom, sink, "compositionend", "");
+        assert_eq!(source_of(&dom), before, "the empty end is still inert");
+        compose(&mut dom, sink, "compositionend", "ab");
+        assert_eq!(
+            source_of(&dom),
+            before,
+            "a multi-cluster commit is a real IME's, discarded whole"
+        );
+
+        // d then a committed ^ cuts back to the line's first non-blank
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+        compose(&mut dom, sink, "compositionend", "^");
+        assert_eq!(
+            source_of(&dom),
+            "26-07-23\n#l(\"2026-07-22\")\n",
+            "d^ cut the heading back to its first non-blank"
+        );
+
+        // and it is one undo step like every other change intent
+        // (adr/2026-08-undo-at-vim-grain.md)
+        press(
+            &mut dom,
+            sink,
+            Key::Character("u".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(source_of(&dom), before, "u puts the heading back");
+    }
+
+    #[test]
     fn a_keystroke_during_an_open_preview_is_the_imes() {
         // GTK's ordering is not trusted: whatever isComposing says, an
         // open preview means the IME owns the keys (the spike saw both)
@@ -6904,8 +6961,8 @@ mod tests {
     /// A count on plain j, resolved through the logical-line fallback
     /// (`walk_visual_fallback`): 2j must land exactly where two separate
     /// j presses do, content-independent proof that the fallback still
-    /// composes the count (docs/plans/2026-08-23-vim-friction-batch.md
-    /// item 8).
+    /// composes the count
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
     #[test]
     fn a_count_on_plain_j_lands_where_two_separate_j_presses_do() {
         fn rendered_after(second: &str) -> String {

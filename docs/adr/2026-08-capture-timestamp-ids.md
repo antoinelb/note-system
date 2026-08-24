@@ -5,7 +5,7 @@
 Every other note's id is the kebab-case of its title at creation
 (`adr/2026-07-id-scheme-kebab-frozen.md`), and time notes use their period.
 A capture has neither: "no required fields, no summary required at creation"
-(`plan.md` § Capture notes) means there is no title to derive anything from
+means there is no title to derive anything from
 at the moment the hotkey fires.
 
 The fixture captures (`capture-articles-zettel`, `capture-idea-canvas`) are

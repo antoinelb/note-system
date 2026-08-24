@@ -49,4 +49,4 @@ rather than the browser's").
   top; strictly worse than a textarea for plain source.
 - **The pre-declared fallback (source ⇄ rendered toggle)** — abandons the
   hybrid goal while the real thing is affordable; kept only as the retreat
-  if this stalls (`plan.md` § Known risks).
+  if this stalls.

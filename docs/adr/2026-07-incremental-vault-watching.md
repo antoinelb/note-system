@@ -3,7 +3,7 @@
 ## Context
 
 The index must stay up to date while one writes, without having to rebuild it by hand.
-`roadmap-v0.md` planned to "debounce bursts; on anything ambiguous, fall back to a full rebuild".
+The roadmap planned to "debounce bursts; on anything ambiguous, fall back to a full rebuild".
 Two layout constraints weigh on the design:
 
 - `.index/` lives **inside** the vault, so a recursive watch of the root sees SQLite's writes;

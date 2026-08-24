@@ -2,7 +2,7 @@
 
 ## Context
 
-v2 phase 3 gives the grammar its verbs (`roadmap-v2.md` § Phase 3). Vim has named registers; the roadmap's ceiling says they wait for demonstrated need.
+v2 phase 3 gives the grammar its verbs. Vim has named registers; the roadmap's ceiling says they wait for demonstrated need.
 
 ## Decision
 

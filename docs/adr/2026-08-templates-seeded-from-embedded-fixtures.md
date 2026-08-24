@@ -21,5 +21,5 @@ The fixture files remain the single source of truth: `make check-vault` keeps co
 ## Alternatives rejected
 
 - **A separate canonical templates directory in the repo** — a second copy to keep in sync with the fixtures, for no benefit over `include_str!` pointing at them.
-- **Overwrite-on-launch (the old `make run` behaviour, generalized)** — destroys user edits; templates are editable notes (`docs/plan.md` § time-based notes), so the user's version always wins over the shipped default.
+- **Overwrite-on-launch (the old `make run` behaviour, generalized)** — destroys user edits; templates are editable notes (`adr/2026-08-template-editing-in-the-one-editor.md`), so the user's version always wins over the shipped default.
 - **Seeding only on an empty vault** — a single deleted or missing template would stay missing; per-file `create_new` restores exactly what is absent and touches nothing else.

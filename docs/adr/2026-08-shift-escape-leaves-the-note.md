@@ -49,5 +49,5 @@ The way back in is `adr/2026-08-enter-returns-to-the-note.md`.
 - **Deactivate only, leaving the sheet open** — the same keystroke count as
   before the change, and it strands you in a sheet with nothing in it.
 - **Keeping Escape as the exit and adding a confirmation** — friction the
-  house style forbids (`plan.md` § no hard blocks), and it would still fire
+  house style forbids (`CLAUDE.md` § Load-bearing invariants), and it would still fire
   on the reflex press.

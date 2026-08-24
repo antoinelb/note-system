@@ -27,7 +27,7 @@ Those links were hand-placed, which is exactly what template substitution cannot
 
 Movement between time notes is **computed from the id convention plus an index existence check**, never read from the file:
 
-- *scale chain* (day → its ISO week → its season) — rendered as app chrome above the centre pane on the logs screen (`design/wireframes-v0.md` § The logs screen), by `jiff` date math;
+- *scale chain* (day → its ISO week → its season) — rendered as app chrome above the centre pane on the logs screen, by `jiff` date math;
 - *previous / next day* — a navigation action that resolves to the **nearest existing daily note** in that direction, which is what "resolution across gaps" means and is testable; a stored link cannot cross a gap because it was written before the gap existed.
 
 Until the logs screen lands in phase 7, navigation is the phase-4 note list.

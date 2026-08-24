@@ -2,7 +2,7 @@
 
 ## Context
 
-Phase 0 shipped without undo by decision (`adr/2026-08-no-stopgap-undo-in-phase-0.md`); phase 5 is where the editor's first undo arrives, already at vim grain (`roadmap-v2.md` § Phase 5).
+Phase 0 shipped without undo by decision (`adr/2026-08-no-stopgap-undo-in-phase-0.md`); phase 5 is where the editor's first undo arrives, already at vim grain.
 
 ## Decision
 

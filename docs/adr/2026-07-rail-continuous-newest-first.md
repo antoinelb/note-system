@@ -5,8 +5,7 @@
 The logs screen's left pane is one list where indentation carries the scale
 (season ⊃ week ⊃ day).
 The design deliberately left open whether the rail scrolls through all time
-notes or pages by month (`design/wireframes-v0.md` § Open knobs, roadmap
-phase 7 **→ ADR**).
+notes or pages by month (an open knob, roadmap phase 7 **→ ADR**).
 
 ## Decision
 

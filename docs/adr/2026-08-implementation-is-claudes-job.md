@@ -13,7 +13,7 @@ The per-task loop (discuss approach → ADRs → implement with tests → commit
 
 Consequences applied:
 
-- `roadmap-v0.md` § How we work: the "whoever is at the keyboard" clause replaced with the explicit roles; roadmaps v1–v3 inherit it through their "the v0 loop, unchanged" reference.
+- The v0 How we work section: the "whoever is at the keyboard" clause replaced with the explicit roles; roadmaps v1–v3 inherit it through their "the v0 loop, unchanged" reference.
 - `CLAUDE.md`: one line under Other instructions stating the role, so every session starts with it.
 
 ## Alternatives rejected

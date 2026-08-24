@@ -3,7 +3,7 @@
 ## Context
 
 The friction system's first kind of debt is "captures without a self-written
-summary" (`plan.md` § Friction system), and phase 10 has to say what that
+summary", and phase 10 has to say what that
 means in code before the ember can count it.
 
 The capture template already answers it structurally: it writes

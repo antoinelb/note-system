@@ -2,7 +2,7 @@
 
 ## Context
 
-A phase-3 change can span the whole note (`dG`, `dj` on a block's last line), but the editor's one edit op was block-scoped `edit` (`adr/2026-07-hybrid-active-block-textarea.md`). `Buffer::replace_range` already spans the note; the open decision was the `Editor` entry point's shape (`roadmap-v2.md` § Phase 3).
+A phase-3 change can span the whole note (`dG`, `dj` on a block's last line), but the editor's one edit op was block-scoped `edit` (`adr/2026-07-hybrid-active-block-textarea.md`). `Buffer::replace_range` already spans the note; the open decision was the `Editor` entry point's shape.
 
 ## Decision
 

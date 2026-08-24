@@ -5,7 +5,7 @@
 Phase 9 asks for a "backlinks panel on the open note" and "dangling links
 visibly marked (in the panel at minimum)".
 The deck never drew a v0 backlinks surface: the vocabulary available is the
-v1 writing sheet's footer ("← 2", `design/wireframes-v0.md` § Chrome) and
+v1 writing sheet's footer ("← 2", `adr/2026-08-shipped-ui-is-the-spec.md`) and
 turn 3's rejected shell, whose "backlinks/outgoing footer with dangling
 marked" the deck explicitly kept as *editor* vocabulary.
 

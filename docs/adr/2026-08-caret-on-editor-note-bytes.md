@@ -2,7 +2,7 @@
 
 ## Context
 
-v2 phase 0 replaces the active block's textarea with an app-drawn caret (`roadmap-v2.md` § Phase 0).
+v2 phase 0 replaces the active block's textarea with an app-drawn caret.
 The textarea's caret was DOM state, read through an async JS `selectionStart` probe in UTF-16 units and written back through remounts — the `CaretProbe`/`CaretWriter` seams, plus the frozen-caret machinery every overlay carried (`Palette.caret`, `Creator.caret`, `Picker.anchor`, `pending_caret`, `epoch`).
 The buffer-owned-cursor path was sketched in `adr/2026-07-buffer-is-path-plus-string.md` and deferred by `adr/2026-07-hybrid-active-block-textarea.md`; phase 0 is where it lands.
 

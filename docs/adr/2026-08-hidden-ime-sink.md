@@ -2,7 +2,7 @@
 
 ## Context
 
-The owned-caret widget draws all text, caret and selection itself, but French dead-key composition (`^` + `e` → `ê`) is load-bearing (`roadmap-v2.md` § Phase 0) and WebKitGTK attaches its input-method context only to editable elements — composition events do not fire on a plain focusable div.
+The owned-caret widget draws all text, caret and selection itself, but French dead-key composition (`^` + `e` → `ê`) is load-bearing and WebKitGTK attaches its input-method context only to editable elements — composition events do not fire on a plain focusable div.
 
 A spike (scratch dioxus-desktop app, xdotool-driven on the real WebKitGTK) confirmed:
 
@@ -18,7 +18,7 @@ The widget contains an invisible `input.ime-sink` — the CodeMirror/Monaco tech
 
 - The sink's `onkeydown` forwards to `keymap::action`; `Some` means prevent default, stop propagation, apply — `None` bubbles exactly as the textarea let keys bubble (Escape to the pane, every app chord to its handler).
 - A keydown is never touched when `isComposing` is set, the key is `Dead`, **or a composition preview is open** — the last guard is what absorbs the ordering surprises the spike saw.
-- `compositionupdate` drives a preview signal drawn at the caret (`Piece::Preview`); only a non-empty `compositionend` reaches the buffer, so the early empty end commits nothing.
+- `compositionupdate` drives a preview signal drawn at the caret (`Piece::Preview`); only a non-empty `compositionend` reaches the buffer, so the early empty end commits nothing. (Outside insert mode a single-cluster commit now reaches the *grammar* instead of being discarded — a dead key like `^` has no other form: `adr/2026-08-normal-mode-compositions-reach-the-grammar.md`.)
 - The sink's value is never read; printable keys are prevented so it stays empty, and it remounts clean with the block.
 - Ctrl+C/X/V run through injected seams: the existing `Clipboard` read, and a new `ClipboardWrite` around `navigator.clipboard.writeText` (text sent over the eval channel, never interpolated into the script).
 - Focus: the pane-focus effect (`adr/2026-08-the-pane-holds-focus.md`) now has two targets — the sink whenever a block is active and no overlay is up, the pane otherwise.

@@ -302,6 +302,25 @@ impl Vim {
         modifiers: Modifiers,
         view: &View,
     ) -> Outcome {
+        // a modifier's own keydown is key state, not a keystroke: the
+        // webview sends one before every shifted or AltGr character, and
+        // normal mode's catch-all would read it as an unbound key and
+        // reset the pending grammar — killing d$, di", dF, cs" and every
+        // other chord whose continuation needs a modifier. Pass rather
+        // than Swallow: a bare modifier must keep its default, or native
+        // shift-selection and the dead-key machinery lose their ground
+        // (adr/2026-08-modifier-keydowns-are-key-state.md).
+        if matches!(
+            key,
+            Key::Shift
+                | Key::Control
+                | Key::Alt
+                | Key::AltGraph
+                | Key::Meta
+                | Key::CapsLock
+        ) {
+            return Outcome::Pass;
+        }
         if modifiers.ctrl() || modifiers.meta() {
             // the one ctrl carve-out: redo, which no palette chord uses
             // (adr/2026-08-undo-at-vim-grain.md)
@@ -551,7 +570,7 @@ impl Vim {
             // plain j/k walk the webview's wrapped lines, which the
             // grammar cannot see; behind an operator they stay vim's
             // linewise dj/yk/cj over logical lines
-            // (docs/plans/2026-08-23-vim-friction-batch.md item 8).
+            // (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
             "j" => match self.operator {
                 Some(_) => self.run_motion(Motion::Down, view),
                 None => self.walk_visual(true),
@@ -962,7 +981,7 @@ impl Vim {
     /// than resolving a landing itself — the goal column moves with it,
     /// becoming a pixel x a later task holds across the run instead of
     /// this struct's logical-cluster `goal`
-    /// (docs/plans/2026-08-23-vim-friction-batch.md item 8).
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
     fn walk_visual(&mut self, down: bool) -> Outcome {
         let count = self.count.max(1) as usize;
         let extend = matches!(self.mode, Mode::Visual(_));
@@ -1988,6 +2007,17 @@ mod tests {
         last
     }
 
+    /// Feeds arbitrary keys, the modifier keydowns included — what the
+    /// webview really sends before a shifted character, and what `feed`'s
+    /// string form cannot spell.
+    fn feed_keys(vim: &mut Vim, keys: &[Key], view: &View) -> Outcome {
+        let mut last = Outcome::Swallow;
+        for key in keys {
+            last = vim.handle(key, Modifiers::empty(), view);
+        }
+        last
+    }
+
     fn view<'a>(text: &'a str, blocks: &'a [Block], head: usize) -> View<'a> {
         // collapsed by default: visual tests build their own anchor
         View {
@@ -2344,7 +2374,7 @@ mod tests {
     // ask the executor to walk visual lines instead — so the vertical
     // arrows, still resolved synchronously in visual mode, are the one
     // path left in the grammar that still remembers a column across a run
-    // (docs/plans/2026-08-23-vim-friction-batch.md item 8).
+    // (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
     #[test]
     fn the_goal_column_survives_arrow_runs_and_nothing_else() {
         let parsed = blocks::segment(NOTE);
@@ -2542,6 +2572,74 @@ mod tests {
             ),
             other => other,
         }
+    }
+
+    /// The webview sends a modifier's own keydown before the character it
+    /// modifies, so every chord whose continuation needs Shift or AltGr —
+    /// d$, di", dF, c^ — used to lose its verb to normal mode's catch-all.
+    #[test]
+    fn a_modifier_keydown_leaves_the_pending_grammar_alone() {
+        let text = "un café noir\nposé là\n";
+        let parsed = blocks::segment(text);
+        let sight = view(text, &parsed, 3);
+        // d Shift $ cuts exactly what d$ cuts
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed_keys(
+                &mut vim,
+                &[character("d"), Key::Shift, character("$")],
+                &sight,
+            )),
+            Outcome::Acts(vec![
+                Act::SetClipboard("café noir".into()),
+                Act::Splice {
+                    span: 3..13,
+                    text: String::new(),
+                    caret: 2
+                },
+            ]),
+        );
+        // a count outlives one too: 2 Shift w is 2w
+        let mut vim = normal();
+        assert_eq!(
+            feed_keys(
+                &mut vim,
+                &[character("2"), Key::Shift, character("w")],
+                &view(text, &parsed, 0),
+            ),
+            Outcome::Acts(vec![Act::Place(9)]),
+        );
+        // and a pending prefix survives: the object side, where the
+        // modifier is not a Key::Character and used to abort the wait
+        let quoted = "un «café» noir\n";
+        let parsed = blocks::segment(quoted);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed_keys(
+                &mut vim,
+                &[
+                    character("d"),
+                    character("i"),
+                    Key::AltGraph,
+                    character("«"),
+                ],
+                &view(quoted, &parsed, 5),
+            )),
+            Outcome::Acts(vec![
+                Act::SetClipboard("café".into()),
+                Act::Splice {
+                    span: 5..10,
+                    text: String::new(),
+                    caret: 5
+                },
+            ]),
+        );
+        // CapsLock is the third one a French writer trips over
+        let mut vim = normal();
+        assert_eq!(
+            vim.handle(&Key::CapsLock, Modifiers::empty(), &sight),
+            Outcome::Pass,
+        );
     }
 
     #[test]

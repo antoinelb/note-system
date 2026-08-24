@@ -2,13 +2,13 @@
 
 ## Context
 
-v3 is the AI version (`plan.md` § AI integration): two separate mechanisms — the app shelling out to the `claude` CLI for suggestions, and an MCP server exposing the vault to any Claude Code session — plus the surfaces that make suggestions ambient (dashed edges, the end-of-page line, ghost text) and the tag-confirm flow.
+v3 is the AI version: two separate mechanisms — the app shelling out to the `claude` CLI for suggestions, and an MCP server exposing the vault to any Claude Code session — plus the surfaces that make suggestions ambient (dashed edges, the end-of-page line, ghost text) and the tag-confirm flow.
 Each prior version opened with an ordering bet recorded in an ADR: v0 walking-skeleton, v1 palette-first, v2 caret-first.
 The pieces of v3 have real dependency structure: ghost text needs v2's owned-caret widget (the uncontrolled textarea cannot draw it), the surfaces need a store to read, the engine needs a store to write, and the MCP server needs nothing but the vault on disk.
 
 ## Decision
 
-`roadmap-v3.md` orders v3 as: MCP server → suggestion store → engine → ambient surfaces → ghost text → tags.
+v3 is ordered as: MCP server → suggestion store → engine → ambient surfaces → ghost text → tags.
 
 - The MCP server goes first: it is the smallest phase, touches no UI, follows the `--capture` second-process pattern verbatim (`adr/2026-08-capture-headless-second-process.md`), delivers standing value from day one — every Claude Code session gains the vault as context — and forces the repo's first serialization-dependency decision while the stakes are lowest.
 - The store precedes the engine, and the engine precedes every surface: data before writers, writers before readers — each phase leaves something daily-usable (debt lines count even before edges dash).
