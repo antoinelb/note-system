@@ -1845,7 +1845,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     match outcome {
                                                         vim::Outcome::Acts(acts) => {
                                                             event.prevent_default();
-                                                            event.stop_propagation();
+                                                            // shift+Escape leaves the note and
+                                                            // keeps travelling: the table pane
+                                                            // closes the sheet behind it
+                                                            // (adr/2026-08-shift-escape-leaves-the-note.md)
+                                                            let leaving = event.key() == Key::Escape
+                                                                && event.modifiers().shift();
+                                                            if !leaving {
+                                                                event.stop_propagation();
+                                                            }
                                                             apply_vim.call(acts);
                                                         }
                                                         // unbound normal-mode keys are inert:
@@ -2288,6 +2296,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // when an arm writes the editor back
             let over_template = open_template(&editor.peek(), &root).is_some();
             match event.key() {
+                // shift+Escape belongs to the note it just left; the rungs
+                // below are plain Escape's, and a note must not acknowledge
+                // a notice on its way out
+                // (adr/2026-08-shift-escape-leaves-the-note.md)
+                Key::Escape if event.modifiers().shift() => {}
                 // the notices overlay is a destination you leave, like the
                 // loops list below it on the ladder
                 Key::Escape if notices_open() => notices_open.set(false),
@@ -2398,11 +2411,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 Key::Enter if event.modifiers().ctrl() => {
                     follow_at.call(());
                 }
-                // only enter writes the file — navigating never does
+                // only enter writes the file — navigating never does. Over a
+                // note that already stands it is the way back in instead,
+                // the caret returning where it was left
+                // (adr/2026-08-enter-returns-to-the-note.md). It reaches
+                // here only with no block active: an active one owns Enter.
                 Key::Enter => {
                     let (scale, id) = selected();
                     if notes.read().iter().any(|(existing, _)| existing == &id)
                     {
+                        editor.write().reactivate();
                         return;
                     }
                     let created =
@@ -2437,6 +2455,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // everything else bubbles to the app root
     let table_keys = {
         move |event: KeyboardEvent| match event.key() {
+            // the note's own exit gesture, arriving from the block it just
+            // left: the sheet is the note here, so it goes with it
+            // (adr/2026-08-shift-escape-leaves-the-note.md)
+            Key::Escape if event.modifiers().shift() => {
+                if sheet.peek().is_some() {
+                    close_sheet.call(());
+                }
+            }
             // the notices overlay closes before the sheet: overlays leave
             // the ladder first
             Key::Escape if notices_open() => notices_open.set(false),
@@ -4599,6 +4625,31 @@ mod tests {
     }
 
     #[test]
+    fn enter_returns_to_the_note_on_the_block_that_held_the_caret() {
+        // shift+Escape puts the note away; Enter picks it up again where
+        // it was left — the preamble here, not the last block a fresh
+        // open would wake (adr/2026-08-enter-returns-to-the-note.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, block_keys) = activate_block(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("#import"), "the preamble source: {html}");
+
+        press(&mut dom, block_keys, Key::Escape, Modifiers::SHIFT);
+        assert!(!dioxus_ssr::render(&dom).contains("block-active"));
+
+        press(&mut dom, keys[LOGS_KEYS], Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "back in: {html}");
+        assert!(html.contains("#import"), "on the same block: {html}");
+        assert!(
+            html.contains(r#"class="caret-box""#),
+            "and still thinking: {html}"
+        );
+    }
+
+    #[test]
     fn the_palette_switches_screens_by_name() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
@@ -4992,7 +5043,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_climbs_the_ladder_to_close_the_sheet() {
+    fn shift_escape_leaves_the_sheet_and_plain_escape_never_does() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -5019,15 +5070,27 @@ mod tests {
         assert!(html.contains(r#"class="caret-box""#), "{html}");
         assert!(html.contains(r#"class="sheet""#), "{html}");
 
-        // rung two: normal → rendered, the block closing; the sheet holds
+        // and there the plain key stops: pressing it again is the reflex
+        // of checking the mode, and it costs nothing — the block still
+        // holds the caret, the sheet still stands
+        // (adr/2026-08-shift-escape-leaves-the-note.md)
         press(&mut dom, block_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("block-active"), "{html}");
+        assert!(html.contains("block-active"), "{html}");
         assert!(html.contains(r#"class="sheet""#), "{html}");
 
-        // rung three: the pane's escape closes the sheet
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
-        assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+        // shift+Escape is the way out, and it takes the sheet with it:
+        // the block renders, the sheet closes, the card goes back
+        press(&mut dom, block_keys, Key::Escape, Modifiers::SHIFT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("block-active"), "{html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+
+        // pressed again over the bare table it finds nothing to close
+        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "{html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
 
         // and the logs' note wakes with its own cursor, still thinking —
         // the mode survives the whole trip
@@ -5755,9 +5818,18 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("UnknownTemplate"), "navigation keeps it");
 
+        // shift+Escape belongs to the note it leaves: it must not fall
+        // down the ladder and acknowledge on its way out
+        // (adr/2026-08-shift-escape-leaves-the-note.md)
+        click(&mut dom, clicks[day_cell(24)]);
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::SHIFT);
+        assert!(
+            dioxus_ssr::render(&dom).contains("UnknownTemplate"),
+            "shift held: the notice stands"
+        );
+
         // the empty day has no block to close, so Escape reaches the
         // ladder's bottom and acknowledges
-        click(&mut dom, clicks[day_cell(24)]);
         press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("UnknownTemplate"), "escape dismisses it");

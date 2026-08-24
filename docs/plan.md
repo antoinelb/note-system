@@ -71,6 +71,7 @@ The palette is "Deep field" — an indigo void, not greyscale: link edges are co
 **Dark is the main mode and light is a first-class sibling**; every colour goes through a theme variable from the first styled rule (`adr/2026-07-design-language-own-phase.md`).
 Note bodies are rendered typst — the app never restyles them, the meta line is the note's own `#meta` output, and the design's prose typography is a `template.typ` requirement rather than an app one.
 Navigating never creates a file: selecting an empty day shows one line offering the template, and only `enter` writes it.
+Over a note that already stands, `enter` is instead the way back into it — the caret returning to the block it was left on (`adr/2026-08-enter-returns-to-the-note.md`).
 
 Both screens carry the open-loops ember in the top line; clicking it opens a flat list (`adr/2026-07-debt-counter-then-list.md`).
 **Zero loops = zero indicator** — the number is absent, not zeroed. Absence is the reward.
@@ -92,7 +93,7 @@ Both screens carry the open-loops ember in the top line; clicking it opens a fla
 - **Persistent positions.** Every canvas note stores x/y. New notes auto-place near their strongest links; once moved by hand, position is permanent. Force-directed layout is at most an on-demand "arrange this cluster" command, never the default.
 - **Cards** are flat rectangles — no paper texture, no rotation. Type is a thin colour bar on the left edge, and that is the only colour on the screen.
 - **Semantic zoom, two levels.** Titles (default) and rendered typst body (cached SVGs). The "coloured dots" level is dropped. Viewport culling makes thousands of notes a non-issue for rendering.
-- **Enter/exit nodes.** Clicking a card opens a **writing sheet** — a tall panel, far larger than the card, that opens *beside* it with a line tethering it back. The rest of the table dims; the origin card and its tether stay lit. The sheet is chromeless and keeps exactly two lines of its own: the note's rendered `#meta` line at the top and a footer showing only backlinks ("← 2") — the sheet shows the note's own title, not the card's header, and everything else is a keystroke. Escape puts the card back. Writing happens at the size of a page while the sense of place stays visible around it.
+- **Enter/exit nodes.** Clicking a card opens a **writing sheet** — a tall panel, far larger than the card, that opens *beside* it with a line tethering it back. The rest of the table dims; the origin card and its tether stay lit. The sheet is chromeless and keeps exactly two lines of its own: the note's rendered `#meta` line at the top and a footer showing only backlinks ("← 2") — the sheet shows the note's own title, not the card's header, and everything else is a keystroke. Shift+Escape puts the card back from inside the writing; a plain Escape stays in the note (`adr/2026-08-shift-escape-leaves-the-note.md`). Writing happens at the size of a page while the sense of place stays visible around it.
 - **Findability**: filter by tag and by type (filtered-out cards dim, not disappear), plus jump-to-note search that pans/zooms to the card.
 - **Edges**: real links (`#l(..)`) as solid edges; AI-suggested links as dashed edges (see below).
 - Scale target: hundreds now, low thousands eventually.

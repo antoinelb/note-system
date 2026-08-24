@@ -91,7 +91,7 @@ Sheet content, top to bottom: meta line ("atomic-notes · claim · from smart-no
 At the end of the page, a **proposed-link line**: above a dashed hairline, a hollow circle marker, "proposed · evergreen-notes → this note", and right-aligned the only hint in the app: "enter accept · x dismiss".
 Proposals never interrupt — one dashed line at the end of the page, and accepting means the user writes (ghost-text philosophy from 1c/2b).
 Footer: backlinks only ("← 2").
-Escape puts the card back where it was.
+Shift+Escape puts the card back where it was — from inside the writing, a plain Escape never leaves the note (`adr/2026-08-shift-escape-leaves-the-note.md`).
 6b also shows the zero-loop state: no ember anywhere in the top line.
 
 ## The logs screen

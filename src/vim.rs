@@ -314,6 +314,26 @@ impl Vim {
             }
             return Outcome::Pass;
         }
+        // shift+Escape is the one way out of a note: the mode closes its
+        // own session exactly as a plain Escape would — insert's caret
+        // step-back, R's clipboard write — and the block renders again
+        // behind it (adr/2026-08-shift-escape-leaves-the-note.md)
+        if *key == Key::Escape && modifiers.shift() {
+            let mut acts =
+                if let Outcome::Acts(acts) = self.mode_key(key, view) {
+                    acts
+                } else {
+                    Vec::new()
+                };
+            acts.push(Act::Deactivate);
+            return Outcome::Acts(acts);
+        }
+        self.mode_key(key, view)
+    }
+
+    /// The keystroke as the current mode reads it — the dispatch shift+
+    /// Escape borrows to close a session before it leaves the note.
+    fn mode_key(&mut self, key: &Key, view: &View) -> Outcome {
         match self.mode {
             Mode::Insert => self.insert_key(key, view),
             Mode::Normal => self.normal_key(key, view),
@@ -446,9 +466,10 @@ impl Vim {
     }
 
     /// Normal mode: counts, verbs and prefixes accumulate; motions,
-    /// objects and entries resolve; Escape climbs its ladder — and
-    /// everything unbound is inert. AltGr characters carry alt, which is
-    /// why the printable swallow must see them too.
+    /// objects and entries resolve; Escape kills the pending grammar and
+    /// then goes inert — and everything unbound is inert too. AltGr
+    /// characters carry alt, which is why the printable swallow must see
+    /// them too.
     fn normal_key(&mut self, key: &Key, view: &View) -> Outcome {
         if let Some(prefix) = self.prefix.take() {
             return self.finish_prefix(prefix, key, view);
@@ -459,7 +480,10 @@ impl Vim {
                 self.reset();
                 Outcome::Swallow
             }
-            Key::Escape => Outcome::Acts(vec![Act::Deactivate]),
+            // and there the ladder stops: a plain Escape never leaves the
+            // note, so the reflex of pressing it to be sure of the mode
+            // costs nothing (adr/2026-08-shift-escape-leaves-the-note.md)
+            Key::Escape => Outcome::Swallow,
             // the phase-0 arrows still answer; pending grammar does not
             // apply to them, so it resets rather than leaking
             Key::ArrowLeft
@@ -2115,19 +2139,94 @@ mod tests {
     }
 
     #[test]
-    fn escape_in_normal_mode_renders_the_block() {
+    fn escape_in_normal_mode_is_inert_and_shift_escape_renders_the_block() {
         let parsed = blocks::segment(NOTE);
+        let sight = view(NOTE, &parsed, 0);
         let mut vim = normal();
+        assert_eq!(
+            vim.handle(&Key::Escape, Modifiers::empty(), &sight),
+            Outcome::Swallow,
+            "a plain Escape never leaves the note"
+        );
+        assert_eq!(vim.mode, Mode::Normal, "and changes nothing");
+        assert_eq!(
+            vim.handle(&Key::Escape, Modifiers::SHIFT, &sight),
+            Outcome::Acts(vec![Act::Deactivate]),
+            "shift+Escape is the way out"
+        );
+        assert_eq!(vim.mode, Mode::Normal, "the mode survives the exit");
+    }
+
+    #[test]
+    fn shift_escape_closes_the_mode_session_then_leaves_the_note() {
+        let parsed = blocks::segment(NOTE);
+
+        // insert: the caret steps back as a plain Escape leaves it, and
+        // the dot keeps the session's typed text
+        let mut vim = Vim {
+            mode: Mode::Insert,
+            insert_from: Some(7),
+            last_change: Some(Change::Insert {
+                entry: InsertEntry::Before,
+                typed: String::new(),
+            }),
+            ..Vim::default()
+        };
         assert_eq!(
             vim.handle(
                 &Key::Escape,
-                Modifiers::empty(),
-                &view(NOTE, &parsed, 0)
+                Modifiers::SHIFT,
+                &view(NOTE, &parsed, 9)
             ),
-            Outcome::Acts(vec![Act::Deactivate]),
-            "the ladder's second rung"
+            Outcome::Acts(vec![Act::Place(7), Act::Deactivate]),
         );
-        assert_eq!(vim.mode, Mode::Normal, "the mode survives the rung");
+        assert_eq!(vim.mode, Mode::Normal);
+        assert_eq!(
+            vim.last_change,
+            Some(Change::Insert {
+                entry: InsertEntry::Before,
+                typed: NOTE[7..9].to_string(),
+            }),
+        );
+
+        // R: the session's overwritten run still reaches the one register
+        let text = "XY été\n";
+        let replaced = blocks::segment(text);
+        let mut vim = Vim {
+            mode: Mode::Replace,
+            replace_from: Some(0),
+            replaced: vec!["u".to_string(), "n".to_string()],
+            last_change: Some(Change::Overwrite {
+                typed: String::new(),
+            }),
+            ..Vim::default()
+        };
+        assert_eq!(
+            vim.handle(
+                &Key::Escape,
+                Modifiers::SHIFT,
+                &view(text, &replaced, 2)
+            ),
+            Outcome::Acts(vec![
+                Act::SetClipboard("un".into()),
+                Act::Place(1),
+                Act::Deactivate,
+            ]),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+
+        // visual: the caret lands at the head before the block renders
+        let mut vim = normal();
+        feed(&mut vim, "v", &view(NOTE, &parsed, 2));
+        assert_eq!(
+            vim.handle(
+                &Key::Escape,
+                Modifiers::SHIFT,
+                &spread(NOTE, &parsed, 2, 5)
+            ),
+            Outcome::Acts(vec![Act::Place(5), Act::Deactivate]),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
     }
 
     #[test]
@@ -2383,8 +2482,9 @@ mod tests {
             "the pending rung"
         );
         assert_eq!(
-            vim.handle(&Key::Escape, Modifiers::empty(), &sight),
+            vim.handle(&Key::Escape, Modifiers::SHIFT, &sight),
             Outcome::Acts(vec![Act::Deactivate]),
+            "and the note is left with shift held, not without"
         );
     }
 
@@ -4278,16 +4378,28 @@ mod tests {
         // a failed find under a verb
         let mut vim = normal();
         assert_eq!(feed(&mut vim, "dfZ", &sight), Outcome::Swallow);
-        // escape kills a pending verb, then still climbs
+        // escape kills a pending verb, and shift+escape kills it on the
+        // way out of the note
         let mut vim = normal();
         feed(&mut vim, "d", &sight);
         assert_eq!(
             vim.handle(&Key::Escape, Modifiers::empty(), &sight),
             Outcome::Swallow
         );
+        let mut vim = normal();
+        feed(&mut vim, "d", &sight);
         assert_eq!(
-            vim.handle(&Key::Escape, Modifiers::empty(), &sight),
+            vim.handle(&Key::Escape, Modifiers::SHIFT, &sight),
             Outcome::Acts(vec![Act::Deactivate]),
+        );
+        assert_eq!(
+            feed(&mut vim, "j", &sight),
+            Outcome::Acts(vec![Act::WalkVisual {
+                down: true,
+                count: 1,
+                extend: false
+            }]),
+            "the pending verb died with the exit"
         );
         // I A o O mean nothing behind a verb
         let mut vim = normal();

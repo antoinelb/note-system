@@ -614,6 +614,15 @@ impl Editor {
         self.active = None;
     }
 
+    /// The way back in: the block owning the remembered caret wakes and the
+    /// caret lands exactly where deactivation left it — the caret survives
+    /// on `Editor` even while nothing is active
+    /// (adr/2026-08-enter-returns-to-the-note.md). A closed editor has no
+    /// block to wake and stays rendered.
+    pub fn reactivate(&mut self) {
+        self.place_at(self.caret.head);
+    }
+
     /// Ctrl+Q and deactivation: save and surface the outcome. Returns
     /// whether the note reached disk, so a failed flush can cancel a quit
     /// instead of losing the buffer
