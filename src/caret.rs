@@ -70,17 +70,50 @@ pub struct Line {
 /// The whole render model: the block's source cut into lines and pieces,
 /// with the selection highlighted, the caret placed at `head`, and any
 /// composition previewed there. Offsets off a char boundary are clamped
-/// back — a stale caller draws a caret, never panics.
+/// back — a stale caller draws a caret, never panics. `linewise` widens the
+/// drawn selection to whole lines (vim's `V`), the shape
+/// `motions::linewise_span` cuts — with one divergence: on a block's final
+/// line the span stops at the line's end, the newline after it belonging to
+/// the block separator, while the drawn line still carries its trailing
+/// newline cell (adr/2026-08-v-highlight-covers-whole-lines.md). `v` passes
+/// `false` and stays byte-exact.
 pub fn layout(
     source: &str,
     anchor: usize,
     head: usize,
     preview: Option<&str>,
     shape: Shape,
+    linewise: bool,
 ) -> Vec<Line> {
     let anchor = clamp_boundary(source, anchor);
     let head = clamp_boundary(source, head);
-    let selection = anchor.min(head)..anchor.max(head);
+    let breaks: Vec<usize> = source
+        .char_indices()
+        .filter(|(_, ch)| *ch == '\n')
+        .map(|(offset, _)| offset)
+        .collect();
+
+    let raw_start = anchor.min(head);
+    let raw_end = anchor.max(head);
+    let selection = if linewise {
+        // widen to the line holding each raw edge: a line's start is the
+        // byte after the previous break, its end the next break or the
+        // source's end — the same rule `line_start`/`line_end` apply
+        let start = breaks
+            .iter()
+            .rev()
+            .find(|&&brk| brk < raw_start)
+            .map(|brk| brk + 1)
+            .unwrap_or(0);
+        let end = breaks
+            .iter()
+            .find(|&&brk| brk >= raw_end)
+            .copied()
+            .unwrap_or(source.len());
+        start..end
+    } else {
+        raw_start..raw_end
+    };
     // the box caret owns the cluster after head, unless a newline or the
     // block's end is there — then the end-of-line stand-in draws instead
     let boxed = shape == Shape::Box
@@ -92,11 +125,6 @@ pub fn layout(
 
     let mut lines = Vec::new();
     let mut line_start = 0;
-    let breaks: Vec<usize> = source
-        .char_indices()
-        .filter(|(_, ch)| *ch == '\n')
-        .map(|(offset, _)| offset)
-        .collect();
     for index in 0..=breaks.len() {
         let line_end = breaks.get(index).copied().unwrap_or(source.len());
         lines.push(build_line(
@@ -107,6 +135,7 @@ pub fn layout(
             box_span.as_ref(),
             preview,
             shape,
+            linewise,
         ));
         line_start = line_end + 1;
     }
@@ -115,7 +144,9 @@ pub fn layout(
 
 /// One line's pieces: the line's span cut at every boundary that matters —
 /// selection edges, the caret, the box cluster — each slice classified,
-/// with the bar caret (and any preview) slotted in at `head`.
+/// with the bar caret (and any preview) slotted in at `head`. `linewise`
+/// appends the trailing newline-cell stand-in on every line the widened
+/// selection fully covers.
 #[allow(clippy::too_many_arguments)]
 fn build_line(
     source: &str,
@@ -125,6 +156,7 @@ fn build_line(
     box_span: Option<&Range<usize>>,
     preview: Option<&str>,
     shape: Shape,
+    linewise: bool,
 ) -> Line {
     let mut cuts = vec![line.start, line.end];
     for offset in [selection.start, selection.end, head] {
@@ -163,6 +195,27 @@ fn build_line(
     }
     if head_here && head == line.end {
         push_caret(&mut pieces, head, box_span.is_some(), preview, shape);
+    }
+    // V paints the newline too: every whole line the widened selection
+    // covers gets its own trailing cell, unless the box caret's own
+    // stand-in already drew one there.
+    //
+    // A plain space, not U+00A0: the line renders under `white-space:
+    // pre-wrap`, where a preserved space at the end of a line hangs rather
+    // than counting towards the line box, so it can never widen the line.
+    // A no-break space can — it neither breaks nor hangs — so on a line
+    // already filling the pane it would carry the last word onto the next
+    // visual row, and V applies the cell to every covered line at once: a
+    // whole paragraph would visibly reflow on mode entry.
+    if linewise
+        && line.start >= selection.start
+        && line.end <= selection.end
+        && head != line.end
+    {
+        pieces.push(Piece::Selected {
+            start: line.end,
+            text: " ".to_string(),
+        });
     }
     Line { pieces }
 }
@@ -483,7 +536,7 @@ mod tests {
 
     #[test]
     fn a_bar_caret_splits_its_line() {
-        let lines = layout("abc", 1, 1, None, Shape::Bar);
+        let lines = layout("abc", 1, 1, None, Shape::Bar, false);
         assert_eq!(lines.len(), 1);
         assert_eq!(
             texts(&lines[0]),
@@ -497,12 +550,12 @@ mod tests {
 
     #[test]
     fn caret_at_the_edges_needs_no_split() {
-        let start = layout("ab", 0, 0, None, Shape::Bar);
+        let start = layout("ab", 0, 0, None, Shape::Bar, false);
         assert_eq!(
             texts(&start[0]),
             [("caret", String::new()), ("text", "ab".to_string())]
         );
-        let end = layout("ab", 2, 2, None, Shape::Bar);
+        let end = layout("ab", 2, 2, None, Shape::Bar, false);
         assert_eq!(
             texts(&end[0]),
             [("text", "ab".to_string()), ("caret", String::new())]
@@ -513,7 +566,7 @@ mod tests {
     fn the_caret_lands_on_its_own_line() {
         // a trailing newline is a real empty last line
         // (adr/2026-08-cursor-always-in-the-note.md)
-        let lines = layout("ab\n", 3, 3, None, Shape::Bar);
+        let lines = layout("ab\n", 3, 3, None, Shape::Bar, false);
         assert_eq!(lines.len(), 2);
         assert_eq!(texts(&lines[0]), [("text", "ab".to_string())]);
         assert_eq!(texts(&lines[1]), [("caret", String::new())]);
@@ -522,7 +575,7 @@ mod tests {
     #[test]
     fn a_selection_highlights_across_lines() {
         // anchor after "a", head at "d": the highlight spans the newline
-        let lines = layout("ab\ncd", 1, 4, None, Shape::Bar);
+        let lines = layout("ab\ncd", 1, 4, None, Shape::Bar, false);
         assert_eq!(
             texts(&lines[0]),
             [("text", "a".to_string()), ("sel", "b".to_string())]
@@ -538,9 +591,104 @@ mod tests {
     }
 
     #[test]
+    fn a_forward_v_selection_paints_whole_lines_and_their_newline_cells() {
+        // anchor in "ab", head in "cd": V widens to both lines whole, each
+        // carrying its own trailing newline cell
+        let lines = layout("ab\ncd\nef", 1, 4, None, Shape::Box, true);
+        assert_eq!(
+            texts(&lines[0]),
+            [("sel", "ab".to_string()), ("sel", " ".to_string())]
+        );
+        assert_eq!(
+            texts(&lines[1]),
+            [
+                ("sel", "c".to_string()),
+                ("box", "d".to_string()),
+                ("sel", " ".to_string()),
+            ]
+        );
+        assert_eq!(
+            texts(&lines[2]),
+            [("text", "ef".to_string())],
+            "the third line is untouched"
+        );
+    }
+
+    #[test]
+    fn a_backward_v_selection_paints_the_same_extent() {
+        // same two lines, head now in "ab": the box moves, the extent holds
+        let lines = layout("ab\ncd\nef", 4, 1, None, Shape::Box, true);
+        assert_eq!(
+            texts(&lines[0]),
+            [
+                ("sel", "a".to_string()),
+                ("box", "b".to_string()),
+                ("sel", " ".to_string()),
+            ]
+        );
+        assert_eq!(
+            texts(&lines[1]),
+            [("sel", "cd".to_string()), ("sel", " ".to_string())]
+        );
+        assert_eq!(texts(&lines[2]), [("text", "ef".to_string())]);
+    }
+
+    #[test]
+    fn a_v_head_at_a_lines_end_draws_exactly_one_cell_there() {
+        // the middle line, not the first: its start also widens off a
+        // break before it, the mirror of the two tests above. Head sits
+        // on the newline itself, so the box caret's own stand-in must not
+        // be doubled by a second Selected newline cell
+        let lines = layout("xy\nab\ncd", 3, 5, None, Shape::Box, true);
+        assert_eq!(
+            texts(&lines[0]),
+            [("text", "xy".to_string())],
+            "the line before the selection is untouched"
+        );
+        assert_eq!(
+            texts(&lines[1]),
+            [("sel", "ab".to_string()), ("box", "\u{a0}".to_string())],
+            "one cell, not two"
+        );
+        assert_eq!(texts(&lines[2]), [("text", "cd".to_string())]);
+    }
+
+    #[test]
+    fn a_single_line_v_selection_paints_the_whole_line() {
+        let lines = layout("hello", 2, 2, None, Shape::Bar, true);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            texts(&lines[0]),
+            [
+                ("sel", "he".to_string()),
+                ("caret", String::new()),
+                ("sel", "llo".to_string()),
+                ("sel", " ".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn v_charwise_stays_byte_exact_when_linewise_is_false() {
+        // the same span the two V tests above widen, but with the flag
+        // off: v never sees the widening
+        let lines = layout("ab\ncd\nef", 1, 4, None, Shape::Box, false);
+        assert_eq!(
+            texts(&lines[0]),
+            [("text", "a".to_string()), ("sel", "b".to_string())],
+            "no widening back to the line's start, and no newline cell"
+        );
+        assert_eq!(
+            texts(&lines[1]),
+            [("sel", "c".to_string()), ("box", "d".to_string())]
+        );
+        assert_eq!(texts(&lines[2]), [("text", "ef".to_string())]);
+    }
+
+    #[test]
     fn a_backward_selection_draws_the_caret_at_its_head() {
         // anchor after "d", head after "a": same highlight, caret left
-        let lines = layout("ab\ncd", 4, 1, None, Shape::Bar);
+        let lines = layout("ab\ncd", 4, 1, None, Shape::Bar, false);
         assert_eq!(
             texts(&lines[0]),
             [
@@ -557,7 +705,7 @@ mod tests {
 
     #[test]
     fn the_box_caret_wears_the_next_cluster() {
-        let lines = layout("été", 2, 2, None, Shape::Box);
+        let lines = layout("été", 2, 2, None, Shape::Box, false);
         assert_eq!(
             texts(&lines[0]),
             [
@@ -571,7 +719,7 @@ mod tests {
     #[test]
     fn the_box_caret_at_a_line_end_is_a_stand_in_space() {
         for (source, head) in [("ab\ncd", 2), ("ab", 2), ("", 0)] {
-            let lines = layout(source, head, head, None, Shape::Box);
+            let lines = layout(source, head, head, None, Shape::Box, false);
             let boxed = lines[0].pieces.iter().find_map(|piece| match piece {
                 Piece::CaretBox { cluster, .. } => Some(cluster.clone()),
                 _ => None,
@@ -586,7 +734,7 @@ mod tests {
 
     #[test]
     fn a_composition_previews_at_the_caret() {
-        let lines = layout("ab", 1, 1, Some("^"), Shape::Bar);
+        let lines = layout("ab", 1, 1, Some("^"), Shape::Bar, false);
         assert_eq!(
             texts(&lines[0]),
             [
@@ -601,7 +749,7 @@ mod tests {
     #[test]
     fn a_composition_suspends_the_box_caret() {
         // composing happens in insert mode; a box would fight the preview
-        let lines = layout("ab", 1, 1, Some("¨"), Shape::Box);
+        let lines = layout("ab", 1, 1, Some("¨"), Shape::Box, false);
         assert_eq!(
             texts(&lines[0]),
             [
@@ -615,7 +763,7 @@ mod tests {
 
     #[test]
     fn stale_offsets_clamp_instead_of_panicking() {
-        let lines = layout("été", 99, 1, None, Shape::Bar);
+        let lines = layout("été", 99, 1, None, Shape::Bar, false);
         // 99 clamps to the end, 1 floors to é's start: "é" is selected
         assert_eq!(
             texts(&lines[0]),
@@ -625,7 +773,7 @@ mod tests {
 
     #[test]
     fn piece_starts_are_block_relative_bytes() {
-        let lines = layout("un\ndeux", 4, 6, None, Shape::Bar);
+        let lines = layout("un\ndeux", 4, 6, None, Shape::Bar, false);
         let starts: Vec<usize> = lines
             .iter()
             .flat_map(|line| &line.pieces)

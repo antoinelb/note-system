@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ use crate::index::{Index, TableNote};
 use crate::keymap;
 use crate::links;
 use crate::logs::{self, Selection};
+use crate::motions::{self, Lines, Motion};
 use crate::palette;
 use crate::positions::Positions;
 use crate::render::{
@@ -66,6 +67,70 @@ pub type Hit = Pin<Box<dyn Future<Output = Option<(usize, usize)>>>>;
 /// (adr/2026-08-caret-on-editor-note-bytes.md).
 #[derive(Clone)]
 pub struct HitProbe(pub Arc<dyn Fn(f64, f64) -> Hit + Send + Sync>);
+
+/// Where a whole `[count]j`/`k` run ended: the landing span's `data-start`,
+/// the UTF-16 offset within its text node, the pixel x the walk held — the
+/// goal column, resolved by the only thing that knows where the lines wrap
+/// — and how many of the asked steps the walk actually took before the
+/// drawn lines ran out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Landing {
+    pub start: usize,
+    pub units: usize,
+    pub x: f64,
+    pub taken: usize,
+}
+
+/// What the line probe answers: one landing for the whole run, or `None`
+/// when it could not take even one step.
+pub type Walk = Pin<Box<dyn Future<Output = Option<Landing>>>>;
+
+/// How j and k find the lines the webview actually drew: `main` injects a
+/// `caretPositionFromPoint` walk that takes every step of the run inside
+/// the webview, the headless tests inject a scripted fake — the `HitProbe`
+/// pattern (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+///
+/// The whole run rides one round trip because `dioxus::document::eval`
+/// sends its script the moment it is constructed: a step-per-eval walk
+/// would build the next probe in the same task poll as the previous
+/// landing, before the DOM flushed it, and read the caret's pre-move rect.
+/// The walk therefore steps from the rect of the character it just landed
+/// on, never from the app-drawn caret element, which is stale after step
+/// one. `j`/`k` edit no text, so the spans it measures stay valid.
+#[derive(Clone)]
+pub struct LineProbe(
+    pub Arc<dyn Fn(Option<f64>, bool, usize) -> Walk + Send + Sync>,
+);
+
+/// The column a `j`/`k` run holds across its steps: the pixel x the line
+/// probe resolved and the logical cluster column the degraded fallback
+/// keeps, both forgotten together by every key and every mouse-driven
+/// caret move that is not part of the run
+/// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+///
+/// `generation` stamps the run: a walk task still awaiting its probe when
+/// another key forgets the run must move nothing once it resolves —
+/// neither the caret, which that key has already moved, nor the goal
+/// column, which now belongs to a fresher run — so it checks the stamp it
+/// started with before touching either.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Goal {
+    x: Option<f64>,
+    column: Option<usize>,
+    generation: u64,
+}
+
+impl Goal {
+    /// Forgetting the run: both columns go, and the bump disowns any goal
+    /// a walk still in flight is about to answer with.
+    fn forgotten(self) -> Self {
+        Goal {
+            x: None,
+            column: None,
+            generation: self.generation.wrapping_add(1),
+        }
+    }
+}
 
 /// One clipboard write, done when the future resolves.
 pub type Written = Pin<Box<dyn Future<Output = ()>>>;
@@ -322,6 +387,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // absent in headless tests that don't inject a fake: mouse presses then
     // land at the block's end and the clipboard chords quietly decline
     let hit = try_consume_context::<HitProbe>();
+    let line_probe = try_consume_context::<LineProbe>();
     let clipboard = try_consume_context::<Clipboard>();
     let clipboard_write = try_consume_context::<ClipboardWrite>();
     let now = try_consume_context::<Now>();
@@ -390,6 +456,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // cells, like QuitFlush: only the mouse handlers read them
     let dragging = use_hook(|| Rc::new(std::cell::Cell::new(false)));
     let probing = use_hook(|| Rc::new(std::cell::Cell::new(false)));
+    // the goal column a j/k run holds across its steps, pixel and logical
+    // (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md)
+    let goal = use_hook(|| Rc::new(std::cell::Cell::new(Goal::default())));
 
     // the editor's one exit for trouble: whatever any path deposited —
     // internal chains like activate → deactivate → flush included — is
@@ -1432,8 +1501,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let fragments = fragments.clone();
         let clipboard = clipboard.clone();
         let clipboard_write = clipboard_write.clone();
+        let line_probe = line_probe.clone();
+        let goal = goal.clone();
         move |acts: Vec<vim::Act>| {
             let before = editor.peek().active();
+            // held across a whole j/k run, forgotten below by anything else
+            let walked = acts
+                .iter()
+                .any(|act| matches!(act, vim::Act::WalkVisual { .. }));
             for act in acts {
                 match act {
                     vim::Act::Place(at) => {
@@ -1470,6 +1545,31 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         search_query.set(String::new());
                         search_prompt.set(true);
                     }
+                    // the grammar cannot see the webview's wrapped lines:
+                    // the whole run goes over the geometry seam in one
+                    // round trip, the logical fallback taking over — and
+                    // stopping the run — the moment the seam runs out of
+                    // drawn lines
+                    // (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md)
+                    vim::Act::WalkVisual {
+                        down,
+                        count,
+                        extend,
+                    } => {
+                        let count = bounded_steps(&editor.peek(), count);
+                        spawn(walk_visual(
+                            editor,
+                            line_probe.clone(),
+                            goal.clone(),
+                            fragments.clone(),
+                            Step {
+                                down,
+                                count,
+                                extend,
+                                held: goal.get(),
+                            },
+                        ));
+                    }
                     // the one async act: read the clipboard, then the
                     // editor decides pure against the state the read found
                     vim::Act::Paste { before, count } => {
@@ -1499,6 +1599,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             if editor.peek().active() != before {
                 fragments.borrow_mut().sweep();
             }
+            // the goal column lives only across a j/k run: any other key
+            // — including a WalkVisual-free vim outcome — forgets it
+            if !walked {
+                goal.set(goal.get().forgotten());
+            }
         }
     });
 
@@ -1513,6 +1618,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let hit = hit.clone();
         let dragging = dragging.clone();
         let probing = probing.clone();
+        let goal = goal.clone();
         move || -> Option<Element> {
             let panes = block_panes(
                 &editor.read(),
@@ -1537,17 +1643,25 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     // (adr/2026-08-caret-shape-is-the-mode-indicator.md)
                                     let shape = match vim.read().mode {
                                         vim::Mode::Normal
-                                        | vim::Mode::Visual(_) => {
+                                        | vim::Mode::Visual(_)
+                                        | vim::Mode::Replace => {
                                             caret::Shape::Box
                                         }
                                         vim::Mode::Insert => caret::Shape::Bar,
                                     };
+                                    // V paints whole lines; v stays byte-exact
+                                    // (adr/2026-08-v-highlight-covers-whole-lines.md)
+                                    let linewise = matches!(
+                                        vim.read().mode,
+                                        vim::Mode::Visual(vim::VisualKind::Line)
+                                    );
                                     let lines = caret::layout(
                                         &text,
                                         anchor,
                                         head,
                                         preview.read().as_deref(),
                                         shape,
+                                        linewise,
                                     );
                                     rsx! {
                                         div {
@@ -1559,7 +1673,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                             onmousedown: {
                                                 let hit = hit.clone();
                                                 let dragging = dragging.clone();
+                                                let goal = goal.clone();
                                                 move |event: MouseEvent| {
+                                                    // a mouse-driven caret move ends any j/k
+                                                    // run, the way `place_in_block` drops the
+                                                    // editor's own logical goal
+                                                    goal.set(goal.get().forgotten());
                                                     let follow = event.modifiers().ctrl();
                                                     dragging.set(!follow);
                                                     let Some(hit) = hit.clone() else {
@@ -1591,10 +1710,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                 let hit = hit.clone();
                                                 let dragging = dragging.clone();
                                                 let probing = probing.clone();
+                                                let goal = goal.clone();
                                                 move |event: MouseEvent| {
                                                     if !dragging.get() {
                                                         return;
                                                     }
+                                                    goal.set(goal.get().forgotten());
                                                     let Some(hit) = hit.clone() else { return };
                                                     if probing.replace(true) {
                                                         return;
@@ -1685,7 +1806,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                         }
                                                     }
                                                 },
-                                                onkeydown: move |event: KeyboardEvent| {
+                                                onkeydown: {
+                                                    let goal = goal.clone();
+                                                    move |event: KeyboardEvent| {
                                                     // never touch a composing keystroke: the
                                                     // IME owns it, and an open preview means
                                                     // the IME owns it whatever isComposing
@@ -1726,10 +1849,20 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                             apply_vim.call(acts);
                                                         }
                                                         // unbound normal-mode keys are inert:
-                                                        // consumed, never inserted
+                                                        // consumed, never inserted — but a key
+                                                        // the grammar swallows is still another
+                                                        // key, and the goal column lives only
+                                                        // across a j/k run, so it forgets too.
+                                                        // The one exception is a count still
+                                                        // accumulating: vim's curswant survives
+                                                        // one, so the 2 of 2j does not throw
+                                                        // away the column the j before it set.
                                                         vim::Outcome::Swallow => {
                                                             event.prevent_default();
                                                             event.stop_propagation();
+                                                            if !vim.peek().counting() {
+                                                                goal.set(goal.get().forgotten());
+                                                            }
                                                         }
                                                         vim::Outcome::Pass => {
                                                             // not the grammar's: Escape and the
@@ -1743,7 +1876,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                             }
                                                         }
                                                     }
-                                                },
+                                                }},
                                                 oncompositionstart: move |_| {
                                                     // the IME writes; normal mode does not
                                                     if vim.peek().mode == vim::Mode::Insert {
@@ -1779,7 +1912,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         class: "block",
                                         onclick: {
                                             let fragments = fragments.clone();
+                                            let goal = goal.clone();
                                             move |_| {
+                                                goal.set(goal.get().forgotten());
                                                 editor.write().activate(start);
                                                 fragments.borrow_mut().sweep();
                                             }
@@ -1811,7 +1946,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                             class: "block block-pending",
                                             onclick: {
                                                 let fragments = fragments.clone();
+                                                let goal = goal.clone();
                                                 move |_| {
+                                                    goal.set(goal.get().forgotten());
                                                     editor.write().activate(start);
                                                     fragments.borrow_mut().sweep();
                                                 }
@@ -3242,6 +3379,132 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             }
         }
     }
+}
+
+/// What one `WalkVisual` act asks for, kept together so the walk's own
+/// signature stays readable. `held` is the run's goal column as it stood
+/// the moment the key landed, read here rather than inside the spawned
+/// walk: a key pressed before that walk is first polled would otherwise
+/// have already forgotten the run, and the walk could not tell.
+#[derive(Clone, Copy)]
+struct Step {
+    down: bool,
+    count: usize,
+    extend: bool,
+    held: Goal,
+}
+
+/// One `[count]j`/`k` press, resolved off the UI thread: the seam walks
+/// every step inside the webview and answers one landing, and the logical
+/// fallback takes the run's last step whenever the drawn lines ran out
+/// first — which is what crosses into a neighbouring block and clamps at
+/// the note's ends
+/// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+async fn walk_visual(
+    mut editor: Signal<Editor>,
+    probe: Option<LineProbe>,
+    goal: Rc<Cell<Goal>>,
+    fragments: Rc<RefCell<FragmentCache>>,
+    step: Step,
+) {
+    let held = step.held;
+    let landing = match probe {
+        // no seam injected at all: the run is wholly degraded and takes
+        // its whole count logically, exactly as separate presses holding
+        // the same goal column would. `None` out of the seam reads the
+        // same way: a miss, the caret already on the note's first or last
+        // drawn line, or a landing outside the active block
+        None => None,
+        Some(probe) => (probe.0)(held.x, step.down, step.count).await,
+    };
+    // another key has forgotten this run while the probe was out, so it
+    // has already moved the caret this walk was about to place: the whole
+    // walk is dropped — its landing, its goal column and its fallback
+    if goal.get().generation != held.generation {
+        return;
+    }
+    let before = editor.peek().active();
+    let taken = landing.map_or(0, |landing| {
+        remember(&goal, |run| run.x = Some(landing.x));
+        editor.write().place_in_block(
+            landing.start,
+            landing.units,
+            step.extend,
+        );
+        landing.taken.min(step.count)
+    });
+    // the drawn lines ran out before the count did: the rest of the run
+    // goes logically, which is what leaves the active block
+    if taken < step.count {
+        let rest = step.count - taken;
+        let column = walk_visual_fallback(editor, step, rest, held.column);
+        remember(&goal, |run| run.column = column);
+    }
+    // a landing that woke another block leaves a stale fragment behind
+    if editor.peek().active() != before {
+        fragments.borrow_mut().sweep();
+    }
+}
+
+/// Stores what a step resolved into the run's goal column, read back
+/// rather than written from the walk's own copy: consecutive presses of
+/// the same run share a generation, so the earlier step's column is
+/// already there.
+fn remember(goal: &Cell<Goal>, store: impl FnOnce(&mut Goal)) {
+    let mut run = goal.get();
+    store(&mut run);
+    goal.set(run);
+}
+
+/// An explicit bound on one run before anything walks: a note draws at
+/// most one visual line per character, so a count past that can never
+/// reach further than its last drawn line, and `999999999j` asks the
+/// webview for a walk it can finish (CLAUDE.md: bounded loops with
+/// explicit iteration limits). No note open, nothing to walk: one step.
+fn bounded_steps(editor: &Editor, count: usize) -> usize {
+    editor
+        .note()
+        .map_or(1, |(_, text)| count.min(text.chars().count() + 1))
+}
+
+/// The degraded path a `WalkVisual` run falls back to whenever the line
+/// probe has nothing left to answer: the same logical-line walk
+/// `run_motion` always did, which is what crosses into a neighbouring
+/// block and clamps at the note's ends. Answers the cluster column the run
+/// must keep, so a fallback step over a short line does not forget where
+/// the run started
+/// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+/// `steps` is what is left of the run, not `step.count`: the seam may
+/// already have walked some of it.
+fn walk_visual_fallback(
+    mut editor: Signal<Editor>,
+    step: Step,
+    steps: usize,
+    column: Option<usize>,
+) -> Option<usize> {
+    let landed = {
+        let snapshot = editor.peek();
+        let text = snapshot.note().map(|(_, text)| text);
+        text.zip(snapshot.caret()).and_then(|(text, caret)| {
+            let lines = Lines::of(text, snapshot.blocks());
+            let motion = if step.down { Motion::Down } else { Motion::Up };
+            motions::motion(
+                text, &lines, caret.head, motion, steps, column, None,
+            )
+        })
+    };
+    // note()/caret() are None only when no note is open — every real
+    // caller only reaches here from a keystroke the sink already gated on
+    // an open note with a caret; the branch below is proven by a direct
+    // call in the tests, the one state a keystroke can never produce.
+    landed.and_then(|(target, goal)| {
+        if step.extend {
+            editor.write().extend_to(target);
+        } else {
+            editor.write().place_at(target);
+        }
+        goal
+    })
 }
 
 /// The app's two screens (adr/2026-07-two-screens-table-and-logs.md): the
@@ -5902,6 +6165,61 @@ mod tests {
     }
 
     #[test]
+    fn r_overwrites_through_the_widget_and_the_caret_stays_a_box() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // k k: off the trailing blank line, onto the heading's own line
+        // (adr/2026-08-cursor-always-in-the-note.md)
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        let before = source_of(&dom);
+
+        // R overwrites the cluster under the caret rather than inserting
+        press(
+            &mut dom,
+            sink,
+            Key::Character("R".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("X".into()),
+            Modifiers::empty(),
+        );
+
+        let after = source_of(&dom);
+        assert_ne!(after, before, "the overwrite changed the source");
+        assert!(after.starts_with('X'), "{after}");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "one cluster overwritten, none inserted"
+        );
+
+        // R draws the box caret, same as normal mode
+        // (adr/2026-08-replace-mode-session-and-backspace.md)
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"class="caret-box""#),
+            "{}",
+            dioxus_ssr::render(&dom)
+        );
+    }
+
+    #[test]
     fn dg_crosses_blocks_and_paste_declines_without_a_readable_clip() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
@@ -6426,6 +6744,789 @@ mod tests {
         assert_eq!(source_of(&dom), "= 2026-07-23\n", "the word went");
         press(&mut dom, sink, Key::Backspace, Modifiers::empty());
         assert_eq!(source_of(&dom), "= 2026-07-23", "one cluster went");
+    }
+
+    #[test]
+    fn v_paints_whole_lines_and_lowercase_v_stays_byte_exact() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // k k: off the trailing blank line, onto the heading's own line
+        // (adr/2026-08-cursor-always-in-the-note.md); then 0 l l, so the
+        // run starts at column 2 — off column 0, where a charwise span
+        // from the same anchor would be indistinguishable from a widened
+        // one and this test would pass with `linewise` hardcoded false
+        for key in "kk0ll".chars() {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.to_string()),
+                Modifiers::empty(),
+            );
+        }
+
+        // V j: whole-line visual, extended down onto the link line
+        press(
+            &mut dom,
+            sink,
+            Key::Character("V".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(
+                r#"<span class="sel" data-start="0">= 2026-07-23</span>"#
+            ),
+            "the heading line paints whole, from before the anchor: {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="sel" data-start="12"> </span>"#),
+            "the heading line's newline cell paints too: {html}"
+        );
+        assert!(
+            html.contains(r#"class="sel" data-start="16""#),
+            "the link line paints past the caret's own cluster: {html}"
+        );
+
+        // escape back to normal, up onto the heading line again, then the
+        // same j through charwise v: neither the heading line's head nor
+        // anything past the caret enters a sel piece — v stays byte-exact
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        let charwise_html = dioxus_ssr::render(&dom);
+        assert!(
+            !charwise_html.contains(r#"class="sel" data-start="16""#),
+            "v paints nothing past the head: {charwise_html}"
+        );
+        assert!(
+            !charwise_html.contains(r#"data-start="12"> </span>"#),
+            "v paints no newline cell either: {charwise_html}"
+        );
+    }
+
+    /// A count on plain j, resolved through the logical-line fallback
+    /// (`walk_visual_fallback`): 2j must land exactly where two separate
+    /// j presses do, content-independent proof that the fallback still
+    /// composes the count (docs/plans/2026-08-23-vim-friction-batch.md
+    /// item 8).
+    #[test]
+    fn a_count_on_plain_j_lands_where_two_separate_j_presses_do() {
+        fn rendered_after(second: &str) -> String {
+            let vault = temp_vault();
+            let (mut dom, clicks, _, _) =
+                rendered_app(Some(vault.path().to_path_buf()));
+            let (_, sink) = activate_heading(&mut dom, &clicks);
+            // gg: a fixed, deterministic starting line for both variants
+            press(
+                &mut dom,
+                sink,
+                Key::Character("g".into()),
+                Modifiers::empty(),
+            );
+            let woken = press_for_mutations(
+                &mut dom,
+                sink,
+                Key::Character("g".into()),
+                Modifiers::empty(),
+            );
+            let sink = listeners(&woken, "keydown")[0];
+            for key in second.chars() {
+                press(
+                    &mut dom,
+                    sink,
+                    Key::Character(key.to_string()),
+                    Modifiers::empty(),
+                );
+            }
+            dioxus_ssr::render(&dom)
+        }
+
+        assert_eq!(
+            rendered_after("2j"),
+            rendered_after("jj"),
+            "2j lands where j j does, through the fallback"
+        );
+    }
+
+    /// The one state a real keystroke can never produce: `apply_vim` only
+    /// ever runs once the sink has already matched an open note against a
+    /// caret, so `walk_visual_fallback`'s "nothing to land on" guard is
+    /// proven here directly, over a closed editor, rather than through a
+    /// keystroke that cannot reach it. Nothing moves and no goal column
+    /// comes back — and `bounded_steps` reads the same closed editor, so
+    /// the same state proves its own "nothing to walk" answer.
+    #[test]
+    fn walk_visual_fallback_does_nothing_without_an_open_note() {
+        #[component]
+        fn Probe() -> Element {
+            let editor = use_signal(Editor::closed);
+            let step = Step {
+                down: true,
+                count: 1,
+                extend: false,
+                held: Goal::default(),
+            };
+            let goal = walk_visual_fallback(editor, step, 1, Some(4));
+            let snapshot = editor.read();
+            let untouched = goal.is_none()
+                && snapshot.note().is_none()
+                && snapshot.caret().is_none()
+                && snapshot.active().is_none();
+            rsx! { "{untouched}" }
+        }
+        let mut dom = VirtualDom::new(Probe);
+        dom.rebuild_to_vec();
+        assert_eq!(
+            dioxus_ssr::render(&dom),
+            "true",
+            "a closed editor walks nowhere and remembers no column"
+        );
+        assert_eq!(
+            bounded_steps(&Editor::closed(), 9),
+            1,
+            "no note open, nothing to walk: one degraded step"
+        );
+    }
+
+    /// A scripted landing places the caret exactly where the seam says,
+    /// not where the logical fallback would have
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_scripted_line_probe_answer_places_the_caret_at_that_block_offset() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, _) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // the seam's own answer: block-relative byte 0, no UTF-16 offset
+        // into it — the caret lands at the block's very start, which
+        // `activate`'s own end-of-block landing never puts it at
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 12.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="caret-box" data-start="0""#),
+            "the scripted landing wins over the fallback: {html}"
+        );
+    }
+
+    /// A miss the seam reports is indistinguishable from no seam at all:
+    /// both take the exact same logical-line step
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_scripted_miss_and_no_probe_at_all_land_on_the_same_logical_line() {
+        let vault = temp_vault();
+
+        let (mut dom_absent, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom_absent, &clicks);
+        press(
+            &mut dom_absent,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom_absent));
+
+        let (mut dom_miss, clicks, drawn, _) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom_miss, &clicks);
+        drawn.lock().expect("the line cell never poisons").clear();
+        press(
+            &mut dom_miss,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom_miss));
+
+        assert_eq!(
+            dioxus_ssr::render(&dom_absent),
+            dioxus_ssr::render(&dom_miss),
+            "a reported miss and an absent seam degrade identically"
+        );
+    }
+
+    /// A `WalkVisual` run that crosses into the neighbouring block — the
+    /// logical fallback's own doing, same as any other landing — leaves a
+    /// stale fragment behind exactly as every other crossing does, and the
+    /// spawned task sweeps it once the caret settles
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md). What the
+    /// sweep does is evict, so the proof is a compile: a block whose
+    /// fragment was swept has to be built again instead of answering from
+    /// the cache.
+    #[test]
+    fn a_walkvisual_run_that_crosses_a_block_sweeps_the_stale_fragment() {
+        let vault = temp_vault();
+        let (mut dom, clicks, held, _sender) =
+            scripted_app(Some(vault.path().to_path_buf()));
+        // the preamble awake, the heading asleep with its SVG cached: the
+        // state a crossing back down makes the preamble's own cached SVG
+        // stale in
+        let woken = click_for_mutations(&mut dom, clicks[clicks.len() - 4]);
+        let sink = listeners(&woken, "keydown")[0];
+        held.work(&mut dom);
+        assert!(
+            dioxus_ssr::render(&dom).contains(RENDERED_NOTE),
+            "the heading's fragment is cached and drawn"
+        );
+        assert!(held.take().is_empty(), "nothing is queued to start with");
+
+        // j: off the preamble's last line, into the heading block below
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(
+            !source_of(&dom).contains("#import"),
+            "the heading block woke: {}",
+            source_of(&dom)
+        );
+        assert!(
+            held.take()
+                .iter()
+                .any(|job| matches!(job, Job::Fragment(_))),
+            "the preamble's swept fragment is compiled again, not cached"
+        );
+    }
+
+    /// `3j` is one grammar act and one round trip: the whole count crosses
+    /// the seam at once, and the caret lands on the run's *third* drawn
+    /// line, not its first. A step-per-eval walk could not do this — the
+    /// second eval would be built before the first landing's DOM edits
+    /// flushed and would read the caret's pre-move rect
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_count_of_three_walks_three_drawn_lines_in_one_round_trip() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // three drawn lines below the caret, each a different block offset
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(1, 0, 77.0), (3, 0, 77.0), (5, 0, 77.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("3".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+
+        assert_eq!(
+            *asked.lock().expect("the goal cell never poisons"),
+            vec![(None, 3)],
+            "one ask carries the whole count"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="caret-box" data-start="5""#),
+            "the caret sits on the third drawn line, not the first: {html}"
+        );
+    }
+
+    /// A count the drawn lines cannot fill: the seam walks what it has and
+    /// says so, and the rest of the run goes over the logical fallback —
+    /// which is what leaves the active block
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_count_past_the_drawn_extent_finishes_through_the_fallback() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, _) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // one drawn line above the caret, then nothing: 3k takes the one
+        // step the seam has and walks the other two logically, out of the
+        // heading block and into the preamble above it
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 9.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("3".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+
+        assert!(
+            source_of(&dom).contains("#import"),
+            "the run finished logically into the preamble: {}",
+            source_of(&dom)
+        );
+    }
+
+    /// The count is clamped to the note's drawn extent before anything
+    /// walks, so an absurd one asks the webview for a walk it can finish
+    /// rather than four billion steps (CLAUDE.md: bounded loops).
+    #[test]
+    fn an_absurd_count_is_clamped_to_the_notes_drawn_extent() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 9.0)];
+        for key in "999999999j".chars() {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.to_string()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+
+        let asked_for = asked
+            .lock()
+            .expect("the goal cell never poisons")
+            .first()
+            .map(|(_, count)| *count);
+        let note = std::fs::read_to_string(
+            vault.path().join("time").join(format!("{TODAY}.typ")),
+        )
+        .expect("the fixture note is on disk");
+        assert!(
+            asked_for.is_some_and(|count| count <= note.chars().count() + 1),
+            "the walk was clamped to the note's characters: {asked_for:?}"
+        );
+    }
+
+    /// A key the grammar swallows is still another key, so it forgets the
+    /// run's goal column too. Without this the ADR's "cleared by every
+    /// other key" would hold only for keys that produce acts
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_run_broken_by_a_swallowed_key_forgets_the_goal_x() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 31.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        // "!" is bound to nothing: the grammar consumes it and runs
+        // nothing, so it never reaches `apply_vim` at all
+        press(
+            &mut dom,
+            sink,
+            Key::Character("!".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+
+        assert_eq!(
+            asked
+                .lock()
+                .expect("the goal cell never poisons")
+                .last()
+                .copied(),
+            Some((None, 1)),
+            "the swallowed key between the two runs forgot the goal x"
+        );
+    }
+
+    /// A key pressed while a walk is still awaiting its probe forgets the
+    /// run synchronously; the walk then resolves into a run that no longer
+    /// exists, and must write neither its goal column nor its landing —
+    /// the key that forgot the run has already moved the caret, and a late
+    /// landing would yank it back
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md). Nothing
+    /// settles between the two presses, which is the only way to have a
+    /// walk in flight when the next key lands.
+    #[test]
+    fn a_walk_resolving_after_its_run_was_forgotten_moves_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked, release) =
+            latched_line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        retype(&mut dom, sink, "abcdefgh\nij\nklmnopqr");
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        block_on(settle(&mut dom));
+        // column 5 of the last line: far from the landing the seam is
+        // about to answer, so a late write is visible as a caret jump
+        for key in "0lllll".chars() {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.to_string()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 64.0)];
+        // j sends the walk out and it hangs there; h lands while it is
+        // still out
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("h".into()),
+            Modifiers::empty(),
+        );
+        // now the walk resolves, into the run h already forgot
+        release.send(()).expect("the walk is still waiting");
+        block_on(settle(&mut dom));
+
+        let rendered = dioxus_ssr::render(&dom);
+        assert!(
+            rendered.contains(r#"class="caret-box" data-start="16""#),
+            "the late landing left the caret where h put it: {rendered}"
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+
+        assert_eq!(
+            asked
+                .lock()
+                .expect("the goal cell never poisons")
+                .last()
+                .copied(),
+            Some((None, 1)),
+            "the late landing did not resurrect the forgotten goal x"
+        );
+    }
+
+    /// A count is not "another key": vim's curswant survives one, so the
+    /// 2 of a 2j walks from the column the j before it resolved rather
+    /// than bootstrapping a fresh one from where the caret now stands
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_count_between_two_runs_keeps_the_goal_x() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 42.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        for key in "2j".chars() {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.to_string()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+
+        assert_eq!(
+            asked
+                .lock()
+                .expect("the goal cell never poisons")
+                .last()
+                .copied(),
+            Some((Some(42.0), 2)),
+            "the count digit held the first run's goal x"
+        );
+    }
+
+    /// Every mouse-driven caret move ends a j/k run, the way
+    /// `Editor::place_in_block` drops the editor's own logical goal: a
+    /// press, a drag and a click onto another block all forget the pixel
+    /// column, so a j after clicking elsewhere does not walk back to the
+    /// pre-click column
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn the_mouse_forgets_a_walks_goal_column() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked, hit) =
+            line_and_hit_app(Some(vault.path().to_path_buf()));
+        // `activate_heading`'s bounce, opened out: the second click's
+        // mutations carry the preamble fragment's own click target, which
+        // the helper discards
+        let bounced = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let heading = listeners(&bounced, "click")[0];
+        let woken = click_for_mutations(&mut dom, heading);
+        let block = listeners(&woken, "mousedown")[0];
+        let sink = listeners(&woken, "keydown")[0];
+        let preamble = listeners(&woken, "click")[0];
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 88.0)];
+        *hit.lock().expect("the hit cell never poisons") = Some((0, 1));
+
+        // each mouse gesture in turn, every one of them between two runs
+        for gesture in ["mousedown", "mousemove"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character("j".into()),
+                Modifiers::empty(),
+            );
+            block_on(settle(&mut dom));
+            mouse(&mut dom, gesture, block, (0.0, 0.0));
+            block_on(settle(&mut dom));
+            press(
+                &mut dom,
+                sink,
+                Key::Character("j".into()),
+                Modifiers::empty(),
+            );
+            block_on(settle(&mut dom));
+            assert_eq!(
+                asked
+                    .lock()
+                    .expect("the goal cell never poisons")
+                    .last()
+                    .copied(),
+                Some((None, 1)),
+                "{gesture} between two runs forgot the goal x"
+            );
+        }
+
+        // and the click that activates another block, which moves the
+        // caret without any probe at all
+        mouse(&mut dom, "mouseup", block, (0.0, 0.0));
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let activated = click_for_mutations(&mut dom, preamble);
+        block_on(settle(&mut dom));
+        assert!(
+            source_of(&dom).contains("#import"),
+            "the preamble block is the active one now: {}",
+            source_of(&dom)
+        );
+        let sink = listeners(&activated, "keydown")[0];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(
+            asked
+                .lock()
+                .expect("the goal cell never poisons")
+                .last()
+                .copied(),
+            Some((None, 1)),
+            "activating another block forgot the goal x too"
+        );
+    }
+
+    /// The logical fallback holds the run's goal column just as the seam
+    /// holds its pixel x. This is the common path — every block crossing
+    /// and every note edge takes it — and since the grammar handed the
+    /// whole walk to the executor, the executor is the only thing left
+    /// that can remember: a k over a short line must not forget where the
+    /// run started, and the k after it lands back on the original column
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_fallback_run_over_a_short_line_keeps_its_goal_column() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        // three lines in one block, the middle one too short to hold the
+        // column the run starts at
+        retype(&mut dom, sink, "abcdefgh\nij\nklmnopqr");
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        block_on(settle(&mut dom));
+
+        // column 5 of the last line, then k k
+        for key in "0lllll".chars() {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.to_string()),
+                Modifiers::empty(),
+            );
+        }
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let clamped = dioxus_ssr::render(&dom);
+        assert!(
+            clamped.contains(r#"class="caret-box" data-start="10""#),
+            "the short line clamps the walk onto its last cluster: {clamped}"
+        );
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let restored = dioxus_ssr::render(&dom);
+        assert!(
+            restored.contains(r#"class="caret-box" data-start="5""#),
+            "the run remembered column 5 through the short line: {restored}"
+        );
+    }
+
+    /// The goal x lives only across a j/k run: any other key — even one
+    /// the grammar accepts — forgets it, so the next run bootstraps fresh
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn a_run_broken_by_h_forgets_the_goal_x() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, asked) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(0, 0, 55.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        press(
+            &mut dom,
+            sink,
+            Key::Character("h".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+
+        assert_eq!(
+            asked
+                .lock()
+                .expect("the goal cell never poisons")
+                .last()
+                .copied(),
+            Some((None, 1)),
+            "h between two j runs forgets the held goal x"
+        );
+    }
+
+    /// Visual mode's j extends the selection to the seam's landing instead
+    /// of collapsing the caret onto it
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    #[test]
+    fn visual_mode_line_probe_j_extends_instead_of_placing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, drawn, _) =
+            line_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // v anchors where activate() left the caret — the block's end —
+        // so a place (rather than an extend) would collapse the anchor
+        // there too and leave no selection at all
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::empty(),
+        );
+        *drawn.lock().expect("the line cell never poisons") =
+            vec![(5, 0, 12.0)];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="caret-box" data-start="5""#),
+            "the head moved to the scripted landing: {html}"
+        );
+        assert!(
+            html.contains(r#"class="sel""#),
+            "the anchor held instead of collapsing onto the head: {html}"
+        );
     }
 
     #[test]
@@ -10186,13 +11287,14 @@ mod tests {
         root: Option<PathBuf>,
         closer: Option<Closer>,
     ) -> (VirtualDom, Mutations) {
-        mounted_app_with_hit(root, closer, None)
+        mounted_app_with_hit(root, closer, None, None)
     }
 
     fn mounted_app_with_hit(
         root: Option<PathBuf>,
         closer: Option<Closer>,
         hit: Option<HitProbe>,
+        line: Option<LineProbe>,
     ) -> (VirtualDom, Mutations) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
@@ -10206,6 +11308,9 @@ mod tests {
         if let Some(hit) = hit {
             dom.insert_any_root_context(Box::new(hit));
         }
+        if let Some(line) = line {
+            dom.insert_any_root_context(Box::new(line));
+        }
         let mutations = dom.rebuild_to_vec();
         (dom, mutations)
     }
@@ -10213,18 +11318,13 @@ mod tests {
     /// A hit cell holding this never answers.
     const HIT_HANGS: (usize, usize) = (usize::MAX, usize::MAX);
 
-    /// Like `rendered_app`, but with a scripted hit probe injected: each
-    /// mouse press reads whatever the returned cell holds at that moment —
+    /// Where the scripted hit probe says the next mouse press landed —
     /// (span `data-start`, UTF-16 units within it), or `None` for a miss.
-    #[allow(clippy::type_complexity)]
-    fn hit_app(
-        root: Option<PathBuf>,
-    ) -> (
-        VirtualDom,
-        Vec<ElementId>,
-        Arc<std::sync::Mutex<Option<(usize, usize)>>>,
-    ) {
-        let landing = Arc::new(std::sync::Mutex::new(None::<(usize, usize)>));
+    type HitCell = Arc<std::sync::Mutex<Option<(usize, usize)>>>;
+
+    /// The scripted hit probe and the cell a test steers it with.
+    fn hit_probe_fake() -> (HitProbe, HitCell) {
+        let landing: HitCell = Arc::new(std::sync::Mutex::new(None));
         let feed = landing.clone();
         let hit = HitProbe(Arc::new(move |_, _| {
             let landed = *feed.lock().expect("the hit cell never poisons");
@@ -10234,9 +11334,115 @@ mod tests {
             }
             Box::pin(async move { landed })
         }));
-        let (dom, mutations) = mounted_app_with_hit(root, None, Some(hit));
+        (hit, landing)
+    }
+
+    /// Like `rendered_app`, but with a scripted hit probe injected: each
+    /// mouse press reads whatever the returned cell holds at that moment.
+    fn hit_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, HitCell) {
+        let (hit, landing) = hit_probe_fake();
+        let (dom, mutations) =
+            mounted_app_with_hit(root, None, Some(hit), None);
         let clicks = listeners(&mutations, "click");
         (dom, clicks, landing)
+    }
+
+    /// The drawn lines the scripted line probe has below (or above) the
+    /// caret, one entry per step: `(data-start, UTF-16 units, pixel x)`.
+    /// An empty script is the seam with nothing to answer.
+    type LineScript = Arc<std::sync::Mutex<Vec<(usize, usize, f64)>>>;
+
+    /// What the scripted line probe was asked for, once per press: the
+    /// goal x it was handed and the number of steps the run wanted.
+    type LineAsks = Arc<std::sync::Mutex<Vec<(Option<f64>, usize)>>>;
+
+    /// Like `hit_app`, but scripts the line probe the way the real one
+    /// behaves: one round trip per press, walking as many of the asked
+    /// steps as the script has drawn lines and answering the landing it
+    /// reached — so a count of three is visible as three steps consumed,
+    /// and a script shorter than the count is the drawn extent running out
+    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md).
+    fn line_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, LineScript, LineAsks) {
+        let (line, script, asked) = line_probe_fake(None);
+        let (dom, mutations) =
+            mounted_app_with_hit(root, None, None, Some(line));
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, script, asked)
+    }
+
+    /// `line_app` whose first walk hangs until the returned sender fires:
+    /// the only way to have a walk still out when the next key lands, and
+    /// so the only way to reach the run's generation guard.
+    #[allow(clippy::type_complexity)]
+    fn latched_line_app(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        LineScript,
+        LineAsks,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let (line, script, asked) = line_probe_fake(Some(gate));
+        let (dom, mutations) =
+            mounted_app_with_hit(root, None, None, Some(line));
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, script, asked, release)
+    }
+
+    /// `line_app` with the scripted hit probe beside the line one: what
+    /// the mouse does to a j/k run's held goal column is only visible
+    /// when both seams answer.
+    #[allow(clippy::type_complexity)]
+    fn line_and_hit_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, LineScript, LineAsks, HitCell) {
+        let (line, script, asked) = line_probe_fake(None);
+        let (hit, landing) = hit_probe_fake();
+        let (dom, mutations) =
+            mounted_app_with_hit(root, None, Some(hit), Some(line));
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, script, asked, landing)
+    }
+
+    /// The scripted line probe and the two cells a test steers and reads
+    /// it with. `gate`, when given, hangs the very first walk until it
+    /// fires — every later walk answers at once.
+    fn line_probe_fake(
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> (LineProbe, LineScript, LineAsks) {
+        let script: LineScript = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let feed = script.clone();
+        let asked: LineAsks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = asked.clone();
+        let latch = Arc::new(std::sync::Mutex::new(gate));
+        let line = LineProbe(Arc::new(move |goal, _down, count| {
+            recorder
+                .lock()
+                .expect("the goal cell never poisons")
+                .push((goal, count));
+            let held = latch.lock().expect("the latch never poisons").take();
+            let drawn = feed.lock().expect("the line cell never poisons");
+            let taken = count.min(drawn.len());
+            let landed = taken.checked_sub(1).map(|last| Landing {
+                start: drawn[last].0,
+                units: drawn[last].1,
+                x: drawn[last].2,
+                taken,
+            });
+            Box::pin(async move {
+                if let Some(held) = held {
+                    let _ = held.await;
+                }
+                landed
+            })
+        }));
+        (line, script, asked)
     }
 
     /// Puts the caret at `units` (UTF-16, block-relative) through the mouse

@@ -103,6 +103,16 @@ Exit: u undoes what one intent did, . repeats it, / finds it.
 Macros, marks, named registers, visual block, the ex command line (`:`, `:s`), the jumplist, any vim configuration surface.
 Anything above earns its way in through daily friction, queued in the polish backlog first — "as needed" cuts both ways.
 
+## Polish backlog (queued from daily-driving, no phase of its own)
+
+v2 was complete at phase 5; the items below are friction-earned additions the ceiling above always allowed for, not a reopened phase.
+
+- [x] `s`/`S` kept getting reached for mid-sentence: change-in-place without a separate delete-then-insert. `s` cuts [count] clusters into insert (vim's `cl`), `S` changes the current lines (vim's `cc`), both through the existing operator grammar. **→ ADR** (`adr/2026-08-clusters-noun-belongs-to-s.md` — `s` is `Operator::Change` over a new `Noun::Clusters`, `S` reuses `Noun::Lines`)
+- [x] `R` kept getting reached for on short in-place corrections where overtyping beats a delete-then-retype. Replace mode overwrites cluster-by-cluster, Backspace restoring what it displaced. **→ ADR** (`adr/2026-08-replace-mode-session-and-backspace.md` — one checkpoint and one clipboard write per session, Backspace steps back within it and only moves the caret once its history is spent)
+- [x] `V`'s highlight stopped at the raw byte end instead of painting the whole line, so line-wise selections looked wrong before an operator was even chosen. **→ ADR** (`adr/2026-08-v-highlight-covers-whole-lines.md` — the drawn extent widens to first-to-last character plus a trailing newline cell per covered line, matching what `linewise_span` cuts everywhere but a block's final line, where the ADR records the divergence)
+- [x] Surround (`cs`/`ds`/`ys`/`yss`/visual `S`) kept getting reached for while editing Typst's `` * _ ' " ` ( ) [ ] { } < > « » `` pairs by hand, one delimiter at a time. **→ ADR** (`adr/2026-08-surround-pair-set-and-padding.md` — the pair set including the French guillemets, the quote/bracket scoping split, padding as a splicing-time rule, and `yss` as the linewise wrap idiom)
+- [x] `j`/`k` walked logical (newline-delimited) lines while the proportional font wraps, so they skipped past most of a long wrapped paragraph in one keystroke. They now walk the lines the webview actually draws. **→ ADR** (`adr/2026-08-visual-line-j-k-through-a-geometry-seam.md` — a `LineProbe` seam beside `HitProbe`, the whole run resolved asynchronously in one round trip, the steps it could not take falling back to the logical-line walk)
+
 ## v2 exit criteria (from `plan.md`)
 
 - [x] The modal keymap sits between the widget and `Editor`, inserted without rewriting either — the invariant held from v0 phase 5 to its payoff (`plan.md` § Editor; `src/vim.rs` is the slot filled)

@@ -476,6 +476,45 @@ pub fn object(
     }
 }
 
+/// The two delimiters of the innermost pair around `at` — what cs, ds
+/// and the surround keys splice, as opposed to the content `object`
+/// names. Quote kinds pair left to right along the line (Typst's * and _
+/// ride this path), bracket kinds nest within the block.
+pub fn surround_spans(
+    text: &str,
+    blocks: &[Block],
+    at: usize,
+    kind: ObjectKind,
+) -> Option<(Range<usize>, Range<usize>)> {
+    match kind {
+        ObjectKind::Quote(quote) => {
+            let line = Lines::of(text, blocks).around(at);
+            let slice = text.get(line.clone()).unwrap_or_default();
+            let rel = at.saturating_sub(line.start).min(slice.len());
+            let (open, close) = quote_delimiters(slice, rel, quote)?;
+            Some((
+                line.start + open..line.start + open + quote.len_utf8(),
+                line.start + close..line.start + close + quote.len_utf8(),
+            ))
+        }
+        ObjectKind::Pair(open_ch, close_ch) => {
+            let block = blocks.get(crate::blocks::block_at(blocks, at))?;
+            let content = block.content();
+            let slice = text.get(content.clone()).unwrap_or_default();
+            let rel = at.saturating_sub(content.start).min(slice.len());
+            let (open, close) =
+                bracket_delimiters(slice, rel, open_ch, close_ch)?;
+            Some((
+                content.start + open
+                    ..content.start + open + open_ch.len_utf8(),
+                content.start + close
+                    ..content.start + close + close_ch.len_utf8(),
+            ))
+        }
+        ObjectKind::Word | ObjectKind::Block => None,
+    }
+}
+
 /// iw / aw: the same-class run under the caret, widened by its trailing
 /// (else leading) blanks for `around`. Line-scoped, as vim's word is.
 fn word_object(
@@ -547,22 +586,32 @@ fn quote_object(
 ) -> Option<Range<usize>> {
     let slice = text.get(line.clone()).unwrap_or_default();
     let rel = at.saturating_sub(line.start).min(slice.len());
-    let marks: Vec<usize> = slice
-        .char_indices()
-        .filter(|(_, ch)| *ch == quote)
-        .map(|(offset, _)| offset)
-        .collect();
-    let hit = marks.chunks(2).find_map(|pair| match pair {
-        [open, close] if rel <= *close => Some((*open, *close)),
-        _ => None,
-    })?;
-    let (open, close) = hit;
+    let (open, close) = quote_delimiters(slice, rel, quote)?;
     let span = if around {
         open..close + quote.len_utf8()
     } else {
         open + quote.len_utf8()..close
     };
     Some(line.start + span.start..line.start + span.end)
+}
+
+/// The chunked left-to-right quote pair the caret at `rel` stands in or
+/// before, as offsets into `slice` — what `quote_object` and
+/// `surround_spans` both build their span from.
+fn quote_delimiters(
+    slice: &str,
+    rel: usize,
+    quote: char,
+) -> Option<(usize, usize)> {
+    let marks: Vec<usize> = slice
+        .char_indices()
+        .filter(|(_, ch)| *ch == quote)
+        .map(|(offset, _)| offset)
+        .collect();
+    marks.chunks(2).find_map(|pair| match pair {
+        [open, close] if rel <= *close => Some((*open, *close)),
+        _ => None,
+    })
 }
 
 /// i( / a): the innermost pair around the caret, nesting respected,
@@ -578,14 +627,27 @@ fn pair_object(
 ) -> Option<Range<usize>> {
     let slice = text.get(content.clone()).unwrap_or_default();
     let rel = at.saturating_sub(content.start).min(slice.len());
-    let opened = open_before(slice, rel, open, close)?;
-    let closed = close_after(slice, rel, open, close)?;
+    let (opened, closed) = bracket_delimiters(slice, rel, open, close)?;
     let span = if around {
         opened..closed + close.len_utf8()
     } else {
         opened + open.len_utf8()..closed
     };
     Some(content.start + span.start..content.start + span.end)
+}
+
+/// The innermost nesting-aware bracket pair around `rel`, as offsets into
+/// `slice` — what `pair_object` and `surround_spans` both build their span
+/// from.
+fn bracket_delimiters(
+    slice: &str,
+    rel: usize,
+    open: char,
+    close: char,
+) -> Option<(usize, usize)> {
+    let opened = open_before(slice, rel, open, close)?;
+    let closed = close_after(slice, rel, open, close)?;
+    Some((opened, closed))
 }
 
 /// The unmatched opener at or before `rel`, depth counted right to left.
@@ -1107,6 +1169,120 @@ mod tests {
             object(text, &parsed, 12, ObjectKind::Quote('`'), false),
             Some(12..19),
         );
+    }
+
+    #[test]
+    fn surround_spans_finds_the_innermost_bracket_nesting() {
+        let text = "a (b (c) d) e\n";
+        let parsed = blocks::segment(text);
+        let pair = ObjectKind::Pair('(', ')');
+        let (open, close) =
+            surround_spans(text, &parsed, 6, pair).expect("found");
+        assert_eq!(open, 5..6, "the inner opener");
+        assert_eq!(close, 7..8, "the inner closer");
+    }
+
+    #[test]
+    fn surround_spans_answers_from_the_delimiter_itself() {
+        let text = "a (b (c) d) e\n";
+        let parsed = blocks::segment(text);
+        let pair = ObjectKind::Pair('(', ')');
+        let (open, close) =
+            surround_spans(text, &parsed, 5, pair).expect("on the opener");
+        assert_eq!((open, close), (5..6, 7..8));
+        let (open, close) =
+            surround_spans(text, &parsed, 7, pair).expect("on the closer");
+        assert_eq!((open, close), (5..6, 7..8));
+    }
+
+    #[test]
+    fn surround_spans_pairs_quotes_and_stars_left_to_right() {
+        let text = "l'idée et \"du *code*\"\n";
+        let parsed = blocks::segment(text);
+        let open_quote = text.find('"').expect("an opening quote");
+        let close_quote = text.rfind('"').expect("a closing quote");
+        let open_star = text.find('*').expect("an opening star");
+        let close_star = text.rfind('*').expect("a closing star");
+        let inside_quotes = open_quote + 2; // "d[u]…" — inside the quotes
+        let (open, close) = surround_spans(
+            text,
+            &parsed,
+            inside_quotes,
+            ObjectKind::Quote('"'),
+        )
+        .expect("found");
+        assert_eq!(open, open_quote..open_quote + 1);
+        assert_eq!(close, close_quote..close_quote + 1);
+        let (open, close) =
+            surround_spans(text, &parsed, open_star, ObjectKind::Quote('*'))
+                .expect("the emphasis pair, standing on its opener");
+        assert_eq!(open, open_star..open_star + 1);
+        assert_eq!(close, close_star..close_star + 1);
+    }
+
+    #[test]
+    fn surround_spans_answers_the_pair_ahead_when_two_stand_on_the_line() {
+        // two pairs, the caret between them: the chunked left-to-right
+        // pairing must answer the second, where a nearest-mark scan would
+        // answer the first
+        let text = "un \"mot\" et \"deux\"\n";
+        let parsed = blocks::segment(text);
+        let between = 9; // the e of "et", past the first pair's closer
+        let (open, close) =
+            surround_spans(text, &parsed, between, ObjectKind::Quote('"'))
+                .expect("the pair ahead");
+        assert_eq!(open, 12..13, "the second pair's opener");
+        assert_eq!(close, 17..18, "and its closer");
+    }
+
+    #[test]
+    fn surround_spans_quotes_answer_none_off_their_line() {
+        let text = "\"un\"\nmot\n";
+        let parsed = blocks::segment(text);
+        let at = text.find("mot").expect("mot is in the text");
+        assert_eq!(
+            surround_spans(text, &parsed, at, ObjectKind::Quote('"')),
+            None,
+        );
+    }
+
+    #[test]
+    fn surround_spans_answers_none_for_an_unmatched_opener() {
+        let text = "a (b\n";
+        let parsed = blocks::segment(text);
+        assert_eq!(
+            surround_spans(text, &parsed, 3, ObjectKind::Pair('(', ')')),
+            None,
+        );
+    }
+
+    #[test]
+    fn surround_spans_brackets_do_not_straddle_a_block_boundary() {
+        let text = "a (b\n\nc)\n";
+        let parsed = blocks::segment(text);
+        assert_eq!(parsed.len(), 2, "a parbreak splits the two blocks");
+        assert_eq!(
+            surround_spans(text, &parsed, 3, ObjectKind::Pair('(', ')')),
+            None,
+            "the closer lives in the next block, out of reach"
+        );
+    }
+
+    #[test]
+    fn surround_spans_brackets_answer_none_with_no_blocks_at_all() {
+        assert_eq!(
+            surround_spans("a (b) c", &[], 2, ObjectKind::Pair('(', ')')),
+            None,
+            "an empty block map names no block to scope into"
+        );
+    }
+
+    #[test]
+    fn surround_spans_answers_none_for_word_and_block_kinds() {
+        let text = "un mot\n";
+        let parsed = blocks::segment(text);
+        assert_eq!(surround_spans(text, &parsed, 3, ObjectKind::Word), None);
+        assert_eq!(surround_spans(text, &parsed, 3, ObjectKind::Block), None);
     }
 
     #[test]
