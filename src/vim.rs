@@ -517,10 +517,15 @@ impl Vim {
             Key::Character(character) => {
                 self.normal_character(character, view)
             }
-            _ => {
-                self.reset();
-                Outcome::Swallow
-            }
+            // everything left is a platform key, not a keystroke the user
+            // aimed at the grammar: a dead key, an F-key, or whatever
+            // Dioxus could not parse and handed over as `Unidentified`
+            // (dioxus-html keyboard.rs: `.unwrap_or(Key::Unidentified)`).
+            // Swallowed like visual mode's, and pointedly without a reset
+            // — a chord must not lose its verb to the layout machinery
+            // (adr/2026-08-platform-keys-do-not-abort-a-chord.md). An
+            // unbound *character* still aborts, below, as vim's does.
+            _ => Outcome::Swallow,
         }
     }
 
@@ -825,6 +830,13 @@ impl Vim {
         view: &View,
     ) -> Outcome {
         let Key::Character(character) = key else {
+            // a platform key is not the answer the prefix is waiting for,
+            // and must not be mistaken for a wrong one: keep waiting
+            // (adr/2026-08-platform-keys-do-not-abort-a-chord.md)
+            if !matches!(key, Key::Escape) {
+                self.prefix = Some(prefix);
+                return Outcome::Swallow;
+            }
             // a pending wrap still owns the visual selection: Escape aborts
             // it to normal exactly as an unknown pair character does, so one
             // Escape is enough either way
@@ -2572,6 +2584,83 @@ mod tests {
             ),
             other => other,
         }
+    }
+
+    /// A dead key reaches the grammar as `Key::Dead` — or, when Dioxus
+    /// cannot parse what the webview sent, as `Key::Unidentified`
+    /// (`.unwrap_or(Key::Unidentified)` in its keyboard deserializer).
+    /// Neither is a keystroke aimed at the grammar, and neither may cost
+    /// a chord its verb: `^` is dead on a French layout, so `d^` used to
+    /// arrive as d, a platform key, then the composed caret — and the
+    /// platform key in the middle took the d with it.
+    #[test]
+    fn a_platform_key_does_not_abort_a_chord() {
+        let text = "un café noir\nposé là\n";
+        let parsed = blocks::segment(text);
+        let sight = view(text, &parsed, 3);
+        let cut = Outcome::Acts(vec![
+            Act::SetClipboard("café noir".into()),
+            Act::Splice {
+                span: 3..13,
+                text: String::new(),
+                caret: 2,
+            },
+        ]);
+        for stray in [Key::Dead, Key::Unidentified, Key::Fn] {
+            let mut vim = normal();
+            assert_eq!(
+                stripped(feed_keys(
+                    &mut vim,
+                    &[character("d"), stray.clone(), character("$")],
+                    &sight,
+                )),
+                cut,
+                "{stray:?} between the verb and its motion",
+            );
+        }
+        // a pending prefix waits through one too: d i <platform> " still
+        // cuts inside the quotes
+        let quoted = "un «café» noir\n";
+        let parsed = blocks::segment(quoted);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed_keys(
+                &mut vim,
+                &[
+                    character("d"),
+                    character("i"),
+                    Key::Unidentified,
+                    character("«"),
+                ],
+                &view(quoted, &parsed, 5),
+            )),
+            Outcome::Acts(vec![
+                Act::SetClipboard("café".into()),
+                Act::Splice {
+                    span: 5..10,
+                    text: String::new(),
+                    caret: 5
+                },
+            ]),
+        );
+        // but an unbound *character* still aborts, as vim's does
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "dz", &sight),
+            Outcome::Swallow,
+            "dz is still nothing"
+        );
+        // and Escape still kills a pending prefix outright
+        let mut vim = normal();
+        assert_eq!(
+            feed_keys(
+                &mut vim,
+                &[character("d"), character("i"), Key::Escape],
+                &sight,
+            ),
+            Outcome::Swallow,
+        );
+        assert!(!vim.pending(), "Escape emptied the grammar");
     }
 
     /// The webview sends a modifier's own keydown before the character it
