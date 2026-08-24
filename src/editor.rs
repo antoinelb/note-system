@@ -188,6 +188,7 @@ impl Editor {
     /// it. Routed through `edit` — the block's whole new content, one
     /// staleness policy (adr/2026-08-ctrl-l-link-picker.md).
     pub fn insert_at_caret(&mut self, text: &str) {
+        let text = nbsp_folded(text);
         let Some((content, source)) = self.active_slice() else {
             self.trouble = Some(Trouble::Stale);
             return;
@@ -201,7 +202,7 @@ impl Editor {
             return;
         }
         let mut value = source;
-        value.replace_range(span.clone(), text);
+        value.replace_range(span.clone(), &text);
         // `active_slice` proved the block fits the buffer, which is the
         // same validity `edit` re-checks — the splice cannot refuse here
         self.edit(&value);
@@ -464,6 +465,7 @@ impl Editor {
     /// the insertion pure, and the splice lands it — an insertion inside
     /// the active block, always (adr/2026-08-one-register-the-clipboard.md).
     pub fn paste(&mut self, clip: &str, before: bool, count: usize) {
+        let clip = nbsp_folded(clip);
         let Some(at) = self.caret() else { return };
         let (span, body, caret) = {
             let Some((_, text)) = self.note() else { return };
@@ -471,7 +473,7 @@ impl Editor {
                 text,
                 &self.blocks,
                 at.head,
-                clip,
+                &clip,
                 before,
                 count,
             )
@@ -744,6 +746,17 @@ impl Editor {
         self.caret = Caret { anchor: head, head };
         self.goal = None;
     }
+}
+
+/// The no-break space a keystroke never means. On the `ca` layout `[` is
+/// AltGr+`^` and U+00A0 is AltGr+Space, so holding AltGr through `- [ ] `
+/// types the brackets around a no-break space; the template's checklist
+/// rule matches a `space` element and never a `text` one, and the item
+/// renders as a literal bullet. Folding on the way into the buffer keeps
+/// the note plain ASCII where a space was meant
+/// (adr/2026-08-nbsp-folded-on-buffer-entry.md).
+fn nbsp_folded(text: &str) -> String {
+    text.replace('\u{a0}', " ")
 }
 
 fn quote_completion(line: &str) -> Option<String> {
@@ -1176,6 +1189,26 @@ mod tests {
         assert!(text.contains("= étitle"), "{text}");
         assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
         assert_eq!(editor.caret_in_block(), (4, 4), "after the é");
+        assert_eq!(editor.trouble(), None);
+    }
+
+    #[test]
+    fn insert_at_caret_folds_the_altgr_no_break_space() {
+        // `[` is AltGr+`^` on the ca layout and U+00A0 is AltGr+Space, so
+        // a checklist typed without letting AltGr go carries a no-break
+        // space the template's rule never matches
+        // (adr/2026-08-nbsp-folded-on-buffer-entry.md)
+        let (_dir, mut editor) = open_note("- \n");
+        editor.activate(0);
+        editor.place_at(2);
+        for key in ["[", "\u{a0}", "]"] {
+            editor.insert_at_caret(key);
+        }
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "- [ ]\n");
+        // the caret counts the folded byte, not the two the no-break
+        // space would have spent
+        assert_eq!(editor.caret_in_block(), (5, 5), "after the ]");
         assert_eq!(editor.trouble(), None);
     }
 
@@ -1692,6 +1725,18 @@ mod tests {
         editor.buffer = None;
         editor.paste("x", false, 1);
         assert_eq!(editor.note(), None);
+    }
+
+    #[test]
+    fn paste_folds_the_no_break_spaces_the_clip_carries() {
+        // the fold guards vim's p as well as the typing path
+        // (adr/2026-08-nbsp-folded-on-buffer-entry.md)
+        let (_dir, mut editor) = open_note("un mot\n");
+        editor.activate(0);
+        editor.place_at(3);
+        editor.paste("beau\u{a0}", true, 1);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "un beau mot\n");
     }
 
     #[test]

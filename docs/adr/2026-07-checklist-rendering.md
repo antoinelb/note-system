@@ -17,7 +17,10 @@ the texts `[`, `]` around a space or an `x`.
   `list.item`, so the bullet marker vanishes and the circle takes its
   place; every other list item is untouched, as are brackets in prose.
 - Matching reads the children's `text` fields (content equality works for
-  `[ ]`/`[x]` blocks but not for escaped-bracket literals).
+  `[ ]`/`[x]` blocks but not for escaped-bracket literals). The middle
+  child must be a `space` element, so a no-break space typed by holding
+  AltGr defeats the match — it is folded on the way into the buffer
+  instead (`adr/2026-08-nbsp-folded-on-buffer-entry.md`).
 - **Rendering only**: ticking a box is editing — activate the block and
   type the `x`. Click-to-toggle on the rendered SVG would need
   source↔layout hit-mapping and an accept-writes-to-notes story; if it
