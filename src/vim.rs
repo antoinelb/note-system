@@ -347,7 +347,74 @@ impl Vim {
             acts.push(Act::Deactivate);
             return Outcome::Acts(acts);
         }
+        // Tab is `>>` under another name, in every mode but R, whose
+        // session overwrites cluster by cluster and could not survive its
+        // line moving under it (adr/2026-08-tab-indents-in-every-mode.md)
+        if *key == Key::Tab && self.mode != Mode::Replace {
+            if self.operator.is_some() || self.prefix.is_some() {
+                // a stray Tab behind an armed verb aborts it, as every
+                // other key that cannot be its noun does
+                self.reset();
+                return Outcome::Swallow;
+            }
+            return self.indent(!modifiers.shift(), view);
+        }
         self.mode_key(key, view)
+    }
+
+    /// Tab and Shift+Tab: the caret's line — every selected line in visual
+    /// — moves one level in or out, whatever column the caret sits at. One
+    /// splice, so one checkpoint reverses the whole press; a press with
+    /// nothing to move (a bare line dedenting, a blank line either way)
+    /// swallows rather than checkpointing an empty change
+    /// (adr/2026-08-tab-indents-in-every-mode.md).
+    fn indent(&mut self, deeper: bool, view: &View) -> Outcome {
+        let lines = Lines::of(view.text, view.blocks);
+        let (from, to) = if let Mode::Visual(_) = self.mode {
+            // vim's own > spends the selection and leaves visual behind
+            self.mode = Mode::Normal;
+            (view.anchor.min(view.head), view.anchor.max(view.head))
+        } else {
+            (view.head, view.head)
+        };
+        let (first, last) = (lines.row_of(from), lines.row_of(to));
+        self.reset();
+        let span = lines.row(first).start..lines.row(last).end;
+        let mut text = String::new();
+        let mut at = span.start;
+        let mut drift = 0isize;
+        let mut floor = view.head;
+        let mut moved = false;
+        for index in first..=last {
+            let row = lines.row(index);
+            // the bytes between two rows — the newline, or a block
+            // separator no line owns — ride along untouched
+            text.push_str(view.text.get(at..row.start).unwrap_or_default());
+            let body = view.text.get(row.clone()).unwrap_or_default();
+            let spaces = body.len() - body.trim_start_matches(' ').len();
+            let width = indented(body, spaces, deeper);
+            text.push_str(&" ".repeat(width));
+            text.push_str(body.get(spaces..).unwrap_or_default());
+            moved |= width != spaces;
+            if row.start <= view.head {
+                floor = row.start.saturating_add_signed(drift);
+                drift += width as isize - spaces as isize;
+            }
+            at = row.end;
+        }
+        if !moved {
+            return Outcome::Swallow;
+        }
+        // insert mode splices at the line start, which can sit before the
+        // session's own: the dot replays `text[insert_from..head]`, so the
+        // mark rides the same shift its text did. Only insert mode holds
+        // one, and it moves exactly one row.
+        if let Some(from) = self.insert_from.filter(|from| span.start <= *from)
+        {
+            self.insert_from = Some(from.saturating_add_signed(drift));
+        }
+        let caret = view.head.saturating_add_signed(drift).max(floor);
+        Outcome::Acts(vec![Act::Checkpoint, Act::Splice { span, text, caret }])
     }
 
     /// The keystroke as the current mode reads it — the dispatch shift+
@@ -361,9 +428,10 @@ impl Vim {
         }
     }
 
-    /// Insert mode is phase 0's writing flow, untouched — only Escape is
-    /// the grammar's: back to normal, the caret stepping onto the last
-    /// cluster of what was just typed, as vim leaves it.
+    /// Insert mode is phase 0's writing flow, untouched but for two keys
+    /// the grammar owns: Tab, handled a level up, and Escape — back to
+    /// normal, the caret stepping onto the last cluster of what was just
+    /// typed, as vim leaves it.
     fn insert_key(&mut self, key: &Key, view: &View) -> Outcome {
         if *key != Key::Escape {
             return Outcome::Pass;
@@ -1811,6 +1879,18 @@ impl Vim {
     }
 }
 
+/// A line's new leading-space count: one level in or out, and a blank line
+/// left exactly as blank as vim's own > leaves it.
+fn indented(body: &str, spaces: usize, deeper: bool) -> usize {
+    if body.trim().is_empty() {
+        spaces
+    } else if deeper {
+        spaces + caret::INDENT.len()
+    } else {
+        spaces.saturating_sub(caret::INDENT.len())
+    }
+}
+
 /// The selection's span and its line-wise-ness, as every verb over a
 /// selection sees it — char-wise takes both end clusters, as vim's visual
 /// does; line-wise takes the whole lines. Shared so the wrap S arms and
@@ -2092,7 +2172,6 @@ mod tests {
             Key::Enter,
             Key::Backspace,
             Key::ArrowLeft,
-            Key::Tab,
         ] {
             assert_eq!(
                 vim.handle(&key, Modifiers::empty(), &sight),
@@ -2282,7 +2361,6 @@ mod tests {
             Key::Enter,
             Key::Backspace,
             Key::Delete,
-            Key::Tab,
         ] {
             let mut vim = normal();
             assert_eq!(
@@ -4925,7 +5003,11 @@ mod tests {
         );
         // a non-character key stays inert in visual
         assert_eq!(
-            vim.handle(&Key::Tab, Modifiers::empty(), &view(text, &parsed, 5)),
+            vim.handle(
+                &Key::Enter,
+                Modifiers::empty(),
+                &view(text, &parsed, 5)
+            ),
             Outcome::Swallow,
         );
     }
@@ -5423,5 +5505,217 @@ mod tests {
         let (span, body, caret) =
             motions::paste_spec(NOTE, &parsed, 2, "ligne\n", false, 1);
         assert_eq!((span, body.as_str(), caret), (9..9, "\nligne", 10));
+    }
+
+    // -- Tab: one indent level, in every mode but R -------------------------
+    // (adr/2026-08-tab-indents-in-every-mode.md)
+
+    /// One Tab press: the note it leaves and where the caret lands, with
+    /// the single checkpoint asserted on the way through.
+    fn tabbed(vim: &mut Vim, view: &View, deeper: bool) -> (String, usize) {
+        let modifiers = if deeper {
+            Modifiers::empty()
+        } else {
+            Modifiers::SHIFT
+        };
+        match vim.handle(&Key::Tab, modifiers, view) {
+            Outcome::Acts(acts) => match acts.as_slice() {
+                [Act::Checkpoint, Act::Splice { span, text, caret }] => {
+                    let mut note = view.text.to_string();
+                    note.replace_range(span.clone(), text);
+                    (note, *caret)
+                }
+                other => panic!("expected one checkpointed splice: {other:?}"),
+            },
+            other => panic!("expected acts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_moves_the_caret_line_a_level_in_whatever_column_it_sits_at() {
+        let text = "- une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        let (note, caret) = tabbed(&mut vim, &view(text, &parsed, 5), true);
+        assert_eq!(note, "  - une idée\n");
+        assert_eq!(caret, 7, "the caret rode the two spaces");
+        assert_eq!(vim.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn shift_tab_moves_it_back_out() {
+        let text = "  - une idée\n";
+        let parsed = blocks::segment(text);
+        let (note, caret) =
+            tabbed(&mut normal(), &view(text, &parsed, 7), false);
+        assert_eq!(note, "- une idée\n");
+        assert_eq!(caret, 5);
+    }
+
+    #[test]
+    fn shift_tab_takes_the_one_space_a_half_level_left() {
+        let text = " - une idée\n";
+        let parsed = blocks::segment(text);
+        let (note, _) = tabbed(&mut normal(), &view(text, &parsed, 6), false);
+        assert_eq!(note, "- une idée\n");
+    }
+
+    #[test]
+    fn shift_tab_inside_the_whitespace_lands_the_caret_at_the_margin() {
+        let text = "    - une idée\n";
+        let parsed = blocks::segment(text);
+        let (note, caret) =
+            tabbed(&mut normal(), &view(text, &parsed, 1), false);
+        assert_eq!(note, "  - une idée\n");
+        assert_eq!(caret, 0, "clamped onto the line it could not precede");
+    }
+
+    #[test]
+    fn a_press_with_nothing_to_move_swallows_without_checkpointing() {
+        // a bare line dedenting, and a blank line either way
+        for (text, head, deeper) in
+            [("- une idée\n", 3, false), ("\n", 0, true)]
+        {
+            let parsed = blocks::segment(text);
+            let modifiers = if deeper {
+                Modifiers::empty()
+            } else {
+                Modifiers::SHIFT
+            };
+            assert_eq!(
+                normal().handle(
+                    &Key::Tab,
+                    modifiers,
+                    &view(text, &parsed, head)
+                ),
+                Outcome::Swallow,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn insert_mode_tabs_without_leaving_insert() {
+        let text = "- une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = insert();
+        let (note, _) = tabbed(&mut vim, &view(text, &parsed, 10), true);
+        assert_eq!(note, "  - une idée\n");
+        assert_eq!(vim.mode, Mode::Insert, "the session holds");
+    }
+
+    #[test]
+    fn an_insert_session_start_rides_the_shift_its_text_took() {
+        let text = "- une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            insert_from: Some(5),
+            ..insert()
+        };
+        tabbed(&mut vim, &view(text, &parsed, 10), true);
+        assert_eq!(vim.insert_from, Some(7), "the mark moved with its text");
+
+        // a session that began on an earlier line is left where it is
+        let text = "a\n- idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            insert_from: Some(0),
+            ..insert()
+        };
+        tabbed(&mut vim, &view(text, &parsed, 8), true);
+        assert_eq!(vim.insert_from, Some(0));
+    }
+
+    #[test]
+    fn visual_tab_moves_every_selected_line_and_spends_the_selection() {
+        let text = "- une\n- deux\n- trois\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Line),
+            ..Vim::default()
+        };
+        let (note, caret) =
+            tabbed(&mut vim, &spread(text, &parsed, 2, 8), true);
+        assert_eq!(note, "  - une\n  - deux\n- trois\n");
+        assert_eq!(caret, 12, "two lines' worth of spaces ahead of it");
+        assert_eq!(vim.mode, Mode::Normal, "as vim's own > leaves it");
+    }
+
+    #[test]
+    fn a_reversed_selection_covers_the_same_lines() {
+        let text = "- une\n- deux\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        let (note, _) = tabbed(&mut vim, &spread(text, &parsed, 8, 2), true);
+        assert_eq!(note, "  - une\n  - deux\n");
+    }
+
+    #[test]
+    fn a_selection_across_a_block_keeps_the_separator_it_spans() {
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Line),
+            ..Vim::default()
+        };
+        let parsed = blocks::segment(NOTE);
+        let list = NOTE.find("- une").expect("the fixture has its list");
+        let (note, _) =
+            tabbed(&mut vim, &spread(NOTE, &parsed, 0, list), true);
+        assert_eq!(
+            note,
+            "  = l'été\n\n  - une idée\n- deux cafés\n\nLa pluie, enfin arrivée.\n",
+            "the blank line between the blocks rode along untouched"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_inside_a_selection_stays_blank() {
+        let text = "- une\n\n- deux\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            mode: Mode::Visual(VisualKind::Line),
+            ..Vim::default()
+        };
+        let (note, _) = tabbed(&mut vim, &spread(text, &parsed, 0, 8), true);
+        assert_eq!(note, "  - une\n\n  - deux\n", "no indent on nothing");
+    }
+
+    #[test]
+    fn replace_mode_keeps_swallowing_tab() {
+        let text = "- une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = Vim {
+            mode: Mode::Replace,
+            replace_from: Some(0),
+            ..Vim::default()
+        };
+        assert_eq!(
+            vim.handle(&Key::Tab, Modifiers::empty(), &view(text, &parsed, 3)),
+            Outcome::Swallow,
+        );
+        assert_eq!(vim.mode, Mode::Replace, "the session holds");
+    }
+
+    #[test]
+    fn a_tab_behind_an_armed_verb_aborts_it() {
+        let text = "- une idée\n";
+        let parsed = blocks::segment(text);
+        for keys in ["d", "f"] {
+            let mut vim = normal();
+            feed(&mut vim, keys, &view(text, &parsed, 3));
+            assert_eq!(
+                vim.handle(
+                    &Key::Tab,
+                    Modifiers::empty(),
+                    &view(text, &parsed, 3)
+                ),
+                Outcome::Swallow,
+                "{keys} then tab"
+            );
+            assert_eq!(vim.operator, None, "{keys}");
+            assert_eq!(vim.prefix, None, "{keys}");
+        }
     }
 }

@@ -34,10 +34,10 @@ Rust throughout — reasoning preserved in the ADRs:
 ## Load-bearing invariants (constraints, not preferences)
 
 - **Plain files are the source of truth.** The index is derived and must always be rebuildable from the `.typ` files; every note compiles standalone via the shared `template.typ`.
-- **AI never writes prose in note files** (sole exception: the explicit `generated` type). Suggestions live only in the sidecar index; accepting a link suggestion = the user writes it (Tab-inserted ghost text), never an accept button that edits the file.
+- **AI never writes prose in note files** (sole exception: the explicit `generated` type). Suggestions live only in the sidecar index; accepting a link suggestion = the user writes it (Tab-inserted ghost text), never an accept button that edits the file. Tab accepts the ghost text while one is showing and indents the line otherwise (`adr/2026-08-tab-indents-in-every-mode.md`).
 - **No hard blocks.** All friction (unsummarized captures, unresolved suggestions, dangling links, typeless notes) is visible debt in the open-loops panel, never a save-blocker.
 - **Canvas positions are user data disguised as index data** — they must survive index rebuilds.
-- **Strict buffer/widget separation in the editor**, so the v2 vim modal layer can be inserted without a rewrite.
+- **Strict buffer/widget separation in the editor**, so the v2 vim modal layer can be inserted without a rewrite. Insert mode is the phase-0 writing flow: the grammar owns only Escape and Tab there, and what closes a pair or continues a list marker as you type belongs to the editor, not the grammar (`adr/2026-08-autopairs-in-the-typing-path.md`, `adr/2026-08-tab-indents-in-every-mode.md`).
 - Note **type is a `#meta` field, not a directory**: directories encode only the four categories (`permanent/`, `time/`, `capture/`, `generated/`); the index, not the filesystem, is the authority for querying by type.
 
 ## Roadmap
@@ -50,7 +50,8 @@ Four versions:
 
 ## Design
 
-All spacing should use multiples of 4 and be coherent.
+All spacing should use multiples of 4 and be coherent — that is UI pixels; one indentation level in a note's *text* is two spaces, `caret::INDENT`, Typst's own nesting width (`adr/2026-08-tab-indents-in-every-mode.md`).
+
 All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`adr/2026-07-repo-language-english.md`).
 **No colour literal appears outside `assets/theme.css`** — every colour is a custom property, and both themes (dark `:root`, light `:root[data-theme="light"]`) are filled in together (`adr/2026-07-design-language-own-phase.md`).
 

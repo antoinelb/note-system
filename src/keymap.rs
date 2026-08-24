@@ -29,8 +29,10 @@ pub enum Action {
     Copy,
     Cut,
     Paste,
-    /// Consumed with no effect — Tab, whose browser default would walk
-    /// focus out of the invisible sink.
+    /// Consumed with no effect — the Tab chords the grammar passes on
+    /// (Ctrl+Tab), whose browser default would walk focus out of the
+    /// invisible sink. Plain Tab is the grammar's own indent key
+    /// (adr/2026-08-tab-indents-in-every-mode.md).
     Ignore,
 }
 

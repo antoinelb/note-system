@@ -8,6 +8,12 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+/// One indentation level in a note's text: two spaces, Typst's own nesting
+/// width for markup lists. Shared by the editor's list continuation and the
+/// grammar's Tab, so the two can never drift
+/// (adr/2026-08-tab-indents-in-every-mode.md).
+pub const INDENT: &str = "  ";
+
 /// One caret movement the phase-0 widget knows — the arrow-key vocabulary,
 /// not vim's (that grammar arrives in v2 phases 1–2 above this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

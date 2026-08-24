@@ -1459,7 +1459,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let fragments = fragments.clone();
         move |action: keymap::Action| match action {
             keymap::Action::Insert(text) => {
-                editor.write().insert_at_caret(&text);
+                // the one door that closes its own pairs: paste and the
+                // IME's commit below stay on `insert_at_caret`
+                // (adr/2026-08-autopairs-in-the-typing-path.md)
+                editor.write().insert_typed(&text);
             }
             keymap::Action::NewLine => editor.write().insert_newline(),
             keymap::Action::Backspace => {
@@ -6944,8 +6947,21 @@ mod tests {
             "and collapsed it"
         );
 
-        // the erase keys answer; tab is consumed inert
+        // tab moves the line a level in, shift+tab brings it back
         press(&mut dom, sink, Key::Tab, Modifiers::empty());
+        assert_eq!(
+            source_of(&dom),
+            "= 2026-07-23\n  X",
+            "the line took an indent level"
+        );
+        press(&mut dom, sink, Key::Tab, Modifiers::SHIFT);
+        assert_eq!(source_of(&dom), "= 2026-07-23\nX", "and gave it back");
+        // a ctrl chord passes the grammar by, and the sink's own net
+        // swallows it rather than letting focus walk out
+        press(&mut dom, sink, Key::Tab, Modifiers::CONTROL);
+        assert_eq!(source_of(&dom), "= 2026-07-23\nX", "ctrl+tab is inert");
+
+        // the erase keys answer
         press(&mut dom, sink, Key::Delete, Modifiers::empty());
         assert_eq!(
             source_of(&dom),

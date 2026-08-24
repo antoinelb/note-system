@@ -209,6 +209,38 @@ impl Editor {
         self.place(content.start + span.start + text.len());
     }
 
+    /// One typed cluster, the only insertion that closes its own pair.
+    /// Paste, the IME's commit and the link picker keep going through
+    /// `insert_at_caret`, which never pairs: text someone already balanced
+    /// must not be balanced twice
+    /// (adr/2026-08-autopairs-in-the-typing-path.md).
+    pub fn insert_typed(&mut self, cluster: &str) {
+        let Some((content, source)) = self.active_slice() else {
+            self.insert_at_caret(cluster);
+            return;
+        };
+        let (anchor, head) = self.caret_in_block();
+        if anchor != head {
+            // a selection is replaced, never wrapped — wrapping a span is
+            // what visual S is for
+            self.insert_at_caret(cluster);
+            return;
+        }
+        let before = source.get(..head).unwrap_or_default();
+        let after = source.get(head..).unwrap_or_default();
+        if let Some(over) = close_through(cluster, after) {
+            self.place(content.start + head + over);
+            return;
+        }
+        let Some((open, close)) = opening_pair(cluster, before, after) else {
+            self.insert_at_caret(cluster);
+            return;
+        };
+        // `splice` re-checks the boundary this offset assumed
+        let at = content.start + head;
+        self.splice(at..at, &format!("{open}{close}"), at + open.len());
+    }
+
     /// Enter completes the Markdown-shaped quote shorthand at a physical
     /// line's end; every other press remains an ordinary newline. The
     /// expansion is valid Typst on disk, so rendering and the vanilla CLI
@@ -227,16 +259,22 @@ impl Editor {
             return;
         }
         let line_start = source[..head].rfind('\n').map_or(0, |at| at + 1);
-        let Some(replacement) = quote_completion(&source[line_start..head])
-        else {
-            self.insert_at_caret("\n");
+        let line = &source[line_start..head];
+        let span = content.start + line_start..content.start + head;
+        if let Some(quote) = quote_completion(line) {
+            let replacement = format!("{quote}\n");
+            let caret = span.start + replacement.len();
+            self.splice(span, &replacement, caret);
             return;
-        };
-        let start = content.start + line_start;
-        let end = content.start + head;
-        let replacement = format!("{replacement}\n");
-        let caret = start + replacement.len();
-        self.splice(start..end, &replacement, caret);
+        }
+        match list_continuation(line) {
+            Continuation::Item(next) => self.insert_at_caret(&next),
+            Continuation::Close(rest) => {
+                let caret = span.start + rest.len();
+                self.splice(span, &rest, caret);
+            }
+            Continuation::None => self.insert_at_caret("\n"),
+        }
     }
 
     /// A deletion keystroke: the selection when one exists, otherwise the
@@ -253,7 +291,7 @@ impl Editor {
             anchor.min(head)..anchor.max(head)
         } else {
             match kind {
-                Deletion::Back => caret::prev_cluster(&source, head)..head,
+                Deletion::Back => back_span(&source, head),
                 Deletion::Forward => head..caret::next_cluster(&source, head),
                 Deletion::WordBack => caret::word_left(&source, head)..head,
             }
@@ -757,6 +795,121 @@ impl Editor {
 /// (adr/2026-08-nbsp-folded-on-buffer-entry.md).
 fn nbsp_folded(text: &str) -> String {
     text.replace('\u{a0}', " ")
+}
+
+/// The pairs that close themselves as you type: key, opening text,
+/// closing text, and whether both ends are the same character (which needs
+/// the apostrophe guard). Typst's `*` and `_` and the `<` `>` of a
+/// comparison punctuate prose far more often than they nest, so they stay
+/// out of the set the surround keys carry; the guillemets keep the padding
+/// those keys already chose (adr/2026-08-autopairs-in-the-typing-path.md,
+/// adr/2026-08-surround-pair-set-and-padding.md).
+const PAIRS: [(&str, &str, &str, bool); 7] = [
+    ("(", "(", ")", false),
+    ("[", "[", "]", false),
+    ("{", "{", "}", false),
+    ("«", "« ", " »", false),
+    ("'", "'", "'", true),
+    ("\"", "\"", "\"", true),
+    ("`", "`", "`", true),
+];
+
+/// Typing the closing half of a pair the caret already sits inside steps
+/// over it instead of doubling it — over the guillemet's padding space too.
+/// The bytes to step, or `None` for a cluster that closes nothing waiting.
+fn close_through(cluster: &str, after: &str) -> Option<usize> {
+    PAIRS
+        .iter()
+        .find(|(_, _, close, _)| close.trim_start() == cluster)
+        .filter(|(_, _, close, _)| after.starts_with(*close))
+        .map(|(_, _, close, _)| close.len())
+}
+
+/// The pair a typed cluster opens. A quote-like against a word character
+/// on either side opens nothing: in a French vault `'` is an apostrophe far
+/// more often than a delimiter, and `l'ami` must stay `l'ami`.
+fn opening_pair(
+    cluster: &str,
+    before: &str,
+    after: &str,
+) -> Option<(&'static str, &'static str)> {
+    let (_, open, close, quoting) =
+        PAIRS.iter().find(|(key, ..)| *key == cluster)?;
+    let apostrophe = *quoting
+        && (before
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+            || after.chars().next().is_some_and(char::is_alphanumeric));
+    (!apostrophe).then_some((*open, *close))
+}
+
+/// What one Backspace erases: both halves when the caret sits between a
+/// pair this typing closed, the guillemets' padding included, and the
+/// ordinary preceding cluster everywhere else.
+fn back_span(source: &str, head: usize) -> Range<usize> {
+    let before = source.get(..head).unwrap_or_default();
+    let after = source.get(head..).unwrap_or_default();
+    PAIRS
+        .iter()
+        .find(|(_, open, close, _)| {
+            before.ends_with(*open) && after.starts_with(*close)
+        })
+        .map_or_else(
+            || caret::prev_cluster(source, head)..head,
+            |(_, open, close, _)| head - open.len()..head + close.len(),
+        )
+}
+
+/// What Enter at the end of a list item does
+/// (adr/2026-08-list-continuation-on-enter.md).
+enum Continuation {
+    /// Text to insert at the caret: the newline, the indentation, the
+    /// marker the next item repeats.
+    Item(String),
+    /// The line rewritten in place, with no newline at all: an empty item
+    /// walks one level out per press and, at the margin, leaves a bare
+    /// line rather than orphan alignment spaces.
+    Close(String),
+    /// Not a list line — Enter stays an ordinary newline.
+    None,
+}
+
+fn list_continuation(line: &str) -> Continuation {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let Some((marker, used)) = list_marker(&line[indent..]) else {
+        return Continuation::None;
+    };
+    if !line[indent + used..].trim().is_empty() {
+        return Continuation::Item(format!("\n{}{marker}", &line[..indent]));
+    }
+    Continuation::Close(match indent {
+        0 => String::new(),
+        _ => format!(
+            "{}{marker}",
+            " ".repeat(indent.saturating_sub(caret::INDENT.len()))
+        ),
+    })
+}
+
+/// The marker a line carries and the bytes it spends, or `None` when what
+/// follows is prose. Typst wants a space after the marker, so `-abc` is not
+/// an item while a bare `-` closing the line is an empty one — the shape
+/// the daily template seeds. A done item opens a fresh empty one: no item
+/// is born already checked.
+fn list_marker(rest: &str) -> Option<(&'static str, usize)> {
+    let (marker, next) = [
+        ("- [ ]", "- [ ] "),
+        ("- [x]", "- [ ] "),
+        ("-", "- "),
+        ("+", "+ "),
+    ]
+    .into_iter()
+    .find(|(marker, _)| {
+        rest.strip_prefix(marker)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with(' '))
+    })?;
+    Some((next, marker.len()))
 }
 
 fn quote_completion(line: &str) -> Option<String> {
@@ -1334,6 +1487,221 @@ mod tests {
 
         let (_, text) = editor.note().expect("the note stays open");
         assert_eq!(text, "#quote(block: true)[une]\n\nsuite");
+    }
+
+    // -- autopairs: the typing path closes what it opens -------------------
+    // (adr/2026-08-autopairs-in-the-typing-path.md)
+
+    #[test]
+    fn every_open_delimiter_types_its_own_close() {
+        for (typed, expected, caret) in [
+            ("(", "()", 1),
+            ("[", "[]", 1),
+            ("{", "{}", 1),
+            ("«", "«  »", 3),
+            ("'", "''", 1),
+            ("\"", "\"\"", 1),
+            ("`", "``", 1),
+        ] {
+            let (_dir, mut editor) = open_note("");
+            editor.insert_typed(typed);
+            let (_, text) = editor.note().expect("still open");
+            assert_eq!(text, expected, "typing {typed}");
+            // the guillemet's caret lands inside its padding, after `« `
+            assert_eq!(editor.caret_in_block(), (caret, caret), "{typed}");
+            assert_eq!(editor.trouble(), None);
+        }
+    }
+
+    #[test]
+    fn typing_a_close_steps_over_the_one_waiting() {
+        for (open, close, expected) in [
+            ("(", ")", "()"),
+            ("[", "]", "[]"),
+            ("{", "}", "{}"),
+            ("«", "»", "«  »"),
+            ("\"", "\"", "\"\""),
+        ] {
+            let (_dir, mut editor) = open_note("");
+            editor.insert_typed(open);
+            editor.insert_typed(close);
+            let (_, text) = editor.note().expect("still open");
+            assert_eq!(text, expected, "{open} then {close} doubled nothing");
+            let end = expected.len();
+            assert_eq!(editor.caret_in_block(), (end, end), "{close}");
+        }
+    }
+
+    #[test]
+    fn a_close_with_nothing_waiting_is_typed_plainly() {
+        let (_dir, mut editor) = open_note("");
+        editor.insert_typed(")");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, ")", "no pair to step over");
+    }
+
+    #[test]
+    fn a_french_apostrophe_stays_one_character() {
+        // `'` is an apostrophe far more often than a delimiter here
+        let (_dir, mut editor) = open_note("");
+        for cluster in ["l", "'", "a", "m", "i"] {
+            editor.insert_typed(cluster);
+        }
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "l'ami");
+    }
+
+    #[test]
+    fn a_quote_against_a_word_on_either_side_opens_nothing() {
+        // before: the apostrophe case; after: quoting an existing word
+        let (_dir, mut editor) = open_note("mot");
+        editor.place_at(0);
+        editor.insert_typed("\"");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "\"mot", "the word ahead kept the quote single");
+
+        let (_dir, mut editor) = open_note("mot");
+        editor.insert_typed("\"");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "mot\"", "and the word behind too");
+    }
+
+    #[test]
+    fn a_bracket_pairs_against_a_word_where_a_quote_would_not() {
+        let (_dir, mut editor) = open_note("l");
+        editor.insert_typed("(");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "l()", "brackets never carry the apostrophe doubt");
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it_without_pairing() {
+        let (_dir, mut editor) = open_note("mot");
+        editor.place_at(0);
+        editor.extend_to(3);
+        editor.insert_typed("(");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "(", "a selection is replaced, never wrapped");
+    }
+
+    #[test]
+    fn paste_and_the_ime_commit_never_pair() {
+        // the regression that proves `insert_typed` is a separate door
+        let (_dir, mut editor) = open_note("");
+        editor.insert_at_caret("#l(");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "#l(", "already-balanced text is not rebalanced");
+    }
+
+    #[test]
+    fn typing_against_a_stale_editor_is_dropped_loudly() {
+        let (_dir, mut editor) = open_note(NOTE);
+        editor.deactivate();
+        editor.insert_typed("(");
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
+    }
+
+    #[test]
+    fn backspace_between_a_pair_takes_both_halves() {
+        for (typed, left) in [("(", ""), ("«", ""), ("\"", "")] {
+            let (_dir, mut editor) = open_note("");
+            editor.insert_typed(typed);
+            editor.delete_at_caret(Deletion::Back);
+            let (_, text) = editor.note().expect("still open");
+            assert_eq!(text, left, "backspacing the {typed} pair");
+        }
+    }
+
+    #[test]
+    fn backspace_beside_a_pair_takes_one_cluster_as_ever() {
+        // the caret is past the close, not between the halves
+        let (_dir, mut editor) = open_note("()");
+        editor.delete_at_caret(Deletion::Back);
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "(", "only the cluster behind went");
+    }
+
+    // -- list continuation: Enter repeats the marker ------------------------
+    // (adr/2026-08-list-continuation-on-enter.md)
+
+    #[test]
+    fn enter_repeats_the_marker_of_a_written_item() {
+        for (line, expected) in [
+            ("- une idée", "- une idée\n- "),
+            ("+ une idée", "+ une idée\n+ "),
+            ("- [ ] écrire", "- [ ] écrire\n- [ ] "),
+            // no item is born already checked
+            ("- [x] écrit", "- [x] écrit\n- [ ] "),
+            ("  - niché", "  - niché\n  - "),
+        ] {
+            let (_dir, mut editor) = open_note(line);
+            editor.insert_newline();
+            let (_, text) = editor.note().expect("still open");
+            assert_eq!(text, expected, "after {line}");
+            assert_eq!(
+                editor.caret_in_block(),
+                (expected.len(), expected.len()),
+                "the caret follows the new marker"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_on_an_empty_item_walks_one_level_out_then_clears_the_line() {
+        let (_dir, mut editor) = open_note("- alpha\n    - ");
+
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "- alpha\n  - ", "one level out, no newline");
+
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "- alpha\n- ", "another level");
+
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "- alpha\n", "the line goes bare — no stray spaces");
+        assert_eq!(editor.caret_in_block(), (8, 8), "at the margin");
+    }
+
+    #[test]
+    fn the_templates_bare_checklist_marker_continues_and_closes() {
+        // daily.typ seeds `- [ ]` with no trailing space
+        let (_dir, mut editor) = open_note("- [ ]");
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "", "an empty item at the margin ends the list");
+    }
+
+    #[test]
+    fn a_marker_without_its_space_is_prose() {
+        for line in ["-abc", "+abc", "prose", ""] {
+            let (_dir, mut editor) = open_note(line);
+            editor.insert_newline();
+            let (_, text) = editor.note().expect("still open");
+            assert_eq!(text, format!("{line}\n"), "{line} is not an item");
+        }
+    }
+
+    #[test]
+    fn enter_inside_an_item_still_splits_it_plainly() {
+        let (_dir, mut editor) = open_note("- une idée");
+        editor.place_at(5);
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(
+            text, "- une\n idée",
+            "away from the end, an ordinary split"
+        );
+    }
+
+    #[test]
+    fn the_quote_shorthand_still_wins_over_the_list_reading() {
+        // `> ` is neither marker, but the ordering is worth pinning
+        let (_dir, mut editor) = open_note("> une");
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "#quote(block: true)[une]\n");
     }
 
     #[test]
