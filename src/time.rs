@@ -69,6 +69,35 @@ pub fn season_start(date: Date) -> Date {
     Date::new(date.year(), month, 1).unwrap_or(date)
 }
 
+/// The day after `date` — the daily rail's "next" step. Saturating for the
+/// same reason as `monday_of`: only jiff's year bound could clamp it.
+pub fn next_day(date: Date) -> Date {
+    date.saturating_add(1.day())
+}
+
+/// The Monday after the week holding `date` — the weekly rail's "next"
+/// step, always a full week ahead of that week's own Monday.
+pub fn next_week(date: Date) -> Date {
+    monday_of(date).saturating_add(7.days())
+}
+
+/// The first day of the season after the one holding `date` — the seasonal
+/// rail's "next" step. The only non-uniform jump of the three: winter and
+/// summer roll to the next season inside the same year, but autumn rolls
+/// into next year's winter (seasons are school semesters,
+/// `adr/2026-07-seasons-school-semesters.md`).
+pub fn next_season(date: Date) -> Date {
+    let start = season_start(date);
+    let (year, month) = match start.month() {
+        1 => (start.year(), 5),
+        5 => (start.year(), 9),
+        _ => (start.year() + 1, 1), // 9: autumn rolls into next year
+    };
+    // month is always 1, 5 or 9 and year is start.year() ± 1: cannot fail,
+    // so the fallback is never a lie
+    Date::new(year, month, 1).unwrap_or(start)
+}
+
 /// "2026-07-23" back to its date. All three parsers answer `None` for a
 /// malformed id — selection ids come from our own formatters, but totality
 /// is cheap and keeps callers branch-free.
@@ -180,6 +209,47 @@ mod tests {
         assert_eq!(season_start(date("2026-04-30")), date("2026-01-01"));
         assert_eq!(season_start(date("2026-05-01")), date("2026-05-01"));
         assert_eq!(season_start(date("2026-12-31")), date("2026-09-01"));
+    }
+
+    #[test]
+    fn next_day_crosses_a_month_end() {
+        assert_eq!(next_day(date("2026-07-31")), date("2026-08-01"));
+    }
+
+    #[test]
+    fn next_day_crosses_a_year_end() {
+        assert_eq!(next_day(date("2026-12-31")), date("2027-01-01"));
+    }
+
+    #[test]
+    fn next_week_steps_a_full_week_from_mid_week() {
+        assert_eq!(next_week(date("2026-07-23")), date("2026-07-27"));
+    }
+
+    #[test]
+    fn next_week_steps_a_full_week_from_a_monday() {
+        assert_eq!(next_week(date("2026-07-20")), date("2026-07-27"));
+    }
+
+    #[test]
+    fn next_week_crosses_the_iso_year_boundary() {
+        let after = next_week(date("2026-12-31"));
+        assert_eq!(week_id(after), "2027-w01");
+    }
+
+    #[test]
+    fn next_season_rolls_winter_into_summer() {
+        assert_eq!(next_season(date("2026-02-14")), date("2026-05-01"));
+    }
+
+    #[test]
+    fn next_season_rolls_summer_into_autumn() {
+        assert_eq!(next_season(date("2026-06-01")), date("2026-09-01"));
+    }
+
+    #[test]
+    fn next_season_rolls_autumn_into_next_years_winter() {
+        assert_eq!(next_season(date("2026-10-01")), date("2027-01-01"));
     }
 
     #[test]

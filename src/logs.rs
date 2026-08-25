@@ -206,6 +206,52 @@ pub fn selection_date(scale: &NoteType, id: &str) -> Option<Date> {
     }
 }
 
+/// The id of the period holding `date` on `scale`: the mirror of
+/// `selection_date`, going from a date back to the id that would name it.
+pub fn period_id(scale: &NoteType, date: Date) -> Option<String> {
+    match scale {
+        NoteType::Daily => Some(time::day_id(date)),
+        NoteType::Weekly => Some(time::week_id(date)),
+        NoteType::Seasonal => Some(time::season_id(date)),
+        _ => None,
+    }
+}
+
+/// The id of the period right after the one holding `date` on `scale` — the
+/// palette's "open next" target, created from template when it does not
+/// exist yet.
+pub fn next_period(scale: &NoteType, date: Date) -> Option<String> {
+    match scale {
+        NoteType::Daily => period_id(scale, time::next_day(date)),
+        NoteType::Weekly => period_id(scale, time::next_week(date)),
+        NoteType::Seasonal => period_id(scale, time::next_season(date)),
+        _ => None,
+    }
+}
+
+/// The id of the most recent existing `scale` note strictly before the
+/// period holding `date` — the palette's "open previous" target. `None`
+/// when no such note exists.
+pub fn previous_existing(
+    notes: &[(String, NoteType)],
+    scale: &NoteType,
+    date: Date,
+) -> Option<String> {
+    let anchor = match scale {
+        NoteType::Daily => date,
+        NoteType::Weekly => time::monday_of(date),
+        NoteType::Seasonal => time::season_start(date),
+        _ => return None,
+    };
+    notes
+        .iter()
+        .filter(|(_, note_scale)| note_scale == scale)
+        .filter_map(|(id, _)| selection_date(scale, id).map(|d| (d, id)))
+        .filter(|(d, _)| *d < anchor)
+        .max_by_key(|(d, _)| *d)
+        .map(|(_, id)| id.clone())
+}
+
 /// The human name of a selection for the empty-note line: "july 24",
 /// "w30", "summer 2026"; an unplaceable id falls back to itself.
 pub fn selection_label(scale: &NoteType, id: &str) -> String {
@@ -508,6 +554,85 @@ mod tests {
             "summer 2026"
         );
         assert_eq!(selection_label(&NoteType::Daily, "garbage"), "garbage");
+    }
+
+    #[test]
+    fn period_id_names_each_time_scale() {
+        assert_eq!(
+            period_id(&NoteType::Daily, date("2026-07-23")),
+            Some("2026-07-23".to_string())
+        );
+        assert_eq!(
+            period_id(&NoteType::Weekly, date("2026-07-23")),
+            Some("2026-w30".to_string())
+        );
+        assert_eq!(
+            period_id(&NoteType::Seasonal, date("2026-07-23")),
+            Some("2026-summer".to_string())
+        );
+        assert_eq!(period_id(&NoteType::Concept, date("2026-07-23")), None);
+    }
+
+    #[test]
+    fn next_period_names_the_following_period_on_each_scale() {
+        assert_eq!(
+            next_period(&NoteType::Daily, date("2026-07-23")),
+            Some("2026-07-24".to_string())
+        );
+        assert_eq!(
+            next_period(&NoteType::Weekly, date("2026-07-23")),
+            Some("2026-w31".to_string())
+        );
+        assert_eq!(
+            next_period(&NoteType::Seasonal, date("2026-07-23")),
+            Some("2026-autumn".to_string())
+        );
+        assert_eq!(next_period(&NoteType::Concept, date("2026-07-23")), None);
+    }
+
+    #[test]
+    fn previous_existing_finds_the_latest_earlier_daily_note() {
+        let notes = [
+            daily("2026-07-20"),
+            daily("2026-07-10"),
+            weekly("2026-w29"),
+            daily("2026-07-23"),
+        ];
+        assert_eq!(
+            previous_existing(&notes, &NoteType::Daily, date("2026-07-23")),
+            Some("2026-07-20".to_string()),
+            "latest earlier note across a gap, ignoring another scale and the anchor's own day"
+        );
+    }
+
+    #[test]
+    fn previous_existing_ignores_notes_in_or_after_the_anchors_own_period() {
+        let notes = [weekly("2026-w30"), weekly("2026-w31")];
+        assert_eq!(
+            previous_existing(&notes, &NoteType::Weekly, date("2026-07-23")),
+            None,
+            "w30 is the anchor's own week and w31 is later"
+        );
+    }
+
+    #[test]
+    fn previous_existing_is_none_when_nothing_precedes() {
+        assert_eq!(
+            previous_existing(&[], &NoteType::Seasonal, date("2026-07-23")),
+            None
+        );
+    }
+
+    #[test]
+    fn previous_existing_is_none_for_a_non_time_scale() {
+        assert_eq!(
+            previous_existing(
+                &[("essay".to_string(), NoteType::Concept)],
+                &NoteType::Concept,
+                date("2026-07-23")
+            ),
+            None
+        );
     }
 
     #[test]

@@ -15,3 +15,5 @@ The OS preference is not consulted.
 - **Follow `prefers-color-scheme`** — the design names dark as *the* main mode, not "whatever the OS says"; and a media query evaluated by the webview lives outside the app's one source of truth (the `data-theme` attribute), unobservable in the headless test harness.
 - **A visible toggle control** — the chrome is frozen at one line and one number; everything else is a keystroke.
 - **Persisting the choice** — a settings file for one bit is machinery nothing else needs yet; dark-on-launch *is* the design's stance, and light mode stays one keystroke away.
+
+Superseded in part by `2026-08-ctrl-t-toggles-the-todo.md`: Ctrl+T now toggles the todo checkbox, and the theme keeps only its palette row.

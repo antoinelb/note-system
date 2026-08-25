@@ -1,5 +1,7 @@
 # Blocks are Parbreak-separated runs that tile the note; fragments compile under a synthesized preamble
 
+**Superseded by `2026-08-per-line-block-segmentation.md`**: blocks are now one per physical line (the parse tree still decides what merges), not one per paragraph. The tiling invariant, the widget-sees-content-not-separators split, the preamble special case, and the fragment cache all carry forward unchanged in spirit; only where a split happens changed.
+
 ## Context
 
 The hybrid editor needs the note cut into blocks ("top-level markup nodes,

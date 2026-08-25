@@ -1339,14 +1339,15 @@ impl Vim {
                 acts.push(Act::Place(caret));
             }
             Operator::Delete => {
-                let caret = if linewise {
-                    linewise_delete_caret(view.text, &span)
+                let (span, caret) = if linewise {
+                    linewise_delete(view.text, span)
                 } else {
-                    charwise_delete_caret(
+                    let caret = charwise_delete_caret(
                         view.text,
                         &Lines::of(view.text, view.blocks).around(span.start),
                         &span,
-                    )
+                    );
+                    (span, caret)
                 };
                 acts.push(Act::Splice {
                     span,
@@ -1950,11 +1951,33 @@ fn charwise_delete_caret(
     }
 }
 
-/// After a linewise deletion the caret lands on the first non-blank of
-/// the line that slid up into the gap.
-fn linewise_delete_caret(text: &str, span: &Range<usize>) -> usize {
-    let following = text.get(span.end..).unwrap_or_default();
-    span.start + motions::blank_prefix(following)
+/// A linewise delete always takes a newline with it: forward when the span
+/// already swallowed a following line's own separator, backward when the
+/// deleted run reaches the note's very end and a line precedes it — vim
+/// never leaves a blank line behind just because the deletion reached the
+/// note's end. A span that stops short of a following separator for its
+/// own reasons (`ip`, which never claims the block's separator) is left
+/// alone unless it too runs to the note's end, so this backward pull never
+/// fires on an object span that merely chose not to reach forward. The
+/// only line in the note has no newline either side, so it is emptied
+/// rather than removed. Returns the span to splice and the caret's landing
+/// — the first non-blank of whichever line slid into the gap.
+fn linewise_delete(text: &str, span: Range<usize>) -> (Range<usize>, usize) {
+    let sliced = text.get(span.clone()).unwrap_or_default();
+    if sliced.ends_with('\n') {
+        let following = text.get(span.end..).unwrap_or_default();
+        (span.clone(), span.start + motions::blank_prefix(following))
+    } else if span.end == text.len()
+        && text
+            .get(..span.start)
+            .is_some_and(|before| before.ends_with('\n'))
+    {
+        let prev = text[..span.start - 1].rfind('\n').map_or(0, |i| i + 1);
+        let caret = prev + motions::blank_prefix(&text[prev..span.start - 1]);
+        (span.start - 1..span.end, caret)
+    } else {
+        (span.clone(), span.start)
+    }
 }
 
 /// One insert entry's landing: the acts that place the caret, and the
@@ -2455,7 +2478,7 @@ mod tests {
         let mut vim = normal();
         assert_eq!(
             feed(&mut vim, "2gg", &sight),
-            Outcome::Acts(vec![Act::Place(11)]),
+            Outcome::Acts(vec![Act::Place(10)]),
             "[count]gg goes to the line"
         );
     }
@@ -2487,20 +2510,32 @@ mod tests {
         ) else {
             panic!("arrow up extends")
         };
-        assert_eq!(second, vec![Act::Extend(7)], "the goal column held");
+        assert_eq!(
+            second,
+            vec![Act::Extend(10)],
+            "the blank row, goal column held"
+        );
+        let Outcome::Acts(third) = vim.handle(
+            &Key::ArrowUp,
+            Modifiers::empty(),
+            &view(NOTE, &parsed, 10),
+        ) else {
+            panic!("arrow up extends")
+        };
+        assert_eq!(third, vec![Act::Extend(7)], "the goal column held");
         vim.handle(
             &Key::ArrowLeft,
             Modifiers::empty(),
             &view(NOTE, &parsed, 7),
         );
-        let Outcome::Acts(third) = vim.handle(
+        let Outcome::Acts(fourth) = vim.handle(
             &Key::ArrowUp,
             Modifiers::empty(),
             &view(NOTE, &parsed, 6),
         ) else {
             panic!("arrow up extends")
         };
-        assert_ne!(third, vec![Act::Extend(21)], "the goal was forgotten");
+        assert_ne!(fourth, vec![Act::Extend(21)], "the goal was forgotten");
     }
 
     #[test]
@@ -2932,6 +2967,18 @@ mod tests {
                 },
             ],
         );
+        // one undo step: a middle-line dd is still one Checkpoint, one Splice
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            checkpoint_and_splice_counts(&feed(
+                &mut vim,
+                "dd",
+                &view(text, &parsed, 5)
+            )),
+            (1, 1),
+            "one undo step"
+        );
         // 2dd from the top
         assert_eq!(
             acts_of("2dd", text, 0),
@@ -2969,7 +3016,9 @@ mod tests {
 
     #[test]
     fn dd_on_a_blocks_last_line_leaves_the_separator_to_merge() {
-        // the heading line ends at its block's content: no newline to eat
+        // the heading is now its own line-block, immediately followed by
+        // a blank line-block: dd eats through the one newline separating
+        // them (adr/2026-08-per-line-block-segmentation.md)
         let parsed = blocks::segment(NOTE);
         let mut vim = normal();
         let outcome = feed(&mut vim, "dd", &view(NOTE, &parsed, 2));
@@ -2978,13 +3027,130 @@ mod tests {
             Outcome::Acts(vec![
                 Act::SetClipboard("= l'été\n".into()),
                 Act::Splice {
-                    span: 0..9,
+                    span: 0..10,
                     text: String::new(),
                     caret: 0
                 },
             ]),
             "the register still carries the linewise newline"
         );
+    }
+
+    /// How many checkpoints and splices one outcome carries — dd's one
+    /// undo step is a `Checkpoint` and a `Splice`, never more, never less.
+    fn checkpoint_and_splice_counts(outcome: &Outcome) -> (usize, usize) {
+        let Outcome::Acts(acts) = outcome else {
+            panic!("expected acts, got {outcome:?}");
+        };
+        (
+            acts.iter().filter(|act| **act == Act::Checkpoint).count(),
+            acts.iter()
+                .filter(|act| matches!(act, Act::Splice { .. }))
+                .count(),
+        )
+    }
+
+    #[test]
+    fn dd_on_the_notes_last_line_takes_the_preceding_newline() {
+        // no following line to eat through, so the newline vim takes is
+        // the one behind: the previous line slides up to become the last
+        let text = "  une\ndeux";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        let outcome = feed(&mut vim, "dd", &view(text, &parsed, 8));
+        assert_eq!(
+            checkpoint_and_splice_counts(&outcome),
+            (1, 1),
+            "one undo step"
+        );
+        assert_eq!(
+            stripped(outcome),
+            Outcome::Acts(vec![
+                Act::SetClipboard("deux\n".into()),
+                Act::Splice {
+                    span: 5..10,
+                    text: String::new(),
+                    caret: 2
+                },
+            ]),
+            "the preceding newline goes, caret on the line that slid up"
+        );
+    }
+
+    #[test]
+    fn dd_on_the_trailing_empty_line_removes_it() {
+        // the caret sits on the note's real trailing empty line — the one
+        // adr/2026-08-cursor-always-in-the-note.md keeps navigable — and
+        // dd there must remove the line, not leave a second blank behind
+        let parsed = blocks::segment(NOTE);
+        let mut vim = normal();
+        let outcome = feed(&mut vim, "dd", &view(NOTE, &parsed, NOTE.len()));
+        assert_eq!(
+            checkpoint_and_splice_counts(&outcome),
+            (1, 1),
+            "one undo step"
+        );
+        let prose = NOTE.find("La pluie").expect("the prose line is in NOTE");
+        assert_eq!(
+            stripped(outcome),
+            Outcome::Acts(vec![
+                Act::SetClipboard("\n".into()),
+                Act::Splice {
+                    span: NOTE.len() - 1..NOTE.len(),
+                    text: String::new(),
+                    caret: prose,
+                },
+            ]),
+            "the trailing newline goes, caret on the prose line above"
+        );
+    }
+
+    #[test]
+    fn dd_on_the_only_line_empties_it_without_removing_it() {
+        // no line before or after: dd cannot take a newline from either
+        // side, so the line is emptied in place rather than removed
+        let text = "seule";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        let outcome = feed(&mut vim, "dd", &view(text, &parsed, 3));
+        assert_eq!(
+            checkpoint_and_splice_counts(&outcome),
+            (1, 1),
+            "one undo step"
+        );
+        assert_eq!(
+            stripped(outcome),
+            Outcome::Acts(vec![
+                Act::SetClipboard("seule\n".into()),
+                Act::Splice {
+                    span: 0..5,
+                    text: String::new(),
+                    caret: 0
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn cc_on_the_last_line_keeps_its_line() {
+        // unlike dd, a linewise change never takes a neighbouring newline —
+        // there is always a line left to type into, last line included
+        let text = "une\ndeux";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        let outcome = feed(&mut vim, "cc", &view(text, &parsed, 5));
+        assert_eq!(
+            stripped(outcome),
+            Outcome::Acts(vec![
+                Act::SetClipboard("deux\n".into()),
+                Act::Splice {
+                    span: 4..8,
+                    text: String::new(),
+                    caret: 4
+                },
+            ]),
+        );
+        assert_eq!(vim.mode, Mode::Insert);
     }
 
     #[test]
@@ -3791,18 +3957,21 @@ mod tests {
 
     #[test]
     fn ip_and_ap_are_the_block() {
-        // the list block: content 11..36, range runs through the separator
+        // ip/ap now name a line, not a paragraph
+        // (adr/2026-08-per-line-block-segmentation.md): "- deux cafés" is
+        // its own block, content 23..36, range running through the
+        // separator to 37
         let parsed = blocks::segment(NOTE);
         let mut vim = normal();
         let outcome = feed(&mut vim, "dip", &view(NOTE, &parsed, 25));
         assert_eq!(
             stripped(outcome),
             Outcome::Acts(vec![
-                Act::SetClipboard("- une idée\n- deux cafés\n".to_string()),
+                Act::SetClipboard("- deux cafés\n".to_string()),
                 Act::Splice {
-                    span: 11..36,
+                    span: 23..36,
                     text: String::new(),
-                    caret: 11
+                    caret: 23
                 },
             ]),
             "ip is the block's content, linewise in the register"
@@ -3812,11 +3981,11 @@ mod tests {
         assert_eq!(
             stripped(outcome),
             Outcome::Acts(vec![
-                Act::SetClipboard("- une idée\n- deux cafés\n\n".to_string()),
+                Act::SetClipboard("- deux cafés\n".to_string()),
                 Act::Splice {
-                    span: 11..38,
+                    span: 23..37,
                     text: String::new(),
-                    caret: 11
+                    caret: 23
                 },
             ]),
             "ap takes the separator with it"
@@ -5499,12 +5668,24 @@ mod tests {
 
     #[test]
     fn paste_below_a_blocks_last_line_opens_past_the_separator() {
-        // the heading is its block's only line: its newline belongs to the
-        // separator, so p opens with the break the body carried
+        // per-line blocks make almost every line's next row exactly one
+        // newline away — the one row with nothing following it at all is
+        // the note's own trailing empty line
+        // (adr/2026-08-per-line-block-segmentation.md); p there opens with
+        // the break the body carried, same as ever
         let parsed = blocks::segment(NOTE);
-        let (span, body, caret) =
-            motions::paste_spec(NOTE, &parsed, 2, "ligne\n", false, 1);
-        assert_eq!((span, body.as_str(), caret), (9..9, "\nligne", 10));
+        let (span, body, caret) = motions::paste_spec(
+            NOTE,
+            &parsed,
+            NOTE.len(),
+            "ligne\n",
+            false,
+            1,
+        );
+        assert_eq!(
+            (span, body.as_str(), caret),
+            (NOTE.len()..NOTE.len(), "\nligne", NOTE.len() + 1)
+        );
     }
 
     // -- Tab: one indent level, in every mode but R -------------------------

@@ -48,3 +48,9 @@ Consequences:
   Rejected on the 365-false-loops-a-year cost above.
 - **Have tomorrow's creation back-fill yesterday's `next` link** — makes both directions real, but it means the app edits a note the user is not looking at, to insert prose-level content it decided on.
   Even though a link is not prose, silently rewriting a closed note is the kind of thing this project's AI invariant exists to prevent; the same instinct applies to non-AI code.
+
+## Superseded in part by
+
+`2026-08-time-navigation-commands.md` — the palette's "open next `<scale>`" command *does* create the note from the template when it is missing.
+That is not a reversal of the reasoning above: the concern here was a template silently seeding a dangling link inside another note's text with no user in the loop, and "open next" is a named command the user invoked, seeding no link anywhere.
+"Open previous" keeps this ADR's rule exactly: nearest existing note, never a write.

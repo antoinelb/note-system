@@ -20,6 +20,11 @@ impl Lines {
         for block in blocks {
             let content = block.content();
             let slice = text.get(content.clone()).unwrap_or("");
+            // a well-formed block's content never ends with '\n' — the
+            // separator carries it — but a malformed parse (an unterminated
+            // raw fence, say) could still hand one back; strip it so the
+            // split below never manufactures a phantom trailing row
+            let slice = slice.strip_suffix('\n').unwrap_or(slice);
             let mut start = content.start;
             for part in slice.split('\n') {
                 lines.push(start..start + part.len());
@@ -856,16 +861,37 @@ mod tests {
     }
 
     #[test]
-    fn the_line_table_skips_the_separators() {
+    fn the_line_table_includes_blank_lines_as_real_lines() {
+        // per-line blocks make a blank line a real, navigable row —
+        // adr/2026-08-per-line-block-segmentation.md
         let lines = table(NOTE);
-        // "= l'été" | "- une idée" | "- deux cafés" | "La pluie…" | ""
-        assert_eq!(lines.len(), 5, "{lines:?}");
+        // "= l'été" | "" | "- une idée" | "- deux cafés" | "" | "La pluie…" | ""
+        assert_eq!(lines.len(), 7, "{lines:?}");
         assert_eq!(lines.get(0), 0..9);
-        assert!(NOTE[lines.get(1)].starts_with("- une"));
-        assert!(NOTE[lines.get(3)].starts_with("La pluie"));
-        assert_eq!(lines.get(4).len(), 0, "the final empty line is real");
+        assert_eq!(lines.get(1).len(), 0, "between the heading and the list");
+        assert!(NOTE[lines.get(2)].starts_with("- une"));
+        assert!(NOTE[lines.get(3)].starts_with("- deux"));
+        assert_eq!(lines.get(4).len(), 0, "between the list and the prose");
+        assert!(NOTE[lines.get(5)].starts_with("La pluie"));
+        assert_eq!(lines.get(6).len(), 0, "the final empty line is real");
         // an offset inside a separator answers the line it trails
         assert_eq!(lines.index_of(9), 0);
+    }
+
+    #[test]
+    fn a_block_whose_content_ends_with_a_newline_gets_no_phantom_row() {
+        // defensive: a well-formed block's content never ends with '\n',
+        // but Lines::of must not manufacture an extra empty row from the
+        // trailing split if one ever did (adr/2026-08-per-line-block-segmentation.md)
+        let text = "abc\n";
+        let blocks = [Block {
+            range: 0..4,
+            content_end: 4,
+            standalone: false,
+        }];
+        let lines = Lines::of(text, &blocks);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.get(0), 0..3);
     }
 
     #[test]
@@ -890,32 +916,40 @@ mod tests {
     }
 
     #[test]
-    fn j_falls_through_short_lines_without_forgetting_the_column() {
-        // from column 10 of "- deux cafés" (line 2), k to the shorter
-        // "- une idée" clamps, k again to the heading keeps the goal
+    fn j_falls_through_short_lines_and_the_blank_row_without_forgetting_the_column()
+     {
+        // from column 10 of "- deux cafés", k to the shorter "- une idée"
+        // clamps, k again lands on the blank row between the list and the
+        // heading — a real, navigable line now — and k once more reaches
+        // the heading, still clamped, the goal column held throughout
         let lines = table(NOTE);
-        let start = lines.get(2).start + 10; // on the é of cafés
+        let start = lines.get(3).start + 10; // on the é of cafés
         let (first, goal) =
             motion(NOTE, &lines, start, Motion::Up, 1, None, None)
                 .expect("moves");
         assert_eq!(goal, Some(10));
         assert_eq!(
             first,
-            lines.get(1).start + 10,
+            lines.get(2).start + 10,
             "clamped onto idée's final e"
         );
         let (second, goal) =
             motion(NOTE, &lines, first, Motion::Up, 1, goal, None)
                 .expect("moves");
         assert_eq!(goal, Some(10));
-        assert_eq!(second, 7, "the heading's last cluster, still goal 10");
+        assert_eq!(second, lines.get(1).start, "the blank row, goal held");
+        let (third, goal) =
+            motion(NOTE, &lines, second, Motion::Up, 1, goal, None)
+                .expect("moves");
+        assert_eq!(goal, Some(10));
+        assert_eq!(third, 7, "the heading's last cluster, still goal 10");
     }
 
     #[test]
     fn j_crosses_blocks_and_counts_clamp_at_the_ends() {
         let lines = table(NOTE);
-        // j from the heading lands in the list block: the slide is just
-        // the caret crossing
+        // j from the heading lands on the blank row after it: the slide is
+        // just the caret crossing
         let (down, _) = motion(NOTE, &lines, 0, Motion::Down, 1, None, None)
             .expect("moves");
         assert_eq!(down, lines.get(1).start);
@@ -923,7 +957,7 @@ mod tests {
         let (bottom, _) =
             motion(NOTE, &lines, 0, Motion::Down, 99, None, None)
                 .expect("moves");
-        assert_eq!(bottom, lines.get(4).start);
+        assert_eq!(bottom, lines.get(lines.rows() - 1).start);
         let (top, _) =
             motion(NOTE, &lines, bottom, Motion::Up, 99, None, None)
                 .expect("moves");
@@ -1002,14 +1036,14 @@ mod tests {
     #[test]
     fn line_edges_answer_zero_caret_and_dollar() {
         let lines = table(NOTE);
-        let mid = lines.get(3).start + 5;
+        let mid = lines.get(5).start + 5;
         let (zero, _) = go(NOTE, mid, Motion::LineStart, 1).expect("m");
-        assert_eq!(zero, lines.get(3).start);
+        assert_eq!(zero, lines.get(5).start);
         let (dollar, _) = go(NOTE, mid, Motion::LineEnd, 1).expect("m");
         assert_eq!(&NOTE[dollar..dollar + 1], ".", "on the last cluster");
         // 2$ runs a line down first — from the list's first line, its
         // second line's end
-        let list_mid = lines.get(1).start;
+        let list_mid = lines.get(2).start;
         let (two, _) = go(NOTE, list_mid, Motion::LineEnd, 2).expect("m");
         assert_eq!(&NOTE[two..two + 1], "s");
     }
@@ -1034,14 +1068,22 @@ mod tests {
         let (top, _) = go(NOTE, 30, Motion::FirstLine, 1).expect("m");
         assert_eq!(top, 0);
         let (bottom, _) = go(NOTE, 0, Motion::LastLine, 1).expect("m");
-        assert_eq!(bottom, lines.get(4).start, "the real empty last line");
+        assert_eq!(
+            bottom,
+            lines.get(lines.rows() - 1).start,
+            "the real empty last line"
+        );
         // [count]gg and [count]G go to line N, clamped
         let (second, _) = go(NOTE, 0, Motion::FirstLine, 2).expect("m");
         assert_eq!(second, lines.get(1).start);
         let (third, _) = go(NOTE, 0, Motion::LastLine, 3).expect("m");
         assert_eq!(third, lines.get(2).start);
         let (past, _) = go(NOTE, 0, Motion::FirstLine, 99).expect("m");
-        assert_eq!(past, lines.get(4).start, "past the end clamps");
+        assert_eq!(
+            past,
+            lines.get(lines.rows() - 1).start,
+            "past the end clamps"
+        );
     }
 
     #[test]
@@ -1138,17 +1180,20 @@ mod tests {
 
     #[test]
     fn block_objects_read_the_map_not_a_scan() {
+        // ip/ap now name a line, not a paragraph
+        // (adr/2026-08-per-line-block-segmentation.md): ip on "- deux
+        // cafés" is that one line, ap rides its own separator
         let parsed = blocks::segment(NOTE);
-        // ip on the list block is its content; ap rides the separator
         assert_eq!(
             object(NOTE, &parsed, 25, ObjectKind::Block, false),
-            Some(11..36),
+            Some(23..36),
         );
         assert_eq!(
             object(NOTE, &parsed, 25, ObjectKind::Block, true),
-            Some(11..38),
+            Some(23..37),
         );
-        // the last block's around runs to the note's end
+        // the prose line's around still runs to the note's end here, since
+        // it directly precedes the trailing empty line
         assert_eq!(
             object(NOTE, &parsed, 40, ObjectKind::Block, true),
             Some(38..NOTE.len()),
@@ -1260,7 +1305,7 @@ mod tests {
     fn surround_spans_brackets_do_not_straddle_a_block_boundary() {
         let text = "a (b\n\nc)\n";
         let parsed = blocks::segment(text);
-        assert_eq!(parsed.len(), 2, "a parbreak splits the two blocks");
+        assert_eq!(parsed.len(), 4, "one block per line, including the blank");
         assert_eq!(
             surround_spans(text, &parsed, 3, ObjectKind::Pair('(', ')')),
             None,

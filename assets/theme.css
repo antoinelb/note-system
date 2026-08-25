@@ -323,6 +323,16 @@ body {
   min-height: 27px;
 }
 
+/* an inactive blank block: the same line box as .source-line, inside the
+   same padding as .block-active, so a blank line is exactly as tall active
+   or not — the caret entering or leaving it must not shift every line
+   below */
+.block-blank {
+  min-height: 27px;
+  margin: 4px 0;
+  padding: 8px;
+}
+
 /* the one warm element is the ember and the caret (adr/2026-08-shipped-ui-is-the-spec.md): a
    2px bar drawn beside the caret span. The span remounts on every move,
    restarting the blink — solid while typing, the native rhythm. */

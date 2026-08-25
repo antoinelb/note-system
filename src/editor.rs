@@ -277,6 +277,34 @@ impl Editor {
         }
     }
 
+    /// Ctrl+T's line toggle: a plain line is prefixed into a fresh
+    /// unchecked item, a `-`/`+` item is promoted straight to unchecked,
+    /// and `[ ]`/`[x]` flip in place — the checkbox itself is never
+    /// removed (adr/2026-08-ctrl-t-toggles-the-todo.md). Buffer-side, not
+    /// the grammar's: what edits text as you type belongs to the editor.
+    pub fn toggle_todo(&mut self) {
+        let Some((content, source)) = self.active_slice() else {
+            self.trouble = Some(Trouble::Stale);
+            return;
+        };
+        let (_, head) = self.caret_in_block();
+        let line_start = source[..head].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = source[head..]
+            .find('\n')
+            .map_or(source.len(), |at| head + at);
+        let line = &source[line_start..line_end];
+        let replacement = todo_toggled(line);
+        let span = content.start + line_start..content.start + line_end;
+        // every transition in `todo_toggled` only grows or keeps the
+        // line's byte length, so this cannot underflow
+        let caret = content.start + head + (replacement.len() - line.len());
+        // the chord fires from normal mode, with no insert session to have
+        // already checkpointed for it — one change intent, one undo step
+        // (adr/2026-08-ctrl-t-toggles-the-todo.md)
+        self.checkpoint();
+        self.splice(span, &replacement, caret);
+    }
+
     /// A deletion keystroke: the selection when one exists, otherwise the
     /// cluster or word the key names. At the block's edge with nothing to
     /// remove, nothing happens — blocks join by being emptied, never by
@@ -912,6 +940,38 @@ fn list_marker(rest: &str) -> Option<(&'static str, usize)> {
     Some((next, marker.len()))
 }
 
+/// The line Ctrl+T's todo toggle turns it into. `- [ ]` and `- [x]` swap
+/// directly with the tail untouched; a `-`/`+` item is promoted to an
+/// unchecked one, at most one marker-following space folded into the
+/// canonical `- [ ] `; anything else — prose, an empty line — is prefixed
+/// into a fresh unchecked item. Every branch only grows or keeps the
+/// line's byte length, never shrinks it, which `toggle_todo` relies on
+/// for its caret math.
+fn todo_toggled(line: &str) -> String {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    let body = if let Some(tail) = marker_tail(rest, "- [ ]") {
+        format!("- [x]{tail}")
+    } else if let Some(tail) = marker_tail(rest, "- [x]") {
+        format!("- [ ]{tail}")
+    } else if let Some(tail) = marker_tail(rest, "-") {
+        format!("- [ ] {}", tail.strip_prefix(' ').unwrap_or(tail))
+    } else if let Some(tail) = marker_tail(rest, "+") {
+        format!("- [ ] {}", tail.strip_prefix(' ').unwrap_or(tail))
+    } else {
+        format!("- [ ] {rest}")
+    };
+    format!("{}{body}", &line[..indent])
+}
+
+/// A marker's tail when `rest` opens with it followed by a space or
+/// nothing — the same boundary `list_marker` checks, so `-abc` reads as
+/// prose rather than a truncated item.
+fn marker_tail<'a>(rest: &'a str, marker: &str) -> Option<&'a str> {
+    let tail = rest.strip_prefix(marker)?;
+    (tail.is_empty() || tail.starts_with(' ')).then_some(tail)
+}
+
 fn quote_completion(line: &str) -> Option<String> {
     let body = line.strip_prefix("> ")?;
     if body.trim().is_empty() {
@@ -1156,8 +1216,8 @@ mod tests {
         // an open note always has its cursor somewhere
         // (adr/2026-08-cursor-always-in-the-note.md)
         let (_dir, editor) = open_note(NOTE);
-        assert_eq!(editor.blocks().len(), 3, "{:?}", editor.blocks());
-        assert_eq!(editor.active(), Some(2));
+        assert_eq!(editor.blocks().len(), 6, "{:?}", editor.blocks());
+        assert_eq!(editor.active(), Some(5));
         assert_eq!(editor.trouble(), None);
         let (file, text) = editor.note().expect("the note is open");
         assert!(file.ends_with("note.typ"));
@@ -1194,16 +1254,16 @@ mod tests {
     #[test]
     fn activate_lands_on_the_clicked_block_and_edit_splices() {
         let (_dir, mut editor) = open_note(NOTE);
-        let start = editor.blocks()[1].range.start;
+        let start = editor.blocks()[2].range.start;
         editor.activate(start);
-        assert_eq!(editor.active(), Some(1));
+        assert_eq!(editor.active(), Some(2));
 
-        editor.edit("= new title\n\n");
+        editor.edit("= new title");
         let (_, text) = editor.note().expect("still open");
         assert!(text.contains("= new title"), "{text}");
         assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
         assert_eq!(
-            editor.blocks()[2].range.end,
+            editor.blocks().last().expect("a block").range.end,
             text.len(),
             "later spans shifted with the edit"
         );
@@ -1212,14 +1272,16 @@ mod tests {
     #[test]
     fn deactivate_saves_resegments_and_clears_the_active_block() {
         let (dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[2].range.start);
+        editor.activate(editor.blocks()[4].range.start);
         // a blank line typed inside the block splits it on deactivate
         editor.edit("prose\n\nencore\n");
         editor.deactivate();
 
         assert_eq!(editor.active(), None);
         assert_eq!(editor.trouble(), None);
-        assert_eq!(editor.blocks().len(), 4, "{:?}", editor.blocks());
+        // "prose" splits into "prose", a blank line and "encore", each its
+        // own block, plus the note's own trailing empty line
+        assert_eq!(editor.blocks().len(), 9, "{:?}", editor.blocks());
         let saved = std::fs::read_to_string(dir.path().join("note.typ"))
             .expect("the note is readable");
         assert!(saved.contains("encore"), "{saved}");
@@ -1228,11 +1290,11 @@ mod tests {
     #[test]
     fn activate_flushes_the_previous_block_before_moving() {
         let (dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
-        editor.edit("= renamed\n\n");
         editor.activate(editor.blocks()[2].range.start);
+        editor.edit("= renamed");
+        editor.activate(editor.blocks()[4].range.start);
 
-        assert_eq!(editor.active(), Some(2));
+        assert_eq!(editor.active(), Some(4));
         let saved = std::fs::read_to_string(dir.path().join("note.typ"))
             .expect("the note is readable");
         assert!(saved.contains("= renamed"), "the move saved: {saved}");
@@ -1241,8 +1303,8 @@ mod tests {
     #[test]
     fn a_failed_save_becomes_the_trouble_and_the_text_survives() {
         let (dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
-        editor.edit("= unsaved\n\n");
+        editor.activate(editor.blocks()[2].range.start);
+        editor.edit("= unsaved");
 
         lock(dir.path(), true);
         editor.deactivate();
@@ -1286,12 +1348,13 @@ mod tests {
     fn emptying_a_blocks_content_merges_it_away() {
         // the separator is not the widget's to touch, so joining paragraphs
         // works by emptying one: the bare separator left behind is absorbed
-        // at the next resegmentation
+        // at the next resegmentation. A per-line block that empties does
+        // not vanish from the map though — it becomes just another blank
+        // line, same as its neighbours (adr/2026-08-per-line-block-segmentation.md)
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
+        editor.activate(editor.blocks()[2].range.start);
         editor.edit("");
         editor.deactivate();
-        assert_eq!(editor.blocks().len(), 2, "{:?}", editor.blocks());
         let (_, text) = editor.note().expect("still open");
         assert!(text.contains("prose"), "the neighbours survive: {text}");
         assert!(!text.contains("title"), "the emptied block is gone: {text}");
@@ -1306,14 +1369,18 @@ mod tests {
         let caret = editor.caret().expect("an open note has a caret");
         assert_eq!(caret.head, NOTE.len());
         assert_eq!(caret.anchor, NOTE.len(), "collapsed");
-        assert_eq!(editor.caret_in_block(), (6, 6), "prose\\n is six bytes");
+        assert_eq!(
+            editor.caret_in_block(),
+            (0, 0),
+            "the note's own trailing empty line"
+        );
     }
 
     #[test]
     fn activation_lands_the_caret_at_the_woken_blocks_end() {
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
-        let content = editor.blocks()[1].content();
+        editor.activate(editor.blocks()[2].range.start);
+        let content = editor.blocks()[2].content();
         let caret = editor.caret().expect("a caret");
         assert_eq!(caret.head, content.end);
         assert_eq!(editor.caret_in_block(), (7, 7), "= title is seven bytes");
@@ -1333,7 +1400,7 @@ mod tests {
     #[test]
     fn insert_at_caret_types_and_the_caret_follows() {
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
+        editor.activate(editor.blocks()[2].range.start);
         editor.move_caret(caret::Move::LineStart, false);
         editor.move_caret(caret::Move::Right, false);
         editor.move_caret(caret::Move::Right, false);
@@ -1351,10 +1418,14 @@ mod tests {
         // a checklist typed without letting AltGr go carries a no-break
         // space the template's rule never matches
         // (adr/2026-08-nbsp-folded-on-buffer-entry.md)
-        let (_dir, mut editor) = open_note("- \n");
+        // a per-line block's content stops before a line's own trailing
+        // space (the parser groups it with the newline into one Space
+        // node — adr/2026-08-per-line-block-segmentation.md), so the
+        // marker's own space is typed here rather than pre-seeded
+        let (_dir, mut editor) = open_note("-\n");
         editor.activate(0);
-        editor.place_at(2);
-        for key in ["[", "\u{a0}", "]"] {
+        editor.place_at(1);
+        for key in [" ", "[", "\u{a0}", "]"] {
             editor.insert_at_caret(key);
         }
         let (_, text) = editor.note().expect("still open");
@@ -1368,9 +1439,7 @@ mod tests {
     #[test]
     fn insert_at_caret_replaces_the_selection() {
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[2].range.start);
-        // the caret opens on the empty last line; up reaches the prose
-        editor.move_caret(caret::Move::Up, false);
+        editor.activate(editor.blocks()[4].range.start);
         editor.move_caret(caret::Move::LineStart, false);
         for _ in 0..5 {
             editor.move_caret(caret::Move::Right, true);
@@ -1487,6 +1556,105 @@ mod tests {
 
         let (_, text) = editor.note().expect("the note stays open");
         assert_eq!(text, "#quote(block: true)[une]\n\nsuite");
+    }
+
+    // -- the todo toggle: Ctrl+T flips the caret's line's checkbox ---------
+    // (adr/2026-08-ctrl-t-toggles-the-todo.md)
+
+    #[test]
+    fn todo_toggled_covers_every_branch() {
+        for (line, expected) in [
+            ("prose", "- [ ] prose"),
+            ("", "- [ ] "),
+            ("  prose indented", "  - [ ] prose indented"),
+            ("- item", "- [ ] item"),
+            ("-", "- [ ] "),
+            ("+ item", "- [ ] item"),
+            ("- [ ] item", "- [x] item"),
+            ("- [x] item", "- [ ] item"),
+        ] {
+            assert_eq!(todo_toggled(line), expected, "for {line:?}");
+        }
+    }
+
+    #[test]
+    fn toggle_todo_prefixes_a_plain_line_and_rides_the_caret() {
+        let (_dir, mut editor) = open_note("prose");
+
+        editor.toggle_todo();
+
+        let (_, text) = editor.note().expect("the note stays open");
+        assert_eq!(text, "- [ ] prose");
+        assert_eq!(editor.caret_in_block(), (11, 11));
+        assert_eq!(editor.trouble(), None);
+    }
+
+    #[test]
+    fn toggle_todo_never_removes_a_checkbox_once_it_has_one() {
+        let (_dir, mut editor) = open_note("- [x] done");
+        editor.place_at(0);
+
+        editor.toggle_todo();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "- [ ] done");
+
+        editor.toggle_todo();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "- [x] done", "back where it started, never plain");
+    }
+
+    #[test]
+    fn toggle_todo_finds_the_line_inside_a_multi_line_block() {
+        // a raw fence is the one construct a block never splits
+        // (adr/2026-08-per-line-block-segmentation.md), so it is the one
+        // shape left where the caret's line sits strictly between two
+        // newlines inside a single block's own content — every other
+        // block is now one physical line, where a line's own start or
+        // end is the block's too
+        let (_dir, mut editor) = open_note("```\nprose\nplus\n```\n");
+        editor.activate(0);
+        editor.place_at(12); // inside "plus", the fence's middle line
+
+        editor.toggle_todo();
+
+        let (_, text) = editor.note().expect("the note stays open");
+        assert_eq!(text, "```\nprose\n- [ ] plus\n```\n");
+    }
+
+    #[test]
+    fn toggle_todo_against_an_inactive_editor_is_stale() {
+        let (_dir, mut editor) = open_note("prose");
+        editor.deactivate();
+
+        editor.toggle_todo();
+
+        assert_eq!(editor.trouble(), Some(&Trouble::Stale));
+    }
+
+    #[test]
+    fn toggle_todo_checkpoints_its_own_undo_step() {
+        // the chord fires from normal mode, with no insert session already
+        // holding a checkpoint for it — one `u` must undo only the toggle,
+        // never the paragraph typed before it too
+        // (adr/2026-08-ctrl-t-toggles-the-todo.md)
+        let (_dir, mut editor) = open_note("un\n");
+        editor.activate(0);
+        // intent one: `i`, type, Escape — insert entry's own checkpoint
+        editor.checkpoint();
+        editor.place_at(2);
+        editor.insert_at_caret(" mot");
+
+        editor.place_at(0);
+        editor.toggle_todo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "- [ ] un mot\n");
+
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un mot\n", "the toggle alone reverted");
+        editor.undo();
+        let (_, text) = editor.note().expect("open");
+        assert_eq!(text, "un\n", "the typed paragraph reverted next");
     }
 
     // -- autopairs: the typing path closes what it opens -------------------
@@ -1775,29 +1943,32 @@ mod tests {
 
     #[test]
     fn deletion_takes_the_cluster_the_word_or_the_selection() {
+        // the block's own trailing "\n" is a separator, never content, so
+        // no deletion here can ever remove it
+        // (adr/2026-08-per-line-block-segmentation.md)
         let (_dir, mut editor) = open_note("l'idée\n");
         editor.activate(0);
         editor.delete_at_caret(Deletion::Back);
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "l'idée", "the trailing newline went");
+        assert_eq!(text, "l'idé\n", "the trailing e went, not the separator");
 
         editor.delete_at_caret(Deletion::Back);
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "l'idé", "é went whole, not one byte");
+        assert_eq!(text, "l'id\n", "é went whole, not one byte");
 
         editor.delete_at_caret(Deletion::WordBack);
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "l'", "the word went, the apostrophe stayed");
+        assert_eq!(text, "l'\n", "the word went, the apostrophe stayed");
 
         editor.move_caret(caret::Move::LineStart, false);
         editor.delete_at_caret(Deletion::Forward);
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "'");
+        assert_eq!(text, "'\n");
 
         editor.move_caret(caret::Move::LineEnd, true);
         editor.delete_at_caret(Deletion::Back);
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "", "the selection went whole");
+        assert_eq!(text, "\n", "the content went whole; the separator stayed");
     }
 
     #[test]
@@ -1836,9 +2007,8 @@ mod tests {
     fn horizontal_moves_walk_clusters_and_collapse_selections() {
         let (_dir, mut editor) = open_note("été\n");
         editor.activate(0);
-        // from the end: left over the newline, then over the second é
-        editor.move_caret(caret::Move::Left, false);
-        assert_eq!(editor.caret_in_block().1, 5);
+        // from the end (content excludes the trailing separator): left
+        // over the second é, then the first
         editor.move_caret(caret::Move::Left, false);
         assert_eq!(editor.caret_in_block().1, 3, "é is one step");
         editor.move_caret(caret::Move::Left, false);
@@ -1879,30 +2049,40 @@ mod tests {
 
     #[test]
     fn vertical_moves_keep_the_goal_column_through_short_lines() {
-        let (_dir, mut editor) = open_note("premier\nab\ntroisième\n");
+        // per-line blocks make multi-line vertical movement within one
+        // active block rare in practice; a raw fence is the one construct
+        // the parser never splits, so it is still where several lines
+        // share a block (adr/2026-08-per-line-block-segmentation.md)
+        let (_dir, mut editor) =
+            open_note("```\npremier\nab\ntroisième\n```\n");
         editor.activate(0);
-        // to line 0's column 6, then down twice: the short line clamps,
-        // the long line restores the column
+        // from the closing fence, up to "premier"'s line, its start, then
+        // 6 rights to column 6, then down twice: the short "ab" clamps,
+        // "troisième" restores the column
         for _ in 0..3 {
             editor.move_caret(caret::Move::Up, false);
         }
+        editor.move_caret(caret::Move::LineStart, false);
         for _ in 0..6 {
             editor.move_caret(caret::Move::Right, false);
         }
         editor.move_caret(caret::Move::Down, false);
-        assert_eq!(editor.caret_in_block().1, 10, "clamped to ab's end");
+        assert_eq!(editor.caret_in_block().1, 14, "clamped to ab's end");
         editor.move_caret(caret::Move::Down, false);
         let head = editor.caret_in_block().1;
-        assert_eq!(&"premier\nab\ntroisième\n"[head..head + 2], "è");
+        let content = "```\npremier\nab\ntroisième\n```";
+        assert_eq!(&content[head..head + 2], "è");
         // a horizontal move forgets the goal
         editor.move_caret(caret::Move::Left, false);
         editor.move_caret(caret::Move::Down, false);
-        assert_eq!(editor.caret_in_block().1, 22, "clamped to the last line");
+        assert_eq!(editor.caret_in_block().1, 29, "clamped to the last line");
     }
 
     #[test]
     fn vertical_moves_slide_blocks_at_their_edges() {
-        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        // NOTE's blocks: 0 preamble, 1 blank, 2 "= title", 3 blank,
+        // 4 "prose", 5 the trailing empty line — sliding from the blank
+        // line at 1 still lands on its neighbours at 0 and 2
         let (_dir, mut editor) = open_note(NOTE);
         editor.activate(editor.blocks()[1].range.start);
         editor.move_caret(caret::Move::Up, false);
@@ -1937,14 +2117,14 @@ mod tests {
     #[test]
     fn a_selecting_vertical_move_stays_inside_the_block() {
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
+        editor.activate(editor.blocks()[2].range.start);
         editor.move_caret(caret::Move::Up, true);
-        assert_eq!(editor.active(), Some(1), "no slide while selecting");
+        assert_eq!(editor.active(), Some(2), "no slide while selecting");
         assert_eq!(editor.caret_in_block().1, 0, "clamped to the start");
         assert_eq!(editor.selected_text().as_deref(), Some("= title"));
 
         editor.move_caret(caret::Move::Down, true);
-        assert_eq!(editor.active(), Some(1));
+        assert_eq!(editor.active(), Some(2));
         assert_eq!(editor.selection(), None, "back to the anchor");
     }
 
@@ -1973,7 +2153,7 @@ mod tests {
     #[test]
     fn select_all_takes_the_block_not_the_note() {
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
+        editor.activate(editor.blocks()[2].range.start);
         editor.select_all();
         assert_eq!(editor.selected_text().as_deref(), Some("= title"));
     }
@@ -1996,10 +2176,11 @@ mod tests {
 
     #[test]
     fn splice_within_the_block_rides_the_typing_path() {
-        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        // NOTE's blocks: 0 preamble, 1 blank, 2 "= title", 3 blank,
+        // 4 "prose", 5 the trailing empty line
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
-        let content = editor.blocks()[1].content();
+        editor.activate(editor.blocks()[2].range.start);
+        let content = editor.blocks()[2].content();
 
         // replace "title" with "titre": no resegment, later blocks shift
         let start = content.start + 2;
@@ -2007,7 +2188,7 @@ mod tests {
         let (_, text) = editor.note().expect("still open");
         assert!(text.contains("= titre"), "{text}");
         assert!(text.ends_with("prose\n"), "later blocks survive: {text}");
-        assert_eq!(editor.active(), Some(1), "the block held");
+        assert_eq!(editor.active(), Some(2), "the block held");
         assert_eq!(editor.caret().map(|caret| caret.head), Some(start));
     }
 
@@ -2070,6 +2251,52 @@ mod tests {
     }
 
     #[test]
+    fn dd_on_the_only_line_never_leaves_the_editor_without_an_active_block() {
+        // blocks::segment("") always returns one block, so dd emptying the
+        // note's only line can never leave the editor without one to
+        // activate (adr/2026-08-editor-splice-cross-block.md)
+        let (_dir, mut editor) = open_note("seule");
+        assert_eq!(editor.blocks().len(), 1);
+
+        let mut vim = crate::vim::Vim::default();
+        let mut outcome = crate::vim::Outcome::Swallow;
+        for _ in 0..2 {
+            let caret = editor.caret().expect("a caret is active");
+            let (_, text) = editor.note().expect("the note is open");
+            outcome = vim.handle(
+                &dioxus::html::Key::Character("d".to_string()),
+                dioxus::html::Modifiers::empty(),
+                &crate::vim::View {
+                    text,
+                    blocks: editor.blocks(),
+                    head: caret.head,
+                    anchor: caret.anchor,
+                },
+            );
+        }
+        let crate::vim::Outcome::Acts(acts) = outcome else {
+            panic!("dd should emit acts, got {outcome:?}");
+        };
+        for act in acts {
+            match act {
+                crate::vim::Act::Checkpoint => editor.checkpoint(),
+                crate::vim::Act::Splice { span, text, caret } => {
+                    editor.splice(span, &text, caret);
+                }
+                crate::vim::Act::Place(at) => editor.place_at(at),
+                crate::vim::Act::SetClipboard(_) => {}
+                other => panic!("unexpected act for dd: {other:?}"),
+            }
+        }
+
+        assert_eq!(editor.blocks().len(), 1);
+        assert_eq!(editor.active(), Some(0));
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "");
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(0));
+    }
+
+    #[test]
     fn paste_lands_the_clip_and_declines_when_closed() {
         let (_dir, mut editor) = open_note("un mot\n");
         editor.activate(0);
@@ -2109,9 +2336,10 @@ mod tests {
 
     #[test]
     fn place_at_wakes_the_block_that_owns_the_offset() {
-        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        // NOTE's blocks: 0 preamble, 1 blank, 2 "= title", 3 blank,
+        // 4 "prose", 5 the trailing empty line
         let (_dir, mut editor) = open_note(NOTE);
-        assert_eq!(editor.active(), Some(2));
+        assert_eq!(editor.active(), Some(5));
 
         // a landing outside the active block wakes its owner
         let target = editor.blocks()[0].content().start + 2;
@@ -2139,22 +2367,23 @@ mod tests {
 
     #[test]
     fn extend_and_swap_keep_the_anchor_across_blocks() {
-        // NOTE's blocks: 0 preamble, 1 "= title\n\n", 2 "prose\n"
+        // NOTE's blocks: 0 preamble, 1 blank, 2 "= title", 3 blank,
+        // 4 "prose", 5 the trailing empty line
         let (_dir, mut editor) = open_note(NOTE);
-        editor.activate(editor.blocks()[1].range.start);
-        let start = editor.blocks()[1].content().start;
+        editor.activate(editor.blocks()[2].range.start);
+        let start = editor.blocks()[2].content().start;
         editor.place_at(start);
 
         // extending into another block wakes it, the anchor holding
         editor.extend_to(NOTE.len() - 2);
-        assert_eq!(editor.active(), Some(2), "the prose block woke");
+        assert_eq!(editor.active(), Some(4), "the prose block woke");
         let caret = editor.caret().expect("a caret");
         assert_eq!(caret.anchor, start, "the far end held");
         assert_eq!(caret.head, NOTE.len() - 2);
 
         // o jumps back to the far end, waking its block again
         editor.swap_ends();
-        assert_eq!(editor.active(), Some(1));
+        assert_eq!(editor.active(), Some(2));
         let caret = editor.caret().expect("a caret");
         assert_eq!(caret.head, start);
         assert_eq!(caret.anchor, NOTE.len() - 2);
@@ -2275,7 +2504,11 @@ mod tests {
             editor.undo();
         }
         let (_, text) = editor.note().expect("open");
-        assert_eq!(text, "20\n", "the oldest steps fell off a hundred deep");
+        assert_eq!(
+            text, "20\n\n",
+            "the oldest steps fell off a hundred deep; the note's own \
+             separator from the opened file is untouched by content edits"
+        );
     }
 
     #[test]

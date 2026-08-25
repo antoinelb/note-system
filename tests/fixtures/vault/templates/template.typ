@@ -91,6 +91,10 @@
   set text(font: "Cormorant Garamond", size: 13.5pt, fill: palette.ink)
   set par(leading: 0.75em)
   show heading.where(level: 1): set text(size: 24pt, weight: 600)
+  // A quote in a note is always its own full-width block; the inline form
+  // has no place in prose here, so every #quote is promoted before the
+  // show rule below ever sees it.
+  set quote(block: true)
   // Quotes use a non-colour rule as well as the muted palette role, so the
   // boundary survives every theme and greyscale reproduction.
   show quote.where(block: true): it => block(

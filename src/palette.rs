@@ -15,10 +15,16 @@ pub enum CommandId {
     CaptureClipboard,
     InsertLink,
     FollowLink,
-    PreviousMonth,
-    NextMonth,
     OpenLoops,
-    GoToToday,
+    OpenDaily,
+    PreviousDaily,
+    NextDaily,
+    OpenWeekly,
+    PreviousWeekly,
+    NextWeekly,
+    OpenSeason,
+    PreviousSeason,
+    NextSeason,
     GoToTable,
     GoToLogs,
     NewNote,
@@ -48,11 +54,13 @@ pub struct Command {
 /// plus the v1 phase-2 screen commands
 /// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
 /// it.
-pub const COMMANDS: [Command; 23] = [
+pub const COMMANDS: [Command; 29] = [
+    // ctrl+t went to the todo toggle (adr/2026-08-ctrl-t-toggles-the-todo.md);
+    // toggling the theme is now found only by name
     Command {
         id: CommandId::ToggleTheme,
         label: "toggle theme",
-        chord: Some("ctrl+t"),
+        chord: None,
     },
     Command {
         id: CommandId::Quit,
@@ -75,23 +83,53 @@ pub const COMMANDS: [Command; 23] = [
         chord: Some("ctrl+enter"),
     },
     Command {
-        id: CommandId::PreviousMonth,
-        label: "previous month",
-        chord: Some("←"),
-    },
-    Command {
-        id: CommandId::NextMonth,
-        label: "next month",
-        chord: Some("→"),
-    },
-    Command {
         id: CommandId::OpenLoops,
         label: "open loops",
         chord: None,
     },
     Command {
-        id: CommandId::GoToToday,
-        label: "go to today",
+        id: CommandId::OpenDaily,
+        label: "open daily",
+        chord: Some("ctrl+d"),
+    },
+    Command {
+        id: CommandId::PreviousDaily,
+        label: "open previous daily",
+        chord: None,
+    },
+    Command {
+        id: CommandId::NextDaily,
+        label: "open next daily",
+        chord: None,
+    },
+    Command {
+        id: CommandId::OpenWeekly,
+        label: "open weekly",
+        chord: None,
+    },
+    Command {
+        id: CommandId::PreviousWeekly,
+        label: "open previous weekly",
+        chord: None,
+    },
+    Command {
+        id: CommandId::NextWeekly,
+        label: "open next weekly",
+        chord: None,
+    },
+    Command {
+        id: CommandId::OpenSeason,
+        label: "open season",
+        chord: None,
+    },
+    Command {
+        id: CommandId::PreviousSeason,
+        label: "open previous season",
+        chord: None,
+    },
+    Command {
+        id: CommandId::NextSeason,
+        label: "open next season",
         chord: None,
     },
     Command {
@@ -312,10 +350,38 @@ mod tests {
     fn the_query_narrows_by_label_ignoring_case() {
         assert_eq!(labels(&filter("theme", EDITING)), vec!["toggle theme"]);
         assert_eq!(
-            labels(&filter("MONTH", EDITING)),
-            vec!["previous month", "next month"]
+            labels(&filter("WEEKLY", EDITING)),
+            vec!["open weekly", "open previous weekly", "open next weekly"]
         );
         assert_eq!(filter("xyzzy", EDITING), Vec::<&Command>::new());
+    }
+
+    #[test]
+    fn the_time_navigation_commands_are_found_by_label() {
+        assert_eq!(
+            labels(&filter("previous", READING)),
+            vec![
+                "open previous daily",
+                "open previous weekly",
+                "open previous season"
+            ]
+        );
+        assert_eq!(
+            labels(&filter("next", READING)),
+            vec!["open next daily", "open next weekly", "open next season"]
+        );
+        assert_eq!(
+            labels(&filter("daily", READING)),
+            vec!["open daily", "open previous daily", "open next daily"]
+        );
+        assert_eq!(
+            labels(&filter("weekly", READING)),
+            vec!["open weekly", "open previous weekly", "open next weekly"]
+        );
+        assert_eq!(
+            labels(&filter("season", READING)),
+            vec!["open season", "open previous season", "open next season"]
+        );
     }
 
     #[test]
@@ -460,13 +526,11 @@ mod tests {
         assert_eq!(
             chords,
             vec![
-                "ctrl+t",
                 "ctrl+q",
                 "ctrl+shift+v",
                 "ctrl+l",
                 "ctrl+enter",
-                "←",
-                "→",
+                "ctrl+d",
                 "ctrl+1",
                 "ctrl+2",
                 "ctrl+n",
@@ -484,8 +548,16 @@ mod tests {
         assert_eq!(
             chordless,
             vec![
+                "toggle theme",
                 "open loops",
-                "go to today",
+                "open previous daily",
+                "open next daily",
+                "open weekly",
+                "open previous weekly",
+                "open next weekly",
+                "open season",
+                "open previous season",
+                "open next season",
                 "delete note",
                 "notices",
                 "keep mine",

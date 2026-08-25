@@ -269,10 +269,6 @@ pub fn App() -> Element {
             tabindex: "0",
             onkeydown: move |event| {
                 if event.modifiers().ctrl()
-                    && event.key() == Key::Character("t".to_string())
-                {
-                    toggle_theme.call(());
-                } else if event.modifiers().ctrl()
                     && event.key() == Key::Character("q".to_string())
                 {
                     quit.call(());
@@ -749,6 +745,18 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         let fragments = fragments.clone();
         move |target: Selection| {
+            if !editor.write().flush() {
+                return;
+            }
+            // a sheet open for another note must not survive the switch —
+            // its raised card, tether and backlinks belong to the note the
+            // editor is about to leave, and the palette's sheet-only
+            // commands must stop reading `own` from a note the editor no
+            // longer holds (adr/2026-08-sheet-reuses-the-one-editor.md)
+            if sheet.peek().is_some() {
+                picker.set(None);
+                sheet.set(None);
+            }
             let anchor = logs::selection_date(&target.0, &target.1);
             // every selectable id comes from our own formatters, so the today
             // fallback guards the type system, not a reachable path
@@ -1160,8 +1168,80 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // the notices overlay's toggle, the loops list's twin
     let toggle_notices =
         use_callback(move |()| notices_open.set(!notices_open()));
-    let go_today = use_callback(move |()| {
+    let open_daily = use_callback(move |()| {
         select.call((NoteType::Daily, time::day_id(today)))
+    });
+    let open_weekly = use_callback(move |()| {
+        select.call((NoteType::Weekly, time::week_id(today)))
+    });
+    let open_season = use_callback(move |()| {
+        select.call((NoteType::Seasonal, time::season_id(today)))
+    });
+    // the Enter arm's creation half, lifted so the palette's "open next"
+    // shares it: create from template and push onto the note list, only —
+    // opening is `select`'s job, the one place that flushes the editor
+    // being left and clears a sheet the switch would otherwise swap out
+    // from under (adr/2026-08-time-navigation-commands.md). Returns
+    // whether creation landed, so a caller that only opens on success
+    // never moves the selection onto a period with no note.
+    let create_time_note = use_callback({
+        let root = root.clone();
+        move |(scale, id): (NoteType, String)| -> bool {
+            let created = logs::selection_date(&scale, &id).unwrap_or(today);
+            match crate::template::create(
+                &root,
+                &NoteCategory::Time,
+                &scale,
+                &id,
+                &created.to_string(),
+                "",
+            ) {
+                Ok(_) => {
+                    notes.with_mut(|list| list.push((id, scale)));
+                    true
+                }
+                Err(err) => {
+                    status
+                        .write()
+                        .report(Notice::create_failed(&format!("{err:?}")));
+                    false
+                }
+            }
+        }
+    });
+    // the six relative commands' shared body: the anchor is the open
+    // note's own date, so the command is total even from a selection at
+    // another scale (adr/2026-08-time-navigation-commands.md). Forward
+    // creates from the template when the target is missing; backward only
+    // ever resolves to what already exists and never writes.
+    let step_time = use_callback(move |(scale, forward): (NoteType, bool)| {
+        let anchor =
+            logs::selection_date(&selected.peek().0, &selected.peek().1)
+                .unwrap_or(today);
+        if forward {
+            logs::next_period(&scale, anchor)
+                .into_iter()
+                .for_each(|id| {
+                    let exists = notes
+                        .peek()
+                        .iter()
+                        .any(|(existing, _)| existing == &id);
+                    // a refused creation leaves the selection where it
+                    // stood — `select` never runs over a period with no
+                    // note behind it (adr/2026-08-time-navigation-commands.md)
+                    let ready = exists
+                        || create_time_note.call((scale.clone(), id.clone()));
+                    if ready {
+                        select.call((scale.clone(), id));
+                    }
+                });
+        } else {
+            // no note before the first one: the selection holds
+            // (adr/2026-08-time-navigation-commands.md)
+            logs::previous_existing(&notes.peek(), &scale, anchor)
+                .into_iter()
+                .for_each(|id| select.call((scale.clone(), id)));
+        }
     });
     // the screen switch, one seam for icon, chord and palette
     // (adr/2026-08-screen-switch-gesture.md). Leaving the logs closes the
@@ -1190,11 +1270,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     });
 
     // Where the logs pane is, so focus can be put back on it. A keydown
-    // only bubbles up from whatever has focus, and the window's chords
-    // (Ctrl+Q, Ctrl+T) are handled on the app root — so when the active
-    // block's textarea unmounts, the webview drops focus on `<body>`, which
-    // is *above* the app and outside every handler it has, and the chords
-    // go dead until something inside is clicked. A plain cell, like
+    // only bubbles up from whatever has focus, and the window's chord
+    // (Ctrl+Q) is handled on the app root — so when the active block's
+    // textarea unmounts, the webview drops focus on `<body>`, which is
+    // *above* the app and outside every handler it has, and the chord
+    // goes dead until something inside is clicked. A plain cell, like
     // QuitFlush: nothing re-renders when the pane announces itself.
     let pane = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
     // where the invisible keyboard sink is, the pane cell's twin: the
@@ -1392,10 +1472,28 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // their guard (palette.rs `available`)
                 palette::CommandId::InsertLink => open_picker.call(()),
                 palette::CommandId::FollowLink => follow_at.call(()),
-                palette::CommandId::PreviousMonth => page.call(false),
-                palette::CommandId::NextMonth => page.call(true),
                 palette::CommandId::OpenLoops => toggle_loops.call(()),
-                palette::CommandId::GoToToday => go_today.call(()),
+                palette::CommandId::OpenDaily => open_daily.call(()),
+                palette::CommandId::PreviousDaily => {
+                    step_time.call((NoteType::Daily, false));
+                }
+                palette::CommandId::NextDaily => {
+                    step_time.call((NoteType::Daily, true));
+                }
+                palette::CommandId::OpenWeekly => open_weekly.call(()),
+                palette::CommandId::PreviousWeekly => {
+                    step_time.call((NoteType::Weekly, false));
+                }
+                palette::CommandId::NextWeekly => {
+                    step_time.call((NoteType::Weekly, true));
+                }
+                palette::CommandId::OpenSeason => open_season.call(()),
+                palette::CommandId::PreviousSeason => {
+                    step_time.call((NoteType::Seasonal, false));
+                }
+                palette::CommandId::NextSeason => {
+                    step_time.call((NoteType::Seasonal, true));
+                }
                 palette::CommandId::GoToTable => go_table.call(()),
                 palette::CommandId::GoToLogs => go_logs.call(()),
                 palette::CommandId::NewNote => open_creator.call(()),
@@ -1426,7 +1524,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let exists = note_list.iter().any(|(existing, _)| existing == &id);
     let rows = logs::rail_rows(&note_list, Some(&(scale.clone(), id.clone())));
     let crumbs = logs::breadcrumbs(&scale, &id);
-    // reading the theme here re-renders every fragment on Ctrl+T
+    // reading the theme here re-renders every fragment when the palette's
+    // "toggle theme" row fires
     let light = use_context::<Signal<bool>>();
     let theme = if light() {
         RenderTheme::Light
@@ -1996,6 +2095,21 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         }
                                     }
                                 },
+                                Pane::Blank { start } => rsx! {
+                                    div {
+                                        key: "{start}",
+                                        class: "block block-blank",
+                                        onclick: {
+                                            let fragments = fragments.clone();
+                                            let goal = goal.clone();
+                                            move |_| {
+                                                goal.set(goal.get().forgotten());
+                                                editor.write().activate(start);
+                                                fragments.borrow_mut().sweep();
+                                            }
+                                        },
+                                    }
+                                },
                                 Pane::Pending { start, text, job } => {
                                     // the compile rides the tier (at most
                                     // once — the probe dedups) while the
@@ -2333,7 +2447,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
 
     let keyboard = {
         let root = root.clone();
-        let fragments = fragments.clone();
         move |event: KeyboardEvent| {
             // read before the match: a guard's borrow would still be held
             // when an arm writes the editor back
@@ -2397,6 +2510,24 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 {
                     open_picker.call(());
                 }
+                // the todo toggle (adr/2026-08-ctrl-t-toggles-the-todo.md):
+                // buffer-level like Ctrl+L, not a `keymap::Action` — it
+                // edits the line the caret sits on, never the grammar.
+                // Guarded like every other chord that reaches the buffer or
+                // the pane: an overlay owns the keyboard while it stands,
+                // so the chord must not rewrite the line behind it
+                Key::Character(ref character)
+                    if character == "t"
+                        && event.modifiers().ctrl()
+                        && editor.peek().active().is_some()
+                        && palette.peek().is_none()
+                        && picker.peek().is_none()
+                        && creator.peek().is_none()
+                        && template_picker.peek().is_none() =>
+                {
+                    event.prevent_default();
+                    editor.write().toggle_todo();
+                }
                 // the command palette — beside Ctrl+L for the reason its
                 // ADR gives: the dispatch needs what only this pane has in
                 // scope. What is true now is frozen now: by dispatch time
@@ -2428,6 +2559,21 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // the webview's own Ctrl+N would open a window
                     event.prevent_default();
                     open_creator.call(());
+                }
+                // the palette's daily command's chord (the palette's own
+                // OpenDaily), guarded like the palette and the create
+                // overlay: overlays never stack
+                Key::Character(ref character)
+                    if character == "d"
+                        && event.modifiers().ctrl()
+                        && palette.peek().is_none()
+                        && picker.peek().is_none()
+                        && creator.peek().is_none()
+                        && template_picker.peek().is_none() =>
+                {
+                    // the webview's own Ctrl+D would open a bookmark dialog
+                    event.prevent_default();
+                    open_daily.call(());
                 }
                 // the screen chords (adr/2026-08-screen-switch-gesture.md);
                 // ordinals in chrome-icon order
@@ -2466,26 +2612,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         editor.write().reactivate();
                         return;
                     }
-                    let created =
-                        logs::selection_date(&scale, &id).unwrap_or(today);
-                    match crate::template::create(
-                        &root,
-                        &NoteCategory::Time,
-                        &scale,
-                        &id,
-                        &created.to_string(),
-                        "",
-                    ) {
-                        Ok(_) => {
-                            editor
-                                .set(Editor::open(time_note_path(&root, &id)));
-                            vim.write().note_opened();
-                            fragments.borrow_mut().sweep();
-                            notes.with_mut(|list| list.push((id, scale)));
-                        }
-                        Err(err) => status.write().report(
-                            Notice::create_failed(&format!("{err:?}")),
-                        ),
+                    if create_time_note.call((scale.clone(), id.clone())) {
+                        select.call((scale, id));
                     }
                 }
                 _ => {}
@@ -2509,9 +2637,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // the notices overlay closes before the sheet: overlays leave
             // the ladder first
             Key::Escape if notices_open() => notices_open.set(false),
-            // escape reaches here only when no block or overlay owns it:
-            // the sheet closes and the card goes back (wireframe 6b)
-            Key::Escape if sheet.peek().is_some() => close_sheet.call(()),
             // the ladder's bottom, the logs arm's twin: acknowledge the
             // visible notice, gated so a clean line writes nothing
             Key::Escape => {
@@ -2528,6 +2653,23 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && editor.peek().active().is_some() =>
             {
                 open_picker.call(());
+            }
+            // the todo toggle, the logs arm's twin, guarded like every
+            // other overlay-aware chord here: an overlay owns the keyboard
+            // while it stands
+            // (adr/2026-08-ctrl-t-toggles-the-todo.md)
+            Key::Character(ref character)
+                if character == "t"
+                    && event.modifiers().ctrl()
+                    && editor.peek().active().is_some()
+                    && palette.peek().is_none()
+                    && picker.peek().is_none()
+                    && creator.peek().is_none()
+                    && filter_picker.peek().is_none()
+                    && jump.peek().is_none() =>
+            {
+                event.prevent_default();
+                editor.write().toggle_todo();
             }
             Key::Character(ref character)
                 if character == "p"
@@ -2556,6 +2698,20 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // the webview's own Ctrl+N would open a window
                 event.prevent_default();
                 open_creator.call(());
+            }
+            // the palette's daily command's chord, the logs arm's twin
+            Key::Character(ref character)
+                if character == "d"
+                    && event.modifiers().ctrl()
+                    && palette.peek().is_none()
+                    && picker.peek().is_none()
+                    && creator.peek().is_none()
+                    && filter_picker.peek().is_none()
+                    && jump.peek().is_none() =>
+            {
+                // the webview's own Ctrl+D would open a bookmark dialog
+                event.prevent_default();
+                open_daily.call(());
             }
             Key::Character(ref character)
                 if character == "1" && event.modifiers().ctrl() =>
@@ -3040,7 +3196,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             }
                             button {
                                 class: "cal-today",
-                                onclick: move |_| go_today.call(()),
+                                onclick: move |_| open_daily.call(()),
                                 "today"
                             }
                             button {
@@ -3785,6 +3941,13 @@ enum Pane {
         text: String,
         job: Option<crate::render::FragmentJob>,
     },
+    /// An inactive block whose content is empty or all whitespace: rendering
+    /// it would compile to a zero-height SVG and the line would vanish, so
+    /// it keeps its line box without ever reaching the fragment cache
+    /// (adr/2026-08-per-line-block-segmentation.md — blank blocks).
+    Blank {
+        start: usize,
+    },
 }
 
 fn block_panes(
@@ -3810,6 +3973,13 @@ fn block_panes(
                             .unwrap_or("")
                             .to_string(),
                     }
+                } else if text
+                    .get(block.content())
+                    .is_some_and(|slice| slice.trim().is_empty())
+                {
+                    // no compile queued: an empty or whitespace-only line
+                    // would render to a zero-height SVG and disappear
+                    Pane::Blank { start }
                 } else if queued {
                     // the threaded adapter: never compile in the frame —
                     // probe, and hand a miss's job up for the tier
@@ -4100,12 +4270,20 @@ mod tests {
     const FOOTER_BACKLINK: usize = 44;
     const FOOTER_OUTGOING: usize = 45;
     const BLOCK_PREAMBLE: usize = 46;
-    const CRUMB_WEEK: usize = 47;
-    const RAIL_SUMMER: usize = 49;
-    const RAIL_W30: usize = 50;
-    const RAIL_DAY_23: usize = 51;
-    const RAIL_DAY_22: usize = 52;
-    const RAIL_DAY_21: usize = 53;
+    // per-line blocks (adr/2026-08-per-line-block-segmentation.md): the
+    // fixture day note's blank line, heading and link each render as their
+    // own static block/click target now that the note's own last block
+    // (the trailing empty line) is the one active by default, pushing
+    // every following constant down by 3.
+    const BLOCK_BLANK: usize = 47;
+    const BLOCK_HEADING: usize = 48;
+    const BLOCK_LINK: usize = 49;
+    const CRUMB_WEEK: usize = 50;
+    const RAIL_SUMMER: usize = 52;
+    const RAIL_W30: usize = 53;
+    const RAIL_DAY_23: usize = 54;
+    const RAIL_DAY_22: usize = 55;
+    const RAIL_DAY_21: usize = 56;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
     /// one gutter per started week row (and everything sits behind the two
     /// chrome icons).
@@ -4144,10 +4322,13 @@ mod tests {
         assert!(html.contains("liveness-degraded"), "{html}");
     }
 
-    // -- the theme: one keystroke, one attribute -----------------------------
+    // -- the theme: one palette row, one attribute ---------------------------
 
     #[test]
-    fn ctrl_t_toggles_the_theme_and_back() {
+    fn ctrl_t_no_longer_toggles_the_theme() {
+        // ctrl+t went to the todo toggle
+        // (adr/2026-08-ctrl-t-toggles-the-todo.md); the theme now changes
+        // only through its palette row
         let (mut dom, keydown) = theme_app();
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"data-theme="dark""#), "{html}");
@@ -4159,16 +4340,7 @@ mod tests {
             Modifiers::CONTROL,
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"data-theme="light""#), "{html}");
-
-        press(
-            &mut dom,
-            keydown,
-            Key::Character("t".into()),
-            Modifiers::CONTROL,
-        );
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"data-theme="dark""#), "{html}");
+        assert!(html.contains(r#"data-theme="dark""#), "unchanged: {html}");
     }
 
     #[test]
@@ -4190,6 +4362,67 @@ mod tests {
         );
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"data-theme="dark""#), "{html}");
+    }
+
+    // -- the todo toggle: Ctrl+T flips the caret's line's checkbox ----------
+    // (adr/2026-08-ctrl-t-toggles-the-todo.md)
+
+    #[test]
+    fn ctrl_t_turns_the_caret_line_into_an_unchecked_item_on_the_logs_screen()
+    {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+
+        assert!(source_of(&dom).ends_with("- [ ] "), "{}", source_of(&dom));
+    }
+
+    #[test]
+    fn a_second_ctrl_t_checks_the_item_off_on_the_logs_screen() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+
+        assert!(source_of(&dom).ends_with("- [x] "), "{}", source_of(&dom));
+    }
+
+    #[test]
+    fn ctrl_t_flips_the_checkbox_on_the_table_sheet_too() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let (_, sink) = sheet_block_targets(&opened);
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("t".into()),
+            Modifiers::CONTROL,
+        );
+
+        assert!(source_of(&dom).ends_with("- [ ] "), "{}", source_of(&dom));
     }
 
     // -- the quit chord: close, nothing to flush -----------------------------
@@ -4468,7 +4701,11 @@ mod tests {
         block_on(settle(&mut dom));
 
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("repris dehors"), "the disk won: {html}");
+        // "repris dehors" is compiled into the static block's SVG now, not
+        // literal text (adr/2026-08-per-line-block-segmentation.md); the
+        // buffer's own unsaved edit going away is what "the disk won"
+        // means here, confirmed on disk below
+        assert!(!html.contains("à moi"), "the disk won: {html}");
         assert!(!html.contains("notice-"), "resolved: {html}");
         // the reloaded buffer re-armed the guard: its own autosave lands
         assert_eq!(
@@ -5020,6 +5257,34 @@ mod tests {
         }
     }
 
+    /// Plan item 8's second symptom, tested directly: opening the sheet on
+    /// a multi-line note must render every non-active line as its compiled
+    /// fragment, never as raw `block-pending` source. Under the inline
+    /// feed `rendered_app` gives every sheet test, this already passes —
+    /// which says the symptom was the collapsing blank blocks fixed above,
+    /// not a separate sheet/compute-tier wiring bug: the sheet and the
+    /// logs pane share the one `blocks_view` closure and the one
+    /// `compiled` signal it reads to wake on a landed compile
+    /// (adr/2026-08-per-line-block-segmentation.md — blank blocks).
+    #[test]
+    fn a_sheet_renders_every_non_active_line_as_its_fragment() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, _keys) = table_targets_with_keys(&mut dom, &clicks);
+        // capture-idea: preamble, two headings and the closing paragraph
+        // are non-blank lines besides the active last (trailing) block
+        open_sheet_on(&mut dom, pane, cards[1]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(RENDERED_NOTE), "{html}");
+        assert!(!html.contains("block-pending"), "{html}");
+        assert_eq!(
+            html.matches(r#"class="note""#).count(),
+            4,
+            "every non-active line rendered its own fragment: {html}"
+        );
+    }
+
     #[test]
     fn a_drag_beyond_the_slop_opens_no_sheet() {
         let vault = temp_vault();
@@ -5056,33 +5321,28 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_sheet_and_restores_the_day() {
+    fn plain_escape_leaves_the_sheet_open_and_shift_escape_closes_it() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         open_sheet_on(&mut dom, pane, cards[0]);
 
+        // a plain Escape over the sheet's own chrome — no block focused —
+        // never leaves the note (adr/2026-08-shift-escape-leaves-the-note.md)
         press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(html.contains(r#"class="dim""#), "{html}");
+
+        // only Shift+Escape takes the sheet with it
+        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains(r#"class="sheet""#), "{html}");
         assert!(!html.contains(r#"class="dim""#), "{html}");
         assert!(!html.contains("raised"), "{html}");
         // the card went back to its slot in the canvas
         assert!(html.contains("left: 32px; top: 32px"), "{html}");
-        // a second escape with nothing open lands on no arm
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
-
-        // the one editor holds the day again: the logs render it
-        press(
-            &mut dom,
-            keys,
-            Key::Character("2".into()),
-            Modifiers::CONTROL,
-        );
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"class="logs""#), "{html}");
-        assert!(html.contains(RENDERED_NOTE), "{html}");
     }
 
     #[test]
@@ -5338,7 +5598,7 @@ mod tests {
         open_sheet_on(&mut dom, pane, cards[0]);
 
         lock_dir(&vault.path().join("permanent"), true);
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
         block_on(settle(&mut dom));
         lock_dir(&vault.path().join("permanent"), false);
         let html = dioxus_ssr::render(&dom);
@@ -5393,8 +5653,8 @@ mod tests {
             dioxus_ssr::render(&dom)
         );
 
-        let (_, sink) = sheet_block_targets(&opened);
-        retype(&mut dom, sink, "= alpha renommé\n");
+        let (_, sink) = sheet_heading_targets(&mut dom, &opened);
+        retype(&mut dom, sink, "= alpha renommé");
         block_on(settle(&mut dom));
         let saved =
             std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
@@ -5445,7 +5705,7 @@ mod tests {
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let (block, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_heading_targets(&mut dom, &opened);
 
         // put the caret at the end of "= alpha"
         place_caret(&mut dom, block, &hit, "= alpha".len());
@@ -5498,9 +5758,11 @@ mod tests {
         )
         .expect("the day is rewritten");
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        // the link is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md)
+        let (block, keys) = activate_block(&mut dom, clicks[BLOCK_LINK]);
 
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
+        place_caret(&mut dom, block, &hit, 3);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -5529,7 +5791,7 @@ mod tests {
         let (pane, cards) = table_targets(&mut dom, &clicks);
         // beta sits second in id order
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
-        let (block, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_link_targets(&mut dom, &opened);
 
         // inside `#l("alpha")`, just past "= beta\n"
         place_caret(&mut dom, block, &hit, 10);
@@ -5550,7 +5812,7 @@ mod tests {
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
-        let (block, keys) = sheet_block_targets(&opened);
+        let (block, keys) = sheet_link_targets(&mut dom, &opened);
 
         // inside `#l("2026-07-22")`
         place_caret(&mut dom, block, &hit, 22);
@@ -5576,10 +5838,12 @@ mod tests {
         let (pane, cards) = table_targets(&mut dom, &clicks);
         // gamma sits last in id order
         let opened = open_sheet_on(&mut dom, pane, cards[3]);
-        let (block, keys) = sheet_block_targets(&opened);
+        // the link is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md)
+        let (block, keys) = sheet_link_targets(&mut dom, &opened);
 
-        // inside `#l("fantome")`, just past "= gamma\n"
-        place_caret(&mut dom, block, &hit, 11);
+        // inside `#l("fantome")`
+        place_caret(&mut dom, block, &hit, IN_LINK);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -5684,10 +5948,14 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            54,
+            57,
             "2 chrome icons + 3 header + 3 seasons + 5 gutters + 31 days \
-             + 2 footer links + 1 rendered block + 2 crumbs + 5 rail — the \
-             active widget listens for presses, not clicks: {html}"
+             + 2 footer links + 4 rendered blocks (preamble, blank, \
+             heading, link — the note's own trailing empty line is the \
+             one active by default, so it alone carries no click listener; \
+             adr/2026-08-per-line-block-segmentation.md) + 2 crumbs \
+             + 5 rail — the active widget listens for presses, not \
+             clicks: {html}"
         );
     }
 
@@ -5726,19 +5994,21 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[RAIL_DAY_21]);
-        // the broken `#let x = (` block wakes as the source — its
-        // diagnostic hides while it is the one being edited
-        let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("render-error"), "{html}");
-        assert!(html.contains(RENDERED_NOTE), "the preamble renders: {html}");
-
-        // activating the preamble renders the broken block: it fails
-        // alone, inline, while the preamble's source stays honest text
-        // (day 21's blocks keep day 23's keys, so the mount id holds)
-        click(&mut dom, clicks[BLOCK_PREAMBLE]);
+        // the broken `#let x = (` is its own line-block now, static by
+        // default — the note's own trailing empty line is what wakes
+        // active (adr/2026-08-cursor-always-in-the-note.md) — so its
+        // diagnostic shows alone while the rest of the note renders fine
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
-        assert!(html.contains("#import"), "the preamble source: {html}");
+        assert!(html.contains(RENDERED_NOTE), "the heading renders: {html}");
+
+        // activating the broken block hides its diagnostic while it is
+        // the one being edited (day 21's blocks reuse day 23's element
+        // ids, and the broken line sits where day 23's link block did)
+        click(&mut dom, clicks[BLOCK_LINK]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("render-error"), "{html}");
+        assert!(html.contains("#let x = ("), "the broken source: {html}");
     }
 
     #[test]
@@ -5929,15 +6199,15 @@ mod tests {
 
     #[test]
     fn clicking_a_block_opens_its_source_in_place() {
-        // the note opens with its heading already the source; clicking the
-        // still-rendered preamble moves the source there and renders the
-        // heading in its place
+        // the note opens with its own trailing empty line already the
+        // source (adr/2026-08-cursor-always-in-the-note.md); clicking
+        // the still-rendered preamble moves the source there and
+        // renders the previously active line in its place
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("block-active"), "born editing: {html}");
-        assert!(html.contains("= 2026-07-23"), "the raw source: {html}");
 
         let mutations = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
         // the renderer announces the mount and the textarea asks for focus;
@@ -5947,7 +6217,7 @@ mod tests {
         assert!(html.contains("#import"), "the preamble source: {html}");
         assert!(
             html.contains(RENDERED_NOTE),
-            "the heading renders in its place: {html}"
+            "the previously active line renders in its place: {html}"
         );
     }
 
@@ -6001,26 +6271,75 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
 
-        // arrows move the caret, not the month grid below; without an
-        // injected probe the vertical ones slide nowhere either
+        // arrows move the caret, not the month grid below; a horizontal
+        // move stays inside the one-line heading block
+        // (adr/2026-08-per-line-block-segmentation.md)
         press(&mut dom, keys, Key::ArrowLeft, Modifiers::empty());
-        press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("july 2026"), "no paging: {html}");
-        assert!(html.contains("= 2026-07-23"), "no slide: {html}");
+        // the caret box now splits the heading's own text into two spans,
+        // so the block staying active (not paged away) is what "no slide"
+        // means here
+        assert!(html.contains("block-active"), "no slide: {html}");
         // enter in the source must not reach the create handler either
         press(&mut dom, keys, Key::Enter, Modifiers::empty());
         assert!(html.contains("block-active"), "still editing: {html}");
 
-        // the theme chord still bubbles to the app root
+        // the todo chord still escapes the source instead of typing a
+        // literal "t" (adr/2026-08-ctrl-t-toggles-the-todo.md)
         press(
             &mut dom,
             keys,
             Key::Character("t".into()),
             Modifiers::CONTROL,
         );
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        assert!(
+            source_of(&dom).contains("- [ ] "),
+            "the chord toggled the todo, not typed a t: {}",
+            source_of(&dom)
+        );
+    }
+
+    /// The blank line between the fixture day note's meta and its heading
+    /// (adr/2026-08-per-line-block-segmentation.md — blank blocks): its own
+    /// block keeps a visible, clickable line box — one `block-blank` div,
+    /// never sent through the fragment cache — and a click on it activates
+    /// the block like a click on any other. The note's own trailing empty
+    /// line is blank too, so exactly one `block-blank` div stands at any
+    /// moment: whichever of the two blank lines is not the active one.
+    #[test]
+    fn a_blank_line_keeps_one_clickable_line_box() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let before = dioxus_ssr::render(&dom);
+        assert_eq!(
+            before.matches("block-blank").count(),
+            1,
+            "one blank block: {before}"
+        );
+        // the trailing empty line opens active by default, so the blank
+        // block above it (between the preamble and the heading) renders
+        // first
+        assert!(
+            before.find("block-blank") < before.find("block-active"),
+            "the blank line leads the trailing active one: {before}"
+        );
+
+        click(&mut dom, clicks[BLOCK_BLANK]);
+        let after = dioxus_ssr::render(&dom);
+        assert_eq!(
+            after.matches("block-blank").count(),
+            1,
+            "still one blank block: {after}"
+        );
+        // the click swapped the two: the caret now sits on the blank line
+        // that used to be `block-blank`, and the trailing line — no longer
+        // active — is `block-blank` in its place
+        assert!(
+            after.find("block-active") < after.find("block-blank"),
+            "the click moved the caret onto the blank line: {after}"
+        );
     }
 
     #[test]
@@ -6058,8 +6377,18 @@ mod tests {
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (block, keys) = activate_heading(&mut dom, &clicks);
 
-        // caret on the heading's first line: up slides into the preamble
+        // caret on the heading's line: up slides onto the blank line-block
+        // above it — a fresh widget, its own keydown sink — one more up
+        // from there slides into the preamble
+        // (adr/2026-08-per-line-block-segmentation.md)
         place_caret(&mut dom, block, &hit, 0);
+        let slid = press_for_mutations(
+            &mut dom,
+            keys,
+            Key::ArrowUp,
+            Modifiers::empty(),
+        );
+        let keys = listeners(&slid, "keydown")[0];
         press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "the preamble source: {html}");
@@ -6177,7 +6506,7 @@ mod tests {
         type_keys(&mut dom, sink, "ouvert");
         assert_eq!(
             source_of(&dom),
-            "= 2026-07-23\n#l(\"2026-07-22\")\n\nouvert",
+            "= 2026-07-23\nouvert",
             "the line opened below the caret's line"
         );
     }
@@ -6212,7 +6541,9 @@ mod tests {
         assert!(html.contains(r#"class="caret-box""#), "{html}");
 
         // the widget remounted with the woken block: G goes to its fresh
-        // sink and comes back to the last block's last line
+        // sink and comes back to the note's own last line — a genuinely
+        // empty one now that every line is its own block
+        // (adr/2026-08-per-line-block-segmentation.md)
         let sink = listeners(&woken, "keydown")[0];
         press(
             &mut dom,
@@ -6220,9 +6551,11 @@ mod tests {
             Key::Character("G".into()),
             Modifiers::empty(),
         );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("block-active"), "the last line woke: {html}");
         assert!(
-            source_of(&dom).contains("= 2026-07-23"),
-            "the heading woke again: {}",
+            source_of(&dom).is_empty(),
+            "the note's own trailing empty line: {}",
             source_of(&dom)
         );
     }
@@ -6234,16 +6567,11 @@ mod tests {
             Some(vault.path().to_path_buf()),
             Ok("collée\n".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
-
-        // normal mode on the link line, then dd: the line leaves for the
-        // register (adr/2026-08-one-register-the-clipboard.md)
-        press(
-            &mut dom,
-            sink,
-            Key::Character("k".into()),
-            Modifiers::empty(),
-        );
+        // the link is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md); normal mode on
+        // it, then dd: the line leaves for the register
+        // (adr/2026-08-one-register-the-clipboard.md)
+        let (_, sink) = activate_block(&mut dom, clicks[BLOCK_LINK]);
         press(
             &mut dom,
             sink,
@@ -6280,24 +6608,54 @@ mod tests {
     }
 
     #[test]
+    fn dd_on_the_table_sheets_last_line_lands_on_the_heading_above() {
+        // one vim grammar, one Editor shared by both mounts (src/ui.rs
+        // sheet/pane split): the sheet opens with the note's own trailing
+        // empty line active, and dd there must take the preceding newline
+        // and wake the heading above rather than leave a blank line
+        // behind, exactly as the main editor does
+        // (adr/2026-08-cursor-always-in-the-note.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let (_, sink) = sheet_block_targets(&opened);
+
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("d".into()),
+            Modifiers::empty(),
+        );
+
+        assert_eq!(
+            source_of(&dom),
+            "= alpha",
+            "the heading woke, no blank line left behind"
+        );
+    }
+
+    #[test]
     fn r_overwrites_through_the_widget_and_the_caret_stays_a_box() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
-        // k k: off the trailing blank line, onto the heading's own line
-        // (adr/2026-08-cursor-always-in-the-note.md)
+        // the heading's own line opens with the caret at its end (its
+        // block's own line-block now — adr/2026-08-per-line-block-segmentation.md);
+        // 0 moves it to the start, within the block
         press(
             &mut dom,
             sink,
-            Key::Character("k".into()),
-            Modifiers::empty(),
-        );
-        press(
-            &mut dom,
-            sink,
-            Key::Character("k".into()),
+            Key::Character("0".into()),
             Modifiers::empty(),
         );
         let before = source_of(&dom);
@@ -6530,7 +6888,6 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
-        let before = source_of(&dom);
 
         // one insert session is one intent
         press(
@@ -6543,14 +6900,26 @@ mod tests {
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
         assert!(source_of(&dom).contains("songe"));
 
-        press(
+        let undone = press_for_mutations(
             &mut dom,
             sink,
             Key::Character("u".into()),
             Modifiers::empty(),
         );
-        assert_eq!(source_of(&dom), before, "one press undid the session");
+        // the click that first woke the heading never dirtied the text,
+        // so its checkpoint was a no-op step over
+        // (adr/2026-08-undo-at-vim-grain.md): undo falls back to the
+        // file-open checkpoint, waking that checkpoint's own last block —
+        // the note's own trailing empty line
+        // (adr/2026-08-cursor-always-in-the-note.md) — rather than the
+        // heading itself, a fresh widget with its own keydown sink.
+        // Either way "songe" is gone.
+        assert!(
+            !dioxus_ssr::render(&dom).contains("songe"),
+            "one press undid the session"
+        );
 
+        let sink = listeners(&undone, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -6558,9 +6927,8 @@ mod tests {
             Modifiers::CONTROL,
         );
         assert!(
-            source_of(&dom).contains("songe"),
-            "ctrl+r brought it back: {}",
-            source_of(&dom)
+            dioxus_ssr::render(&dom).contains("songe"),
+            "ctrl+r brought it back"
         );
     }
 
@@ -6658,14 +7026,28 @@ mod tests {
             Modifiers::empty(),
         );
         let prompt_keys = listeners(&opened, "keydown")[0];
-        // the theme chord still answers over the open prompt
+
+        // neither Escape nor Enter: the prompt's own match falls to its
+        // wildcard arm and still swallows the key
+        press(&mut dom, prompt_keys, Key::ArrowLeft, Modifiers::empty());
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"placeholder="/""#),
+            "an unrelated key leaves the prompt open"
+        );
+
+        // an unbound ctrl chord still bubbles past the prompt instead of
+        // being swallowed; nothing claims it, so nothing moves
         press(
             &mut dom,
             prompt_keys,
-            Key::Character("t".into()),
+            Key::Character("z".into()),
             Modifiers::CONTROL,
         );
-        assert!(dioxus_ssr::render(&dom).contains(r#"data-theme="light""#));
+        assert_eq!(
+            source_of(&dom),
+            before,
+            "the bubbled chord matched nothing"
+        );
 
         press(&mut dom, prompt_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
@@ -6723,7 +7105,12 @@ mod tests {
         place_caret(&mut dom, block, &hit, 0);
         press(&mut dom, sink, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("#import"), "slid into the preamble: {html}");
+        // the heading is its own line-block now: up slides onto the blank
+        // line above it (adr/2026-08-per-line-block-segmentation.md)
+        assert!(
+            html.contains("block-active"),
+            "slid off the heading: {html}"
+        );
         assert!(
             html.contains(r#"class="caret-box""#),
             "still thinking after the slide: {html}"
@@ -6820,7 +7207,7 @@ mod tests {
             source_of(&dom)
         }
 
-        let cut = "26-07-23\n#l(\"2026-07-22\")\n";
+        let cut = "26-07-23";
         assert_eq!(cut_with(true, false), cut, "flagged commit: d^ cuts");
         assert_eq!(
             cut_with(false, false),
@@ -6866,7 +7253,7 @@ mod tests {
         compose(&mut dom, sink, "compositionend", "^");
         assert_eq!(
             source_of(&dom),
-            "26-07-23\n#l(\"2026-07-22\")\n",
+            "26-07-23",
             "d^ cut the heading back to its first non-blank"
         );
 
@@ -6878,6 +7265,12 @@ mod tests {
             Key::Character("u".into()),
             Modifiers::empty(),
         );
+        // the caret's own checkpoint here never dirtied the text either,
+        // so undo again falls back to the file-open checkpoint and its
+        // own last block, the note's own trailing empty line
+        // (adr/2026-08-cursor-always-in-the-note.md); re-activating the
+        // heading directly confirms its own text is back
+        activate_heading(&mut dom, &clicks);
         assert_eq!(source_of(&dom), before, "u puts the heading back");
     }
 
@@ -6923,7 +7316,10 @@ mod tests {
             Key::Character("i".into()),
             Modifiers::empty(),
         );
-        // from the empty last line, shift+up selects the link line
+        // the heading is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md): from its end,
+        // shift+up has nothing above inside the block, so it selects the
+        // whole line instead of sliding
         press(&mut dom, sink, Key::ArrowUp, Modifiers::SHIFT);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -6939,7 +7335,7 @@ mod tests {
         );
         assert_eq!(
             source_of(&dom),
-            "= 2026-07-23\nX",
+            "X",
             "the keystroke replaced the selection"
         );
         assert!(
@@ -6949,29 +7345,21 @@ mod tests {
 
         // tab moves the line a level in, shift+tab brings it back
         press(&mut dom, sink, Key::Tab, Modifiers::empty());
-        assert_eq!(
-            source_of(&dom),
-            "= 2026-07-23\n  X",
-            "the line took an indent level"
-        );
+        assert_eq!(source_of(&dom), "  X", "the line took an indent level");
         press(&mut dom, sink, Key::Tab, Modifiers::SHIFT);
-        assert_eq!(source_of(&dom), "= 2026-07-23\nX", "and gave it back");
+        assert_eq!(source_of(&dom), "X", "and gave it back");
         // a ctrl chord passes the grammar by, and the sink's own net
         // swallows it rather than letting focus walk out
         press(&mut dom, sink, Key::Tab, Modifiers::CONTROL);
-        assert_eq!(source_of(&dom), "= 2026-07-23\nX", "ctrl+tab is inert");
+        assert_eq!(source_of(&dom), "X", "ctrl+tab is inert");
 
         // the erase keys answer
         press(&mut dom, sink, Key::Delete, Modifiers::empty());
-        assert_eq!(
-            source_of(&dom),
-            "= 2026-07-23\nX",
-            "nothing to their right"
-        );
+        assert_eq!(source_of(&dom), "X", "nothing to their right");
         press(&mut dom, sink, Key::Backspace, Modifiers::CONTROL);
-        assert_eq!(source_of(&dom), "= 2026-07-23\n", "the word went");
+        assert_eq!(source_of(&dom), "", "the word went");
         press(&mut dom, sink, Key::Backspace, Modifiers::empty());
-        assert_eq!(source_of(&dom), "= 2026-07-23", "one cluster went");
+        assert_eq!(source_of(&dom), "", "nothing left to take");
     }
 
     #[test]
@@ -6979,14 +7367,16 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        // the preamble is the one block that still spans several lines —
+        // import, show and meta merge
+        // (adr/2026-08-per-line-block-segmentation.md)
+        let (_, sink) = activate_block(&mut dom, clicks[BLOCK_PREAMBLE]);
 
-        // k k: off the trailing blank line, onto the heading's own line
-        // (adr/2026-08-cursor-always-in-the-note.md); then 0 l l, so the
-        // run starts at column 2 — off column 0, where a charwise span
-        // from the same anchor would be indistinguishable from a widened
-        // one and this test would pass with `linewise` hardcoded false
-        for key in "kk0ll".chars() {
+        // k off the meta line onto "#show: note"; 0 l l starts the run at
+        // column 2 — off column 0, where a charwise span from the same
+        // anchor would be indistinguishable from a widened one and this
+        // test would pass with `linewise` hardcoded false
+        for key in "k0ll".chars() {
             press(
                 &mut dom,
                 sink,
@@ -6995,7 +7385,7 @@ mod tests {
             );
         }
 
-        // V j: whole-line visual, extended down onto the link line
+        // V j: whole-line visual, extended down onto the meta line
         press(
             &mut dom,
             sink,
@@ -7011,22 +7401,18 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(
-                r#"<span class="sel" data-start="0">= 2026-07-23</span>"#
+                r#"<span class="sel" data-start="37">#show: note</span>"#
             ),
-            "the heading line paints whole, from before the anchor: {html}"
+            "the show line paints whole, from before the anchor: {html}"
         );
         assert!(
-            html.contains(r#"<span class="sel" data-start="12"> </span>"#),
-            "the heading line's newline cell paints too: {html}"
-        );
-        assert!(
-            html.contains(r#"class="sel" data-start="16""#),
-            "the link line paints past the caret's own cluster: {html}"
+            html.contains(r#"class="sel" data-start="52""#),
+            "the meta line paints past the caret's own cluster: {html}"
         );
 
-        // escape back to normal, up onto the heading line again, then the
-        // same j through charwise v: neither the heading line's head nor
-        // anything past the caret enters a sel piece — v stays byte-exact
+        // escape back to normal, up onto the show line again, then the
+        // same j through charwise v: nothing past the caret enters a sel
+        // piece — v stays byte-exact
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
         press(
             &mut dom,
@@ -7048,12 +7434,8 @@ mod tests {
         );
         let charwise_html = dioxus_ssr::render(&dom);
         assert!(
-            !charwise_html.contains(r#"class="sel" data-start="16""#),
+            !charwise_html.contains(r#"class="sel" data-start="52""#),
             "v paints nothing past the head: {charwise_html}"
-        );
-        assert!(
-            !charwise_html.contains(r#"data-start="12"> </span>"#),
-            "v paints no newline cell either: {charwise_html}"
         );
     }
 
@@ -7792,7 +8174,7 @@ mod tests {
         block_on(settle(&mut dom));
         assert_eq!(
             *written.lock().expect("the write cell"),
-            vec!["= 2026-07-23\n#l(\"2026-07-22\")\n".to_string()],
+            vec!["= 2026-07-23".to_string()],
         );
 
         // cut: a second copy lands and the block empties
@@ -8563,7 +8945,12 @@ mod tests {
         press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
-        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let opened = press_for_mutations(
+            &mut dom,
+            picker_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(r#"<span class="crumb">templates</span>"#),
@@ -8576,7 +8963,13 @@ mod tests {
         // the selected note's furniture leaves with the note
         assert!(!html.contains("links-footer"), "{html}");
         assert!(!html.contains("captured today"), "{html}");
-        // the template's own source stands in the pane, placeholders and all
+        // the template's own source stands in the pane, placeholders and
+        // all — the note's own trailing empty line opens active
+        // (adr/2026-08-cursor-always-in-the-note.md), so the heading
+        // takes one more click on its own static fragment, the second
+        // click listener after the preamble
+        // (adr/2026-08-per-line-block-segmentation.md)
+        activate_block(&mut dom, listeners(&opened, "click")[1]);
         assert!(source_of(&dom).contains("{{title}}"), "{}", source_of(&dom));
 
         // escape hands the pane back to the selected note
@@ -8621,16 +9014,20 @@ mod tests {
         let (input, picker_keys) =
             open_template_picker(&mut dom, keys[LOGS_KEYS]);
         type_into(&mut dom, input, "daily");
-        // the chosen template opens with its last block awake — the woken
-        // widget's sink is in the same mutations (`activate_block`)
+        // the chosen template opens with its own trailing empty line
+        // awake (adr/2026-08-cursor-always-in-the-note.md); the heading
+        // takes one more click on its own static fragment, the second
+        // click listener after the preamble
+        // (adr/2026-08-per-line-block-segmentation.md)
         let woken = press_for_mutations(
             &mut dom,
             picker_keys,
             Key::Enter,
             Modifiers::empty(),
         );
-        let sink = listeners(&woken, "keydown")[0];
-        retype(&mut dom, sink, "= le modèle refait\n");
+        let (_, sink) =
+            activate_block(&mut dom, listeners(&woken, "click")[1]);
+        retype(&mut dom, sink, "= le modèle refait");
         block_on(settle(&mut dom));
         let text =
             std::fs::read_to_string(vault.path().join("templates/daily.typ"))
@@ -8933,9 +9330,11 @@ mod tests {
 
         // a pending block activates like any other: the preamble opens as
         // source and the heading block goes pending in its place
-        // (registration runs the grid first, then the one pending block,
-        // the two crumb jumps and the rail's selected row)
-        click(&mut dom, clicks[clicks.len() - 4]);
+        // (registration runs the grid first, then the four pending
+        // blocks — preamble, blank, heading, link
+        // (adr/2026-08-per-line-block-segmentation.md) — the two crumb
+        // jumps and the rail's selected row)
+        click(&mut dom, clicks[clicks.len() - 7]);
         let activated = dioxus_ssr::render(&dom);
         assert!(
             activated.contains(r#"<span data-start="0">#import"#),
@@ -9237,11 +9636,11 @@ mod tests {
     fn ctrl_l_opens_the_picker_and_enter_writes_the_link() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
-
-        // the caret sits right after "= 2026-07-23\n"
-        let anchor = "= 2026-07-23\n".len();
-        place_caret(&mut dom, block, &hit, anchor);
+        // the link is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md); the caret sits
+        // right at its start
+        let (block, keys) = activate_block(&mut dom, clicks[BLOCK_LINK]);
+        place_caret(&mut dom, block, &hit, 0);
         let (input, picker_keys) = open_picker(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-picker"), "{html}");
@@ -9367,30 +9766,32 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (block, keys) = activate_heading(&mut dom, &clicks);
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING);
+        place_caret(&mut dom, block, &hit, 4);
         let (_, picker_keys) = open_picker(&mut dom, keys);
 
         press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
         assert!(html.contains("block-active"), "still editing: {html}");
-        // the caret still stands where Ctrl+L found it: at the start of
-        // the heading's second line, before the day link
+        // the caret still stands where Ctrl+L found it
         assert!(
-            html.contains(
-                r#"<div class="source-line"><span class="caret-box" data-start="13">"#
-            ),
+            html.contains(r#"class="caret-box" data-start="4""#),
             "{html}"
         );
     }
 
     #[test]
-    fn the_theme_chord_still_works_over_an_open_picker() {
+    fn the_todo_chord_is_blocked_while_the_picker_is_open() {
+        // an overlay owns the keyboard while it stands, the same guard
+        // every other buffer/pane chord here carries (Ctrl+L, Ctrl+P,
+        // Ctrl+N, Ctrl+D) — the todo toggle must not silently rewrite the
+        // line behind the picker
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, keys) = activate_heading(&mut dom, &clicks);
         let (_, picker_keys) = open_picker(&mut dom, keys);
+        let before = source_of(&dom);
 
         press(
             &mut dom,
@@ -9399,7 +9800,7 @@ mod tests {
             Modifiers::CONTROL,
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        assert_eq!(source_of(&dom), before, "the line stayed untouched");
         assert!(html.contains("link-picker"), "and it stays open: {html}");
     }
 
@@ -9431,18 +9832,19 @@ mod tests {
 
     // -- Ctrl+Enter: following the link under the caret ---------------------
 
-    /// The heading block of the fixture's selected day is
-    /// `= 2026-07-23\n#l("2026-07-22")`, so the link opens at this offset.
-    const LINK_IN_HEADING: usize = "= 2026-07-23\n".len();
+    /// The fixture's selected day links `"2026-07-22"` from its own
+    /// line-block, right after the heading's
+    /// (adr/2026-08-per-line-block-segmentation.md).
+    const IN_LINK: usize = 3;
 
     #[test]
     fn ctrl_enter_opens_the_time_note_under_the_caret() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (block, keys) = activate_block(&mut dom, clicks[BLOCK_LINK]);
 
-        // inside the `#l("2026-07-22")` the heading block ends with
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
+        // inside the `#l("2026-07-22")` the link block's own text
+        place_caret(&mut dom, block, &hit, IN_LINK);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -9456,11 +9858,10 @@ mod tests {
     fn ctrl_pressing_a_link_in_the_source_opens_it_too() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, _) = activate_heading(&mut dom, &clicks);
+        let (block, _) = activate_block(&mut dom, clicks[BLOCK_LINK]);
 
         // the press asks the probe where it landed: inside the day link
-        *hit.lock().expect("the hit cell never poisons") =
-            Some((0, LINK_IN_HEADING + 3));
+        *hit.lock().expect("the hit cell never poisons") = Some((0, IN_LINK));
         ctrl_press(&mut dom, block);
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
@@ -9475,11 +9876,11 @@ mod tests {
     fn a_plain_press_in_the_source_only_moves_the_caret() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, _) = activate_heading(&mut dom, &clicks);
+        let (block, _) = activate_block(&mut dom, clicks[BLOCK_LINK]);
 
         // the caret lands in the link, but without the modifier nothing
         // follows
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
+        place_caret(&mut dom, block, &hit, IN_LINK);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains("cal-day has-note selected\">23"),
@@ -9632,9 +10033,11 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
-        // the heading block loses its outgoing link and gains a ghost one
-        retype(&mut dom, sink, "= 2026-07-23\n#l(\"fantôme\")\n");
+        // the link is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md): it loses its
+        // outgoing link and gains a ghost one
+        let (_, sink) = activate_block(&mut dom, clicks[BLOCK_LINK]);
+        retype(&mut dom, sink, "#l(\"fantôme\")");
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-dangling\">fantôme"), "{html}");
@@ -9650,8 +10053,11 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
-        retype(&mut dom, sink, "= 2026-07-23\n");
+        // the link is its own line-block now
+        // (adr/2026-08-per-line-block-segmentation.md); emptying it
+        // removes the outgoing link entirely
+        let (_, sink) = activate_block(&mut dom, clicks[BLOCK_LINK]);
+        retype(&mut dom, sink, " ");
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains('←'), "the backlink survives: {html}");
@@ -9725,10 +10131,16 @@ mod tests {
                 "capture clipboard",
                 "insert link",
                 "follow link",
-                "previous month",
-                "next month",
                 "open loops",
-                "go to today",
+                "open daily",
+                "open previous daily",
+                "open next daily",
+                "open weekly",
+                "open previous weekly",
+                "open next weekly",
+                "open season",
+                "open previous season",
+                "open next season",
                 "go to table",
                 "new note",
                 "notices",
@@ -9755,7 +10167,7 @@ mod tests {
         let (_, keys) = activate_heading(&mut dom, &clicks);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 13, "{labels:?}");
+        assert_eq!(labels.len(), 19, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -9919,10 +10331,11 @@ mod tests {
     fn the_palette_runs_insert_link_at_the_caret() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
         // the caret is app state: the palette cannot move it, so the link
-        // lands where it stood before Ctrl+P
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING);
+        // lands where it stood before Ctrl+P — the start of the link's
+        // own line-block (adr/2026-08-per-line-block-segmentation.md)
+        let (block, keys) = activate_block(&mut dom, clicks[BLOCK_LINK]);
+        place_caret(&mut dom, block, &hit, 0);
         let (input, palette_keys) = open_palette(&mut dom, keys);
 
         type_into(&mut dom, input, "insert");
@@ -9953,8 +10366,8 @@ mod tests {
     fn the_palette_runs_follow_link_from_the_caret() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING + 3);
+        let (block, keys) = activate_block(&mut dom, clicks[BLOCK_LINK]);
+        place_caret(&mut dom, block, &hit, IN_LINK);
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "follow");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
@@ -9963,24 +10376,6 @@ mod tests {
             html.contains("cal-day has-note selected\">22"),
             "the command jumped to the linked day: {html}"
         );
-    }
-
-    #[test]
-    fn the_palette_pages_the_month_both_ways() {
-        let vault = temp_vault();
-        let (mut dom, _, keys, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
-        type_into(&mut dom, input, "previous");
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("june 2026"), "{html}");
-
-        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
-        type_into(&mut dom, input, "next");
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("july 2026"), "{html}");
     }
 
     #[test]
@@ -10003,7 +10398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_goes_back_to_today() {
+    fn the_palette_open_daily_goes_back_to_today() {
         let vault = temp_vault();
         let (mut dom, clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -10012,10 +10407,380 @@ mod tests {
         assert!(html.contains("cal-day has-note selected\">21"), "{html}");
 
         let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
-        type_into(&mut dom, input, "today");
+        type_into(&mut dom, input, "open daily");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("cal-day has-note selected\">23"), "{html}");
+    }
+
+    #[test]
+    fn a_refused_flush_keeps_selects_own_note_open() {
+        // `select`'s own flush guard (adr/2026-08-sheet-reuses-the-one-editor.md):
+        // a save that cannot reach disk must not still swap the note out
+        // from under the buffer that holds the unsaved text
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        retype(&mut dom, sink, "= presque perdu\n");
+
+        lock_dir(&vault.path().join("time"), true);
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
+            "the refused flush held the selection: {html}"
+        );
+        assert!(html.contains("notice-critical"), "{html}");
+    }
+
+    // -- ctrl+d: the palette's daily command's chord, from both panes -------
+
+    #[test]
+    fn ctrl_d_opens_todays_daily_from_the_logs_pane() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">21"), "{html}");
+
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("d".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">23"), "{html}");
+    }
+
+    #[test]
+    fn ctrl_d_opens_todays_daily_from_the_table_pane() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        press(
+            &mut dom,
+            keys,
+            Key::Character("d".into()),
+            Modifiers::CONTROL,
+        );
+
+        // the round trip back to the logs pane is the only place the
+        // selection the chord moved is visible
+        click(&mut dom, clicks[CHROME_LOGS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">23"), "{html}");
+    }
+
+    #[test]
+    fn ctrl_d_does_nothing_while_the_palette_is_open() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">21"), "{html}");
+
+        open_palette(&mut dom, keys[LOGS_KEYS]);
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("d".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">21"), "{html}");
+    }
+
+    #[test]
+    fn opening_next_daily_over_a_sheet_flushes_and_closes_it() {
+        // the blocker this guards against: a time-navigation command whose
+        // target has to be created must not swap the editor out from under
+        // an open sheet the way a raw `editor.set` would — the sheet's own
+        // note must flush and the sheet must close, exactly as `select`
+        // already does for every other navigation
+        // (adr/2026-08-time-navigation-commands.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let (_, sink) = sheet_block_targets(&opened);
+        // typed but inside the quiet window: only a flush can save it
+        retype(&mut dom, sink, "= alpha presque perdu\n");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "open next daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        let saved =
+            std::fs::read_to_string(vault.path().join("permanent/alpha.typ"))
+                .expect("the note is readable");
+        assert!(
+            saved.contains("alpha presque perdu"),
+            "the sheet's edit flushed before the swap: {saved}"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains(r#"class="sheet""#),
+            "the sheet closed: {html}"
+        );
+        assert!(
+            vault.path().join("time/2026-07-24.typ").exists(),
+            "the daily note was created"
+        );
+    }
+
+    // -- the palette's other eight time-navigation commands ------------------
+    // (adr/2026-08-time-navigation-commands.md)
+
+    #[test]
+    fn previous_daily_skips_a_gap() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-10.typ"),
+            time_note("2026-07-10", "daily"),
+        )
+        .expect("seed an earlier daily note");
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open previous daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">10"),
+            "the nearest earlier daily note, skipping the notes-less \
+             stretch from 11 to 20: {html}"
+        );
+    }
+
+    #[test]
+    fn previous_daily_with_nothing_before_it_leaves_the_selection_untouched() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">21"), "{html}");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open previous daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">21"),
+            "no note precedes 21, so the selection holds: {html}"
+        );
+        assert!(
+            !vault.path().join("time/2026-07-20.typ").exists(),
+            "previous never writes"
+        );
+    }
+
+    #[test]
+    fn next_daily_selects_without_creating_when_the_target_already_exists() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open next daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "the day after 21 is already on disk: {html}"
+        );
+    }
+
+    #[test]
+    fn next_daily_creates_the_file_when_missing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_23]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open next daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            vault.path().join("time/2026-07-24.typ").exists(),
+            "next daily creates the missing file from the template"
+        );
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-07-24"),
+            "the editor opened the freshly created note: {}",
+            dioxus_ssr::render(&dom)
+        );
+    }
+
+    #[test]
+    fn previous_weekly_with_nothing_before_it_leaves_the_selection_untouched()
+    {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open previous weekly");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-07-23"),
+            "no weekly note precedes w30, so today's daily stays open: {}",
+            dioxus_ssr::render(&dom)
+        );
+        assert!(!vault.path().join("time/2026-w29.typ").exists());
+    }
+
+    #[test]
+    fn previous_season_with_nothing_before_it_leaves_the_selection_untouched()
+    {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open previous season");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-07-23"),
+            "no season note precedes summer, so today's daily stays open: {}",
+            dioxus_ssr::render(&dom)
+        );
+        assert!(!vault.path().join("time/2026-spring.typ").exists());
+    }
+
+    #[test]
+    fn next_daily_reports_a_create_failure_when_the_template_is_missing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        std::fs::remove_file(vault.path().join("templates/daily.typ"))
+            .expect("remove the template");
+        click(&mut dom, clicks[RAIL_DAY_23]);
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open next daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("notice-warning"), "{html}");
+        assert!(html.contains("UnknownTemplate"), "{html}");
+        assert!(!vault.path().join("time/2026-07-24.typ").exists());
+        // a refused creation must not move the selection onto a period
+        // with no note behind it (adr/2026-08-time-navigation-commands.md)
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
+            "the selection held: {html}"
+        );
+    }
+
+    #[test]
+    fn next_weekly_lands_on_the_right_id() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open next weekly");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            vault.path().join("time/2026-w31.typ").exists(),
+            "the week after w30, the Monday jiff computes"
+        );
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-w31"),
+            "the editor opened it: {}",
+            dioxus_ssr::render(&dom)
+        );
+    }
+
+    #[test]
+    fn next_season_lands_on_the_right_id() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open next season");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            vault.path().join("time/2026-autumn.typ").exists(),
+            "summer rolls into autumn"
+        );
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-autumn"),
+            "the editor opened it: {}",
+            dioxus_ssr::render(&dom)
+        );
+    }
+
+    #[test]
+    fn the_palette_open_weekly_lands_on_todays_week() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[GUTTER_W31]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no note for w31"), "{html}");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open weekly");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-w30"),
+            "today's own week, already on disk: {}",
+            dioxus_ssr::render(&dom)
+        );
+        assert!(
+            !vault.path().join("time/2026-w31.typ").exists(),
+            "open weekly does not create"
+        );
+    }
+
+    #[test]
+    fn the_palette_open_season_lands_on_todays_season() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[SEASON_AUTUMN]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no note for autumn 2026"), "{html}");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open season");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        assert!(
+            dioxus_ssr::render(&dom).contains("2026-summer"),
+            "today's own season, already on disk: {}",
+            dioxus_ssr::render(&dom)
+        );
+        assert!(
+            !vault.path().join("time/2026-autumn.typ").exists(),
+            "open season does not create"
+        );
     }
 
     #[test]
@@ -10056,7 +10821,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (block, keys) = activate_heading(&mut dom, &clicks);
-        place_caret(&mut dom, block, &hit, LINK_IN_HEADING);
+        place_caret(&mut dom, block, &hit, 4);
 
         let (_, palette_keys) = open_palette(&mut dom, keys);
         press(&mut dom, palette_keys, Key::Escape, Modifiers::empty());
@@ -10064,9 +10829,7 @@ mod tests {
         assert!(html.contains("block-active"), "still editing: {html}");
         // the caret is app state the palette never touched
         assert!(
-            html.contains(
-                r#"<div class="source-line"><span class="caret-box" data-start="13">"#
-            ),
+            html.contains(r#"class="caret-box" data-start="4""#),
             "{html}"
         );
     }
@@ -10104,8 +10867,9 @@ mod tests {
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
-        // two rows: previous month, next month
-        type_into(&mut dom, input, "month");
+        // three rows: open previous daily, open previous weekly, open
+        // previous season
+        type_into(&mut dom, input, "previous");
         let selected = |dom: &VirtualDom| {
             let html = dioxus_ssr::render(dom);
             html.split("palette-row selected")
@@ -10115,15 +10879,29 @@ mod tests {
                 .map(str::to_string)
                 .unwrap_or_else(|| panic!("no highlighted row: {html}"))
         };
-        assert_eq!(selected(&dom), "previous month", "the first row is lit");
+        assert_eq!(
+            selected(&dom),
+            "open previous daily",
+            "the first row is lit"
+        );
 
         press(&mut dom, palette_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, palette_keys, Key::ArrowDown, Modifiers::empty());
-        assert_eq!(selected(&dom), "next month", "the last row holds");
+        press(&mut dom, palette_keys, Key::ArrowDown, Modifiers::empty());
+        assert_eq!(
+            selected(&dom),
+            "open previous season",
+            "the last row holds"
+        );
 
         press(&mut dom, palette_keys, Key::ArrowUp, Modifiers::empty());
         press(&mut dom, palette_keys, Key::ArrowUp, Modifiers::empty());
-        assert_eq!(selected(&dom), "previous month", "the first one holds");
+        press(&mut dom, palette_keys, Key::ArrowUp, Modifiers::empty());
+        assert_eq!(
+            selected(&dom),
+            "open previous daily",
+            "the first one holds"
+        );
     }
 
     #[test]
@@ -10142,16 +10920,20 @@ mod tests {
             "the second chord left the open palette alone"
         );
 
-        // the theme chord works over the open palette, which stays up
+        // an unbound ctrl chord still bubbles out of the palette (it lives
+        // beside the panes, not inside one) instead of being swallowed;
+        // nothing claims it, so nothing changes and the palette stays up
         press(
             &mut dom,
             palette_keys,
-            Key::Character("t".into()),
+            Key::Character("z".into()),
             Modifiers::CONTROL,
         );
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"data-theme="light""#), "{html}");
-        assert!(html.contains("command-palette"), "still open: {html}");
+        assert_eq!(
+            palette_labels(&dom),
+            vec!["toggle theme"],
+            "the bubbled chord matched nothing"
+        );
 
         // and over an open link picker, Ctrl+P is inert
         let (mut dom, clicks, _, _) =
@@ -10258,7 +11040,7 @@ mod tests {
         // the sheet closed under it, the frozen command runs into nothing
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "arrange");
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         block_on(settle(&mut dom));
         let saved =
@@ -11383,9 +12165,9 @@ mod tests {
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "delete");
         assert_eq!(palette_labels(&dom), vec!["delete note"]);
-        // …then the sheet closes under it — the pane's escape, reached
+        // …then the sheet closes under it — the pane's shift+escape, reached
         // directly here, is the race the guard below defends against
-        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
         assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
         assert!(
             dioxus_ssr::render(&dom).contains("command-palette"),
@@ -12419,19 +13201,17 @@ mod tests {
     }
 
     /// The heading widget's targets. A note opens with its last block —
-    /// the fixture's heading — already active, so the old
-    /// click-to-activate is a bounce: activate the preamble, then click
-    /// the heading fragment back into a fresh widget, landing on the
-    /// exact state the pre-cursor tests started from.
+    /// the trailing empty line — already active
+    /// (adr/2026-08-cursor-always-in-the-note.md); the heading itself is
+    /// its own line-block now (adr/2026-08-per-line-block-segmentation.md)
+    /// and renders static from the initial mount, so its click listener
+    /// is already in the opening mutations — no bounce off the preamble
+    /// needed any more.
     fn activate_heading(
         dom: &mut VirtualDom,
         clicks: &[ElementId],
     ) -> (ElementId, ElementId) {
-        let bounced = click_for_mutations(dom, clicks[BLOCK_PREAMBLE]);
-        // the woken preamble widget carries no click listener, so the
-        // heading fragment's is the bounce's only one
-        let heading = listeners(&bounced, "click")[0];
-        activate_block(dom, heading)
+        activate_block(dom, clicks[BLOCK_HEADING])
     }
 
     /// The sheet's active widget targets: the sheet opens with the note's
@@ -12443,6 +13223,28 @@ mod tests {
             listeners(opened, "mousedown")[2],
             listeners(opened, "keydown")[0],
         )
+    }
+
+    /// Wakes the sheet's heading directly. Opening the sheet leaves the
+    /// note's own trailing empty line active
+    /// (adr/2026-08-cursor-always-in-the-note.md), so reaching the
+    /// heading now takes one more click on its own static fragment — the
+    /// sheet's third click listener, after the preamble and the blank
+    /// line (adr/2026-08-per-line-block-segmentation.md).
+    fn sheet_heading_targets(
+        dom: &mut VirtualDom,
+        opened: &Mutations,
+    ) -> (ElementId, ElementId) {
+        activate_block(dom, listeners(opened, "click")[2])
+    }
+
+    /// Like `sheet_heading_targets`, but for a note whose heading is
+    /// followed by a link line — the sheet's fourth click listener.
+    fn sheet_link_targets(
+        dom: &mut VirtualDom,
+        opened: &Mutations,
+    ) -> (ElementId, ElementId) {
+        activate_block(dom, listeners(opened, "click")[3])
     }
 
     /// Fires a wheel event with the given vertical pixel delta.

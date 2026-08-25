@@ -1,5 +1,7 @@
 # The palette's birth command list names every user-invocable command
 
+**Amended by `2026-08-ctrl-t-toggles-the-todo.md`** (the `ToggleTheme` row keeps its label but loses its `ctrl+t` chord — the theme is reached from the palette alone now) **and by `2026-08-time-navigation-commands.md`** (`GoToToday` is renamed `OpenDaily`; `PreviousMonth`/`NextMonth` are removed — those interactions stay the calendar widget's alone; `OpenDaily`/`PreviousDaily`/`NextDaily` and their weekly/season siblings are added). The table below is the v1-phase-0 birth snapshot; `src/palette.rs`'s registry and its own completeness test are the living source of truth.
+
 ## Context
 
 v1 phase 0 gives the app a Ctrl+P command palette

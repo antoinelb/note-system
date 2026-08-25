@@ -217,6 +217,22 @@ fn block_quotes_render_with_the_themes_muted_vertical_rule() {
     assert!(paper.contains("#8b87a0"), "the paper muted rule: {paper}");
 }
 
+#[test]
+fn inline_quotes_are_promoted_to_full_width_block_quotes() {
+    let note = vault().join("permanent/zettelkasten.typ");
+    let text = "#import \"/templates/template.typ\": *\n\
+                #show: note\n\
+                #quote(attribution: [Simone Weil])[Une idée importante.]\n";
+
+    let dark = render_svg(&vault(), &note, text, RenderTheme::Dark)
+        .expect("the dark quote renders");
+    assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
+
+    let paper = render_svg(&vault(), &note, text, RenderTheme::Paper)
+        .expect("the paper quote renders");
+    assert!(paper.contains("#8b87a0"), "the paper muted rule: {paper}");
+}
+
 // The cache tests instrument through the filesystem: deleting the template
 // makes recompilation impossible, so a successful render can only be a hit.
 
