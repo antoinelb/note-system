@@ -1,5 +1,7 @@
 # Visual mode rides phase 0's anchor
 
+**The drawing friction noted below is resolved by `adr/2026-08-visual-selection-drawn-across-lines.md`**: a selection crossing into a neighbouring block now draws there too. The grammar decisions here — the anchor, `Extend`, the operator span through `Editor::splice` — stand unchanged.
+
 ## Context
 
 v2 phase 4: see the span before choosing the verb.

@@ -255,6 +255,59 @@ fn push_caret(
     }
 }
 
+/// One line outside the active widget, drawn the same way `build_line`
+/// classifies a line's own text but with nothing else to draw: a covered
+/// block that is not the active one has no caret, no box, and no
+/// composition to preview, only bytes that either fall inside the
+/// note-global selection or don't
+/// (adr/2026-08-visual-selection-drawn-across-lines.md). `base` is where
+/// `text` sits in its block's own bytes — 0 for every block but the rare
+/// multi-line construct — added back into every piece's `start` so it stays
+/// block-relative like every other `Piece` the widget draws, never a line's
+/// own 0-based offset masquerading as one. `selected` is in that same
+/// block-relative space; it is clamped (and, if inverted, collapsed) into
+/// `text` rather than trusted, so a line the selection never reaches — or
+/// reaches only through a neighbouring line's own portion of the block —
+/// degrades to plain, unhighlighted text instead of panicking or drawing a
+/// stray highlight.
+pub fn layout_selected(
+    text: &str,
+    base: usize,
+    selected: Range<usize>,
+) -> Vec<Piece> {
+    let end = text.len();
+    let local_start = selected.start.saturating_sub(base).min(end);
+    let local_end = selected.end.saturating_sub(base).min(end);
+    let start = clamp_boundary(text, local_start);
+    let stop = clamp_boundary(text, local_end.clamp(start, end));
+    let mut cuts = vec![0, end];
+    for offset in [start, stop] {
+        if offset > 0 && offset < end {
+            cuts.push(offset);
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .map(|pair| {
+            let (piece_start, piece_end) = (pair[0], pair[1]);
+            let piece_text =
+                text.get(piece_start..piece_end).unwrap_or("").to_string();
+            if piece_start >= start && piece_end <= stop {
+                Piece::Selected {
+                    start: piece_start + base,
+                    text: piece_text,
+                }
+            } else {
+                Piece::Text {
+                    start: piece_start + base,
+                    text: piece_text,
+                }
+            }
+        })
+        .collect()
+}
+
 /// The byte before `at` where the previous grapheme cluster starts — the
 /// backspace and ArrowLeft step. Already at the start answers the start.
 pub fn prev_cluster(text: &str, at: usize) -> usize {
@@ -774,6 +827,107 @@ mod tests {
         assert_eq!(
             texts(&lines[0]),
             [("caret", String::new()), ("sel", "été".to_string()),]
+        );
+    }
+
+    // -- layout_selected: a non-active line's pieces ------------------------
+
+    #[test]
+    fn layout_selected_paints_a_fully_selected_line() {
+        let pieces = layout_selected("hello", 0, 0..5);
+        assert_eq!(
+            pieces,
+            vec![Piece::Selected {
+                start: 0,
+                text: "hello".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn layout_selected_paints_only_the_covered_slice() {
+        let pieces = layout_selected("hello world", 0, 6..11);
+        assert_eq!(
+            pieces,
+            vec![
+                Piece::Text {
+                    start: 0,
+                    text: "hello ".to_string(),
+                },
+                Piece::Selected {
+                    start: 6,
+                    text: "world".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_selected_paints_nothing_outside_the_line() {
+        // an inverted or out-of-range sub-range — the shape a neighbouring
+        // line's own portion of a multi-line block collapses to — degrades
+        // to plain text rather than a stray highlight
+        let (five, two) = (5, 2);
+        for selected in [20..30, five..two, 0..0] {
+            let pieces = layout_selected("hello", 0, selected.clone());
+            assert_eq!(
+                pieces,
+                vec![Piece::Text {
+                    start: 0,
+                    text: "hello".to_string(),
+                }],
+                "{selected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_selected_clamps_multibyte_boundaries() {
+        // "été" selected from byte 1 (mid-é) onward floors back to 0
+        let pieces = layout_selected("été", 0, 1..5);
+        assert_eq!(
+            pieces,
+            vec![Piece::Selected {
+                start: 0,
+                text: "été".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn layout_selected_keeps_pieces_block_relative_through_a_base_offset() {
+        // "cd", the block's second physical line, sits at bytes 3..5; a
+        // block-relative selection of 3..4 covers only its first cluster —
+        // proof the piece's own `start` comes back out block-relative, not
+        // the line's own 0-based one
+        let pieces = layout_selected("cd", 3, 3..4);
+        assert_eq!(
+            pieces,
+            vec![
+                Piece::Selected {
+                    start: 3,
+                    text: "c".to_string(),
+                },
+                Piece::Text {
+                    start: 4,
+                    text: "d".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_selected_with_a_base_still_degrades_outside_the_line() {
+        // the block's first line ("ab", bytes 0..2) checked against a
+        // selection that only covers its second line (3..5): the base
+        // subtraction alone must not manufacture a highlight
+        let pieces = layout_selected("ab", 0, 3..5);
+        assert_eq!(
+            pieces,
+            vec![Piece::Text {
+                start: 0,
+                text: "ab".to_string(),
+            }]
         );
     }
 

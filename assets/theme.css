@@ -6,6 +6,17 @@
  * (adr/2026-07-theme-attribute-on-app-root.md).
  */
 
+/* the one prose size, read by the editor's textarea and by the block rules
+   below alike, and mirrored into template.typ as a compile input — the
+   source line and the rendered SVG are drawn from the same number instead
+   of two that happen to agree (adr/2026-08-one-font-size-for-source-and-render.md).
+   The `.logs` pane overrides this with the current signal's value; the
+   `:root` value is only what a theme-only preview (no Shell mounted) sees. */
+:root {
+  --prose-size: 18px;
+  --prose-leading: 1.5;
+}
+
 .app {
   --bg: #0d0b18;
   --border: #2a2545;
@@ -236,7 +247,20 @@ body {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+  /* the type no longer shrinks to fit a narrow pane (below); a window
+     narrower than the reading column scrolls sideways instead
+     (adr/2026-08-one-font-size-for-source-and-render.md) */
+  overflow-x: auto;
   padding: 24px 32px;
+}
+
+/* the reading column: the compiled page's own width (14cm ≈ 529px,
+   template.typ § note()), centred in whatever room `.centre` has — the
+   source line and the rendered SVG agree at every window width instead of
+   the render shrinking to fit (adr/2026-08-one-font-size-for-source-and-render.md) */
+.centre-column {
+  max-width: 529px;
+  margin: 0 auto;
 }
 
 .crumbs {
@@ -264,8 +288,11 @@ body {
   /* block, not inline: an inline svg carries a baseline gap that would
      open up between stacked fragments */
   display: block;
-  max-width: 100%;
-  height: auto;
+  /* intrinsic size: the compiled page is already the reading column's
+     width, so scaling it to fit is what broke parity with the editor's
+     fixed-size textarea (adr/2026-08-one-font-size-for-source-and-render.md,
+     rejected by adr/2026-07-reading-scale-bumped.md for the same reason) */
+  max-width: none;
 }
 
 /* -- the hybrid editor: the active block is raw source in the alert hue,
@@ -288,9 +315,11 @@ body {
   color: var(--ink-bright);
   /* the source wears the prose face so entering a block is not a costume
      change (adr/2026-07-reading-scale-bumped.md,
-     adr/2026-08-cormorant-garamond-replaces-parisienne.md) */
-  font: 18px "Cormorant Garamond", serif;
-  line-height: 1.5;
+     adr/2026-08-cormorant-garamond-replaces-parisienne.md); the size is the
+     one token every prose face reads
+     (adr/2026-08-one-font-size-for-source-and-render.md) */
+  font: var(--prose-size) "Cormorant Garamond", serif;
+  line-height: var(--prose-leading);
   /* the app draws caret and selection itself; the webview must not paint
      its own over a drag (adr/2026-08-caret-on-editor-note-bytes.md) */
   white-space: pre-wrap;
@@ -306,8 +335,8 @@ body {
   margin: 4px 0;
   padding: 8px;
   color: var(--ink-muted);
-  font: 18px "Cormorant Garamond", serif;
-  line-height: 1.5;
+  font: var(--prose-size) "Cormorant Garamond", serif;
+  line-height: var(--prose-leading);
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
@@ -318,9 +347,24 @@ body {
   height: 100%;
 }
 
+/* a block the visual selection reaches past the active line: raw source,
+   highlighted where covered, same typography as .block-active and
+   .block-pending .pending-source so a line entering or leaving the
+   selection never shifts anything below it
+   (adr/2026-08-visual-selection-drawn-across-lines.md) */
+.block-selected .selected-source {
+  margin: 4px 0;
+  padding: 8px;
+  color: var(--ink-bright);
+  font: var(--prose-size) "Cormorant Garamond", serif;
+  line-height: var(--prose-leading);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 /* an empty line still occupies its line box, so the caret can rest on it */
 .source-line {
-  min-height: 27px;
+  min-height: calc(var(--prose-size) * var(--prose-leading));
 }
 
 /* an inactive blank block: the same line box as .source-line, inside the
@@ -328,7 +372,7 @@ body {
    or not — the caret entering or leaving it must not shift every line
    below */
 .block-blank {
-  min-height: 27px;
+  min-height: calc(var(--prose-size) * var(--prose-leading));
   margin: 4px 0;
   padding: 8px;
 }
@@ -453,14 +497,12 @@ body {
   padding: 4px 0;
 }
 
-/* the ember's destination (adr/2026-08-loops-list-overlay.md): the picker's
-   bordered box, the captured block's line idiom. A destination, not a
-   workspace — nothing here is clickable */
-.loops-list {
-  margin: 8px 0;
-  border: 1px solid var(--border);
-  padding: 8px;
-}
+/* the ember's destination (adr/2026-08-loops-list-overlay.md): wears
+   `.command-palette` for the floating box itself, so it opens over either
+   screen (adr/2026-08-palette-order-and-overlay-placement.md) with no
+   position/size declaration repeated here — the settings overlay reuses the
+   same class the same way. A destination, not a workspace — a click
+   anywhere in it, like an Escape, only closes it */
 
 .loops-head {
   color: var(--ink-faint);
@@ -515,6 +557,39 @@ body {
 .palette-chord {
   font-size: 14px;
   color: var(--ink-faint);
+}
+
+/* the settings overlay (adr/2026-08-settings-overlay.md): the palette's
+   own box, holding the app's first buttons — the theme toggle and the
+   font-size stepper */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font: 16px Lato, sans-serif;
+  color: var(--ink-muted);
+  padding: 8px 0;
+}
+
+.settings-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-row button {
+  font: 16px Lato, sans-serif;
+  color: var(--ink-bright);
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  cursor: pointer;
 }
 
 /* the captured block's idiom: the footer belongs to the note the same way */

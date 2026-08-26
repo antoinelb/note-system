@@ -228,6 +228,7 @@ pub fn rescan(root: &Path, escalated: bool) -> Job {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::render::DEFAULT_SIZE;
 
     fn fixture_vault() -> PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -383,12 +384,13 @@ mod tests {
     /// interface.
     fn fragment_job(vault: &Path) -> Job {
         let note = vault.join("permanent/zettelkasten.typ");
-        let crate::render::FragmentView::Pending(Some(job)) =
+        let crate::render::FragmentView::Pending { job: Some(job), .. } =
             crate::render::FragmentCache::default().probe(
                 vault,
                 &note,
                 "= titre\n",
-                RenderTheme::Paper,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                crate::render::Side::Above,
             )
         else {
             panic!("a fresh cache queues the compile");
@@ -401,7 +403,7 @@ mod tests {
             crate::render::BodyCache::default().probe(
                 vault,
                 Path::new("permanent/zettelkasten.typ"),
-                RenderTheme::Paper,
+                RenderTheme::Paper(DEFAULT_SIZE),
             )
         else {
             panic!("a fresh cache queues the compile");

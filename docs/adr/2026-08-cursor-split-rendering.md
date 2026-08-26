@@ -1,0 +1,39 @@
+# Rendering splits at the cursor into two fragments, not one per line
+
+## Context
+
+A short survey of how live-preview editors keep source and rendered views in sync around the cursor, one line each:
+
+- **Emacs org-mode / org-appear** — the whole buffer renders in place via text-property overlays; only the element the point sits in un-renders back to raw markup.
+- **Emacs preview.el (AUCTeX)** — LaTeX previews are inline overlay images over the buffer itself; the source at point is always plain text underneath.
+- **VS Code LaTeX Workshop** — a separate PDF pane, kept in sync with the editor by SyncTeX position mapping in both directions.
+- **VS Code Markdown preview** — a separate webview pane; the source is parsed to an AST, mapped to DOM line numbers, and the two scroll in sync.
+- **Obsidian Live Preview (CodeMirror 6)** — decorations render the whole document; a selection touching a syntactic node un-renders only that node back to markdown.
+- **Typora** — same family as Obsidian: inline rendering with the active paragraph reverting to source.
+- **TeXpresso** — a separate rendered pane fed by an incrementally recompiling backend keyed to cursor position, not a shared buffer.
+- **Xcode Markup / Jupyter rendered markdown cells** — a whole rendered region reverts to raw source only when the cell/comment gains focus, one unit at a time.
+
+Two families fall out of this: **(a)** a fully separate view kept in sync with the source (LaTeX Workshop, VS Code Markdown preview, TeXpresso), and **(b)** inline reveal of the smallest syntactic unit under the cursor, in the same buffer as everything else (org-appear, Obsidian Live Preview, Typora, preview.el). No surveyed tool merges many lines of rendered output into a small, fixed number of large regions — the split is either "one pane, one document" or "the one node at point."
+
+This app is already family (b), just at line granularity: `adr/2026-08-per-line-block-segmentation.md` made every physical line its own block, the active line's block renders as a `<textarea>` (`adr/2026-07-hybrid-active-block-textarea.md`), and every other line block compiles to its own Typst fragment (`adr/2026-07-block-segmentation-parbreak-tiling.md`, then `src/blocks.rs`, `block_panes` in `src/ui.rs`). That per-line compile has a real, measured cost — "~29 ms per compile out-of-process," one `FragmentCache` entry and one off-thread job per physical line (`adr/2026-08-per-line-block-segmentation.md`'s "Known ceilings"; the async landing itself is `adr/2026-08-async-caches-pending-stale.md` over the seam in `adr/2026-08-compute-tier-worker-seam.md`) — and it fragments every multi-line construct that survives segmentation as a single block (a list run, a raw fence) into visually disconnected pieces that never regain their shared nesting, because each renders under its own bare fragment preamble with nothing above or below it.
+
+## Decision
+
+Rendering splits at the cursor, not at every line boundary: **everything strictly above the active line compiles as one Typst fragment, everything strictly below compiles as a second Typst fragment, and the active line alone stays the raw `<textarea>`** — three regions total, not one per block.
+
+This supersedes only the *rendering* half of `adr/2026-08-per-line-block-segmentation.md`. `blocks::segment` itself is unchanged: a block is still one physical line (or the parse-tree-decided multi-line construct, or the folded preamble run), and `blocks::block_at`/`resize` still name and resize lines exactly as before — `dd`, `ip`/`ap`, and every motion keep their per-line meaning. What changes is only which blocks a compile groups together for rendering: the per-line `FragmentCache` entry and its per-line compile job are retired in favour of two region-level fragments, each spanning from a line boundary to the active line's edge.
+
+Blank lines keep real vertical space in both the above- and below-cursor regions, including a blank line immediately adjacent to the active line. A run of consecutive blank blocks would otherwise collapse to a single Typst parbreak, so each blank block contributes an explicit `#v(1.5em)` spacer to its region's source instead of its empty slice — not an empty paragraph, which is exactly what collapses — so the cursor moving past it does not shrink or reflow the layout around it. Every non-blank block keeps its full range (content plus separator) verbatim, so a multi-line list run compiles as one list rather than one item per spacer-separated fragment.
+
+## Rejected
+
+- **Per-line fragments (status quo)** — compile and cache cost multiply one-for-one with line count, and a line inside a nested list, compiled alone under the bare fragment preamble, has no ancestor list markers to inherit, so nesting cannot render at all; the two-region model fixes this for free because every line above or below the cursor compiles alongside its real neighbours.
+- **A wholly separate rendered pane (family (a): LaTeX Workshop, VS Code Markdown preview, TeXpresso)** — the hybrid single-pane model, source and rendered output sharing one column, is the point of this app; introducing a second pane and a sync mechanism (SyncTeX-style position mapping) throws that away for a problem the cursor split already solves.
+- **Per-syntactic-element reveal (family (b) at Obsidian/org-appear granularity)** — un-rendering exactly the node the selection touches needs a decoration engine mapping source ranges to live DOM/overlay regions; this app has no such layer, and building one is a far larger project than two compiled fragments either side of a line.
+
+## Consequences
+
+- The split boundary is the active line, so it moves every time the cursor changes line — both the above- and below-cursor fragments recompile on every such move, where before only the two blocks adjacent to the caret's old and new position needed a fresh compile. No performance work is planned for this; the compute-tier seam (`adr/2026-08-compute-tier-worker-seam.md`) and the pending/stale cache behaviour (`adr/2026-08-async-caches-pending-stale.md`) already keep a slow compile off the UI thread, and revisiting for speed is deferred until it is felt.
+- Nested lists and other multi-line constructs regain their real Typst nesting inside a region, because every line above (or below) the cursor compiles together as one document fragment again — a list item's ancestry is whatever precedes it in the same region.
+- Consecutive non-blank blocks are joined by their own single separator newline, verbatim, and Typst's markup mode treats one bare newline as no break at all: `bonjour\nau revoir` and `bonjour` alone compile to the same paragraph height (verified: both `93.476870079pt`). Two blocks that were always two independent one-line paragraphs under the per-line model — each compiled alone, each therefore its own visual line — now fold into a single flowing paragraph that wraps and reflows as neighbouring text changes. The repo's one-sentence-per-line convention (CLAUDE.md) is a source-authoring rule, not a rendering guarantee, and this ADR did not say so up front: the rendered region's line breaks now depend on paragraph wrapping, not on the source's own line breaks, and shift as the active line (and so the region's own content) moves.
+- **Known ceiling**: when the caret sits inside a nested list run, the run itself is still cut in two, at the cursor, between the above- and below-cursor fragments. Each half compiles without the other, so a list item just below the cursor still cannot see the list markers that establish its nesting depth above it. This is the same cross-fragment-state ceiling `adr/2026-08-per-line-block-segmentation.md` already accepted for `#let` bindings, now also true of list nesting at exactly one boundary — the line the cursor is on — rather than at every line boundary as before.

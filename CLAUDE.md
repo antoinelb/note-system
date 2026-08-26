@@ -27,7 +27,7 @@ Every decision taken from now on is documented in its own file under `docs/adr/`
 Rust throughout — reasoning preserved in the ADRs:
 
 - **UI**: Dioxus 0.7 desktop. **Whenever Dioxus code is written or understood, first read `.claude/dioxus.md`** (Dioxus 0.7 API reference): 0.7 changed every API — `cx`, `Scope`, and `use_state` are gone; use `use_signal`, `#[component]`, `rsx!`, `Routable`, `use_resource`.
-- **Rendering**: the typst compiler embedded as a Rust crate — compile note → SVG, cache per note, invalidate on edit.
+- **Rendering**: the typst compiler embedded as a Rust crate — compile note → SVG, cache per note, invalidate on edit. The editor's view splits at the cursor: everything above the active line compiles as one Typst fragment, everything below as a second, and the active line alone stays the raw `<textarea>` — two region-level fragments, not one per line (`adr/2026-08-cursor-split-rendering.md`).
 - **Index**: SQLite under `vault/.index/` (links, tags, positions, suggestions), rebuilt by parsing files, kept live by a file watcher.
 - **Parsing**: extracting `#meta` and `#l` calls uses the `typst-syntax` crate — a real parse, never regex.
 
@@ -39,6 +39,8 @@ Rust throughout — reasoning preserved in the ADRs:
 - **Canvas positions are user data disguised as index data** — they must survive index rebuilds.
 - **Strict buffer/widget separation in the editor**, so the v2 vim modal layer can be inserted without a rewrite. Insert mode is the phase-0 writing flow: the grammar owns only Escape and Tab there, and what closes a pair or continues a list marker as you type belongs to the editor, not the grammar (`adr/2026-08-autopairs-in-the-typing-path.md`, `adr/2026-08-tab-indents-in-every-mode.md`).
 - Note **type is a `#meta` field, not a directory**: directories encode only the four categories (`permanent/`, `time/`, `capture/`, `generated/`); the index, not the filesystem, is the authority for querying by type.
+- **A block is still one physical line**, unchanged by the cursor-split rendering above: `blocks::segment` names the block map, and `dd`, `ip`/`ap`, and every motion still act on one line at a time. Only which blocks a compile groups together for *rendering* changed — never what a block *is* (`adr/2026-08-cursor-split-rendering.md`, `adr/2026-08-per-line-block-segmentation.md`).
+- **Deleting a note is unconfirmed and trashless**, from the palette's "delete note" row over an open sheet or immediately via Ctrl+Shift+D (guarded to a sheet already being open) — no confirmation dialog either path (`adr/2026-07-delete-unconfirmed-no-trash.md`, `adr/2026-08-delete-note-chord.md`).
 
 ## Roadmap
 
@@ -54,6 +56,8 @@ All spacing should use multiples of 4 and be coherent — that is UI pixels; one
 
 All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`adr/2026-07-repo-language-english.md`).
 **No colour literal appears outside `assets/theme.css`** — every colour is a custom property, and both themes (dark `:root`, light `:root[data-theme="light"]`) are filled in together (`adr/2026-07-design-language-own-phase.md`).
+
+One `--prose-size` token drives both the editor's textarea and the rendered SVG's type scale — no separate size for source and render (`adr/2026-08-one-font-size-for-source-and-render.md`). A settings overlay (Ctrl+,) holds the only controls that move it, alongside a theme toggle; both are session-only, with no persistence file (`adr/2026-08-settings-overlay.md`).
 
 ## Other instructions
 

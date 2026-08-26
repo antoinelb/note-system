@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use note_system::render::{
-    BodyCache, FragmentCache, RenderError, RenderTheme, VaultWorld, render_svg,
+    BodyCache, DEFAULT_SIZE, FragmentCache, RenderError, RenderTheme, Side,
+    VaultWorld, render_svg,
 };
 use typst::World;
 use typst::diag::FileError;
@@ -30,7 +31,7 @@ fn the_note_text_comes_from_memory_not_from_disk() {
         &vault(),
         &vault().join("permanent/zettelkasten.typ"),
         "#import \"/templates/template.typ\": *\n= Unsaved\n".to_string(),
-        RenderTheme::Paper,
+        RenderTheme::Paper(DEFAULT_SIZE),
     )
     .expect("a path inside the vault virtualizes");
 
@@ -87,8 +88,13 @@ fn a_package_root_is_refused_without_touching_the_filesystem() {
 fn a_note_outside_the_vault_is_refused_at_construction() {
     let outside = Path::new("/etc/passwd");
     assert!(
-        VaultWorld::new(&vault(), outside, String::new(), RenderTheme::Paper)
-            .is_err()
+        VaultWorld::new(
+            &vault(),
+            outside,
+            String::new(),
+            RenderTheme::Paper(DEFAULT_SIZE)
+        )
+        .is_err()
     );
 }
 
@@ -98,7 +104,7 @@ fn a_dangling_import_surfaces_as_a_compilation_error() {
         &vault(),
         &vault().join("permanent/probe.typ"),
         "#import \"/templates/absente.typ\": *\n".to_string(),
-        RenderTheme::Paper,
+        RenderTheme::Paper(DEFAULT_SIZE),
     )
     .expect("a path inside the vault virtualizes");
 
@@ -131,8 +137,9 @@ fn a_valid_note_renders_to_svg_markup() {
     let text =
         std::fs::read_to_string(&note).expect("the fixture note is readable");
 
-    let svg = render_svg(&vault(), &note, &text, RenderTheme::Paper)
-        .expect("the fixture note renders");
+    let svg =
+        render_svg(&vault(), &note, &text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the fixture note renders");
     assert!(svg.starts_with("<svg"), "{}", &svg[..svg.len().min(80)]);
     assert!(svg.ends_with("</svg>"), "{}", &svg[svg.len() - 80..]);
 }
@@ -141,20 +148,28 @@ fn a_valid_note_renders_to_svg_markup() {
 fn a_note_that_does_not_compile_reports_its_diagnostics() {
     // an unclosed delimiter: guaranteed to fail parsing, not just evaluation
     let note = vault().join("permanent/casse.typ");
-    let messages =
-        match render_svg(&vault(), &note, "#let x = (", RenderTheme::Paper) {
-            Err(RenderError::Compile(messages)) => messages,
-            other => panic!("expected compile diagnostics, got {other:?}"),
-        };
+    let messages = match render_svg(
+        &vault(),
+        &note,
+        "#let x = (",
+        RenderTheme::Paper(DEFAULT_SIZE),
+    ) {
+        Err(RenderError::Compile(messages)) => messages,
+        other => panic!("expected compile diagnostics, got {other:?}"),
+    };
     assert!(!messages.is_empty());
     assert!(!messages[0].is_empty(), "a diagnostic carries its message");
 }
 
 #[test]
 fn a_note_outside_the_vault_is_a_path_error_not_a_compile_error() {
-    let error =
-        render_svg(&vault(), Path::new("/etc/passwd"), "", RenderTheme::Paper)
-            .unwrap_err();
+    let error = render_svg(
+        &vault(),
+        Path::new("/etc/passwd"),
+        "",
+        RenderTheme::Paper(DEFAULT_SIZE),
+    )
+    .unwrap_err();
     assert!(matches!(error, RenderError::Path(_)), "{error:?}");
 }
 
@@ -166,20 +181,60 @@ fn the_theme_input_picks_the_templates_palette_column() {
     let text =
         std::fs::read_to_string(&note).expect("the fixture note is readable");
 
-    let paper = render_svg(&vault(), &note, &text, RenderTheme::Paper)
-        .expect("the paper column renders");
+    let paper =
+        render_svg(&vault(), &note, &text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the paper column renders");
     assert!(paper.contains("#ffffff"), "paper keeps the white page");
     assert!(paper.contains("#45415a"), "and the light-column ink");
 
-    let dark = render_svg(&vault(), &note, &text, RenderTheme::Dark)
-        .expect("the dark column renders");
+    let dark =
+        render_svg(&vault(), &note, &text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the dark column renders");
     assert!(!dark.contains("#ffffff"), "no white anywhere (design § 4a)");
     assert!(dark.contains("#c9c4dd"), "the dark-column ink");
 
-    let light = render_svg(&vault(), &note, &text, RenderTheme::Light)
-        .expect("the light column renders");
+    let light =
+        render_svg(&vault(), &note, &text, RenderTheme::Light(DEFAULT_SIZE))
+            .expect("the light column renders");
     assert!(!light.contains("#ffffff"), "transparent page in-app");
     assert!(light.contains("#45415a"), "the light-column ink");
+}
+
+#[test]
+fn the_size_input_scales_the_rendered_type() {
+    // one signal drives both faces (adr/2026-08-one-font-size-for-source-and-render.md):
+    // a bigger size must render taller text, not just change colour inputs.
+    // The page width is fixed (14cm in template.typ), so its auto height
+    // is what grows with the type.
+    let note = vault().join("permanent/zettelkasten.typ");
+    let text = "#import \"/templates/template.typ\": *\n\
+                #show: note\nbonjour le monde\n";
+
+    let default =
+        render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the default size renders");
+    let bigger = render_svg(&vault(), &note, text, RenderTheme::Paper(30))
+        .expect("a bigger size renders");
+
+    assert_ne!(default, bigger, "a different size must change the output");
+    assert!(
+        svg_height_pt(&bigger) > svg_height_pt(&default),
+        "default {default}\nbigger {bigger}"
+    );
+}
+
+/// The `height="…pt"` attribute `typst_svg::svg_merged` writes on the root
+/// `<svg>` element.
+fn svg_height_pt(svg: &str) -> f64 {
+    let start = svg
+        .find(r#"height=""#)
+        .expect("an svg has a height attribute")
+        + r#"height=""#.len();
+    let rest = &svg[start..];
+    let end = rest.find("pt").expect("the height attribute is in points");
+    rest[..end]
+        .parse()
+        .expect("the height attribute is a number")
 }
 
 #[test]
@@ -191,12 +246,14 @@ fn checklist_items_render_as_task_circles() {
     let text = "#import \"/templates/template.typ\": *\n\
                 #show: note\n- [ ] ouvert\n\n- [x] fait\n";
 
-    let dark = render_svg(&vault(), &note, text, RenderTheme::Dark)
-        .expect("the checklist renders");
+    let dark =
+        render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the checklist renders");
     assert!(dark.contains("#6fb08c"), "the dark done circle: {dark}");
 
-    let paper = render_svg(&vault(), &note, text, RenderTheme::Paper)
-        .expect("the checklist renders on paper too");
+    let paper =
+        render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the checklist renders on paper too");
     assert!(paper.contains("#4a8a6a"), "the paper done circle");
 }
 
@@ -208,12 +265,14 @@ fn block_quotes_render_with_the_themes_muted_vertical_rule() {
                 #quote(block: true, attribution: [Simone Weil])\
                 [Une idée importante.]\n";
 
-    let dark = render_svg(&vault(), &note, text, RenderTheme::Dark)
-        .expect("the dark quote renders");
+    let dark =
+        render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the dark quote renders");
     assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
 
-    let paper = render_svg(&vault(), &note, text, RenderTheme::Paper)
-        .expect("the paper quote renders");
+    let paper =
+        render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the paper quote renders");
     assert!(paper.contains("#8b87a0"), "the paper muted rule: {paper}");
 }
 
@@ -224,12 +283,14 @@ fn inline_quotes_are_promoted_to_full_width_block_quotes() {
                 #show: note\n\
                 #quote(attribution: [Simone Weil])[Une idée importante.]\n";
 
-    let dark = render_svg(&vault(), &note, text, RenderTheme::Dark)
-        .expect("the dark quote renders");
+    let dark =
+        render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the dark quote renders");
     assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
 
-    let paper = render_svg(&vault(), &note, text, RenderTheme::Paper)
-        .expect("the paper quote renders");
+    let paper =
+        render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the paper quote renders");
     assert!(paper.contains("#8b87a0"), "the paper muted rule: {paper}");
 }
 
@@ -243,7 +304,13 @@ fn a_fragment_hit_serves_the_svg_without_recompiling() {
     let mut cache = FragmentCache::default();
 
     let first = cache
-        .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            &note,
+            NOTE_A,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect("the first render compiles");
     assert!(
         first.starts_with("<svg"),
@@ -252,7 +319,13 @@ fn a_fragment_hit_serves_the_svg_without_recompiling() {
     );
     remove_template(&vault);
     let second = cache
-        .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            &note,
+            NOTE_A,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect("a hit must not recompile");
     assert_eq!(first, second);
 }
@@ -265,7 +338,13 @@ fn a_fragment_error_is_cached_until_swept() {
 
     remove_template(&vault);
     let error = cache
-        .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            &note,
+            NOTE_A,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect_err("the template is gone");
     assert!(error.contains("file not found"), "{error}");
 
@@ -274,13 +353,25 @@ fn a_fragment_error_is_cached_until_swept() {
     restore_template(&vault);
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_err()
     );
     cache.sweep();
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_err()
     );
 
@@ -290,7 +381,13 @@ fn a_fragment_error_is_cached_until_swept() {
     cache.sweep();
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_ok()
     );
 }
@@ -302,11 +399,23 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
     let mut cache = FragmentCache::default();
 
     cache
-        .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            &note,
+            NOTE_A,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect("A compiles");
     cache.sweep();
     cache
-        .render(vault.path(), &note, NOTE_B, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            &note,
+            NOTE_B,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect("B compiles");
     cache.sweep();
     remove_template(&vault);
@@ -314,12 +423,24 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
     // B survived its generation's sweep; A was evicted by B's sweep
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_B, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_B,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_ok()
     );
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_A, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_err()
     );
 }
@@ -332,19 +453,37 @@ fn fragments_are_keyed_by_note_path_as_well_as_source() {
     let mut cache = FragmentCache::default();
 
     cache
-        .render(vault.path(), &a, NOTE_A, RenderTheme::Paper)
+        .render(
+            vault.path(),
+            &a,
+            NOTE_A,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect("a compiles");
     remove_template(&vault);
 
     // same source under another path is a distinct fragment, not a hit
     assert!(
         cache
-            .render(vault.path(), &a, NOTE_A, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &a,
+                NOTE_A,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_ok()
     );
     assert!(
         cache
-            .render(vault.path(), &b, NOTE_A, RenderTheme::Paper)
+            .render(
+                vault.path(),
+                &b,
+                NOTE_A,
+                RenderTheme::Paper(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_err()
     );
 }
@@ -356,19 +495,82 @@ fn fragments_are_keyed_by_theme_too() {
     let mut cache = FragmentCache::default();
 
     cache
-        .render(vault.path(), &note, NOTE_A, RenderTheme::Dark)
+        .render(
+            vault.path(),
+            &note,
+            NOTE_A,
+            RenderTheme::Dark(DEFAULT_SIZE),
+            Side::Above,
+        )
         .expect("the dark render compiles");
     remove_template(&vault);
 
     // the same source in another theme is a distinct entry, not a hit
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_A, RenderTheme::Dark)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Dark(DEFAULT_SIZE),
+                Side::Above
+            )
             .is_ok()
     );
     assert!(
         cache
-            .render(vault.path(), &note, NOTE_A, RenderTheme::Light)
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Light(DEFAULT_SIZE),
+                Side::Above
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn fragments_are_keyed_by_size_too() {
+    // the size travels inside `RenderTheme`, so it rides the same `Hash`
+    // the cache keys on — a size change must miss exactly like a theme
+    // change does (adr/2026-08-one-font-size-for-source-and-render.md)
+    let vault = temp_vault();
+    let note = vault.path().join("permanent/a.typ");
+    let mut cache = FragmentCache::default();
+
+    cache
+        .render(
+            vault.path(),
+            &note,
+            NOTE_A,
+            RenderTheme::Dark(DEFAULT_SIZE),
+            Side::Above,
+        )
+        .expect("the default-size render compiles");
+    remove_template(&vault);
+
+    // the same source and theme at another size is a distinct entry
+    assert!(
+        cache
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Dark(DEFAULT_SIZE),
+                Side::Above
+            )
+            .is_ok()
+    );
+    assert!(
+        cache
+            .render(
+                vault.path(),
+                &note,
+                NOTE_A,
+                RenderTheme::Dark(30),
+                Side::Above
+            )
             .is_err()
     );
 }
@@ -383,7 +585,8 @@ fn a_fragment_outside_the_vault_reports_the_path_error() {
             vault.path(),
             Path::new("/etc/passwd"),
             NOTE_A,
-            RenderTheme::Paper,
+            RenderTheme::Paper(DEFAULT_SIZE),
+            Side::Above,
         )
         .expect_err("a note outside the vault cannot virtualize");
     assert!(!error.is_empty());
@@ -401,7 +604,7 @@ fn a_body_hit_serves_the_svg_without_recompiling_or_rereading() {
     let note = Path::new("permanent/a.typ");
 
     let first = cache
-        .render(vault.path(), note, RenderTheme::Paper)
+        .render(vault.path(), note, RenderTheme::Paper(DEFAULT_SIZE))
         .expect("the first render reads and compiles");
     assert!(
         first.starts_with("<svg"),
@@ -413,7 +616,7 @@ fn a_body_hit_serves_the_svg_without_recompiling_or_rereading() {
     std::fs::remove_file(vault.path().join("permanent/a.typ"))
         .expect("the note is removed");
     let second = cache
-        .render(vault.path(), note, RenderTheme::Paper)
+        .render(vault.path(), note, RenderTheme::Paper(DEFAULT_SIZE))
         .expect("a hit must not reread or recompile");
     assert_eq!(first, second);
 }
@@ -426,22 +629,37 @@ fn invalidate_drops_both_theme_columns_of_the_one_note() {
     let mut cache = BodyCache::default();
     let a = Path::new("permanent/a.typ");
     let b = Path::new("permanent/b.typ");
-    for theme in [RenderTheme::Dark, RenderTheme::Light] {
+    for theme in [
+        RenderTheme::Dark(DEFAULT_SIZE),
+        RenderTheme::Light(DEFAULT_SIZE),
+    ] {
         cache
             .render(vault.path(), a, theme)
             .expect("a compiles in both themes");
     }
     cache
-        .render(vault.path(), b, RenderTheme::Dark)
+        .render(vault.path(), b, RenderTheme::Dark(DEFAULT_SIZE))
         .expect("b compiles");
 
     remove_template(&vault);
     cache.invalidate(a);
     // both of a's columns recompile — and fail, the template being gone —
     // while b's untouched entry still answers
-    assert!(cache.render(vault.path(), a, RenderTheme::Dark).is_err());
-    assert!(cache.render(vault.path(), a, RenderTheme::Light).is_err());
-    assert!(cache.render(vault.path(), b, RenderTheme::Dark).is_ok());
+    assert!(
+        cache
+            .render(vault.path(), a, RenderTheme::Dark(DEFAULT_SIZE))
+            .is_err()
+    );
+    assert!(
+        cache
+            .render(vault.path(), a, RenderTheme::Light(DEFAULT_SIZE))
+            .is_err()
+    );
+    assert!(
+        cache
+            .render(vault.path(), b, RenderTheme::Dark(DEFAULT_SIZE))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -451,13 +669,15 @@ fn clear_empties_the_whole_cache() {
     let mut cache = BodyCache::default();
     let a = Path::new("permanent/a.typ");
     cache
-        .render(vault.path(), a, RenderTheme::Paper)
+        .render(vault.path(), a, RenderTheme::Paper(DEFAULT_SIZE))
         .expect("a compiles");
 
     remove_template(&vault);
     cache.clear();
     assert!(
-        cache.render(vault.path(), a, RenderTheme::Paper).is_err(),
+        cache
+            .render(vault.path(), a, RenderTheme::Paper(DEFAULT_SIZE))
+            .is_err(),
         "a rescan's clear forgets every entry"
     );
 }
@@ -469,7 +689,7 @@ fn an_unreadable_note_caches_its_error_until_invalidated() {
     let note = Path::new("permanent/absent.typ");
 
     let error = cache
-        .render(vault.path(), note, RenderTheme::Paper)
+        .render(vault.path(), note, RenderTheme::Paper(DEFAULT_SIZE))
         .expect_err("nothing to read");
     assert!(error.starts_with("body:"), "{error}");
 
@@ -478,11 +698,15 @@ fn an_unreadable_note_caches_its_error_until_invalidated() {
     write_note(&vault, "absent", NOTE_A);
     assert!(
         cache
-            .render(vault.path(), note, RenderTheme::Paper)
+            .render(vault.path(), note, RenderTheme::Paper(DEFAULT_SIZE))
             .is_err()
     );
     cache.invalidate(note);
-    assert!(cache.render(vault.path(), note, RenderTheme::Paper).is_ok());
+    assert!(
+        cache
+            .render(vault.path(), note, RenderTheme::Paper(DEFAULT_SIZE))
+            .is_ok()
+    );
 }
 
 fn write_note(vault: &tempfile::TempDir, id: &str, text: &str) {
@@ -522,7 +746,7 @@ fn world_for(relative: &str) -> VaultWorld {
     let note = vault().join(relative);
     let text = std::fs::read_to_string(&note)
         .unwrap_or_else(|e| panic!("cannot read fixture {note:?}: {e}"));
-    VaultWorld::new(&vault(), &note, text, RenderTheme::Paper)
+    VaultWorld::new(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
         .expect("a fixture path inside the vault virtualizes")
 }
 
@@ -544,4 +768,141 @@ fn file_id(virtual_path: &str) -> FileId {
 
 fn vault() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault")
+}
+
+#[test]
+fn nested_checklist_items_render_indented() {
+    // a nested `- [ ]` is not wrapped in a child list by typst — it lands
+    // as a further `list.item` sibling trailing the label in the same
+    // body sequence, so template.typ splits it off and indents it by 1em
+    // (adr/2026-08-nested-checklist-indentation.md). The offset is the
+    // point, so this walks the SVG's own transform stack instead of
+    // asserting on colour.
+    let note = vault().join("permanent/zettelkasten.typ");
+    // one Rust string segment for the whole checklist: a `\` line
+    // continuation strips all of the next physical line's leading
+    // whitespace, which would destroy the markdown nesting indent below
+    let text = "#import \"/templates/template.typ\": *\n\
+                #show: note\n- [ ] top\n  - [ ] nested one\n  - [ ] nested two\n- [x] top two\n";
+    let svg =
+        render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the nested checklist renders");
+
+    let offsets = checkbox_circle_x_offsets(&svg);
+    assert_eq!(
+        offsets.len(),
+        4,
+        "two top-level circles and two nested ones: {offsets:?}"
+    );
+    let (top1, nested1, nested2, top2) =
+        (offsets[0], offsets[1], offsets[2], offsets[3]);
+
+    assert!(
+        (top1 - top2).abs() < 0.5,
+        "the two top-level circles share one indent: {offsets:?}"
+    );
+    assert!(
+        (nested1 - nested2).abs() < 0.5,
+        "the two nested circles share one indent: {offsets:?}"
+    );
+    assert!(
+        nested1 > top1 + 1.0,
+        "nested circles should sit strictly right of the top-level ones: {offsets:?}"
+    );
+}
+
+#[test]
+fn a_done_parent_does_not_strike_an_open_nested_child() {
+    // strike() runs on the parent's own label only; the trailing
+    // list.item children are spliced back in afterwards, so a done
+    // parent must not mute or strike an open nested child
+    // (adr/2026-08-nested-checklist-indentation.md)
+    let note = vault().join("permanent/zettelkasten.typ");
+    let text = "#import \"/templates/template.typ\": *\n\
+                #show: note\n- [x] top\n  - [ ] nested\n";
+    let svg =
+        render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("renders");
+
+    let offsets = checkbox_circle_x_offsets(&svg);
+    assert_eq!(
+        offsets.len(),
+        2,
+        "one parent circle, one nested one: {offsets:?}"
+    );
+    assert!(
+        offsets[1] > offsets[0] + 1.0,
+        "the open child still indents under the done parent: {offsets:?}"
+    );
+
+    let body = svg.split("<defs").next().unwrap_or(&svg);
+    let strike_lines = body.matches("d=\"M 0 0h").count();
+    assert_eq!(
+        strike_lines, 1,
+        "only the done parent's label is struck, not the open child: {body}"
+    );
+}
+
+/// Walks the merged SVG's `<g transform="translate(...)">` stack — the
+/// content before `<defs>`, where glyph outlines live and would otherwise
+/// be mistaken for circles — and returns the cumulative x offset of every
+/// checkbox circle path, in document order. `check()` in template.typ
+/// always emits a `d` starting `M 0 0m` for both the open and done
+/// variants, while a strike-through rule starts `M 0 0h`, so the two are
+/// never conflated.
+fn checkbox_circle_x_offsets(svg: &str) -> Vec<f64> {
+    let body = svg.split("<defs").next().unwrap_or(svg);
+    let mut stack = vec![(0.0_f64, 0.0_f64)];
+    let mut offsets = Vec::new();
+    for piece in body.split('<').skip(1) {
+        let Some(end) = piece.find('>') else {
+            continue;
+        };
+        let tag = &piece[..end];
+        if tag.starts_with('/') {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+            continue;
+        }
+        let self_closing = tag.trim_end().ends_with('/');
+        let tag_body = tag.trim_end().trim_end_matches('/');
+        let mut parts = tag_body.splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or("");
+        let attrs = parts.next().unwrap_or("");
+        let (parent_x, parent_y) = *stack.last().unwrap_or(&(0.0, 0.0));
+        let (dx, dy) = translate_offset(attrs);
+        let (x, y) = (parent_x + dx, parent_y + dy);
+        if name == "path" && attrs.contains("d=\"M 0 0m") {
+            offsets.push(x);
+        }
+        if !self_closing {
+            stack.push((x, y));
+        }
+    }
+    offsets
+}
+
+/// The `(x, y)` translation out of a `transform="translate(x [y])"`
+/// attribute, or `(0.0, 0.0)` for any other transform (a text run's
+/// `matrix(..)`) or none at all — this test only follows indentation
+/// carried by `translate`, which is all `block(inset: ..)` ever emits.
+fn translate_offset(attrs: &str) -> (f64, f64) {
+    let Some(start) = attrs
+        .find("transform=\"translate(")
+        .map(|i| i + "transform=\"translate(".len())
+    else {
+        return (0.0, 0.0);
+    };
+    let Some(rel_end) = attrs[start..].find(')') else {
+        return (0.0, 0.0);
+    };
+    let nums: Vec<f64> = attrs[start..start + rel_end]
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    (
+        nums.first().copied().unwrap_or(0.0),
+        nums.get(1).copied().unwrap_or(0.0),
+    )
 }

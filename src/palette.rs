@@ -12,7 +12,7 @@
 pub enum CommandId {
     ToggleTheme,
     Quit,
-    CaptureClipboard,
+    Back,
     InsertLink,
     FollowLink,
     OpenLoops,
@@ -39,6 +39,7 @@ pub enum CommandId {
     ArrangeCluster,
     Undo,
     EditTemplate,
+    OpenSettings,
 }
 
 /// One palette row: the plain English name a command is found by, and the
@@ -52,30 +53,36 @@ pub struct Command {
 
 /// The birth command list (`adr/2026-08-palette-birth-command-list.md`)
 /// plus the v1 phase-2 screen commands
-/// (`adr/2026-08-screen-switch-gesture.md`), in the order the palette shows
-/// it.
-pub const COMMANDS: [Command; 29] = [
-    // ctrl+t went to the todo toggle (adr/2026-08-ctrl-t-toggles-the-todo.md);
-    // toggling the theme is now found only by name
+/// (`adr/2026-08-screen-switch-gesture.md`), alphabetized by label
+/// (`adr/2026-08-palette-order-and-overlay-placement.md`) — the order the
+/// palette shows it in.
+pub const COMMANDS: [Command; 30] = [
+    // chordless: layout is rare and deliberate — "at most a command"
+    // (adr/2026-08-arrange-cluster-command.md)
     Command {
-        id: CommandId::ToggleTheme,
-        label: "toggle theme",
+        id: CommandId::ArrangeCluster,
+        label: "arrange cluster",
+        chord: None,
+    },
+    // unconfirmed, undoable: the sheet-open guard and the shift modifier
+    // are what make a delete chord acceptable
+    // (adr/2026-08-delete-note-chord.md)
+    Command {
+        id: CommandId::DeleteNote,
+        label: "delete note",
+        chord: None,
+    },
+    // chordless: reshaping what every future note looks like is rare and
+    // deliberate (adr/2026-08-template-editing-in-the-one-editor.md)
+    Command {
+        id: CommandId::EditTemplate,
+        label: "edit template",
         chord: None,
     },
     Command {
-        id: CommandId::Quit,
-        label: "quit",
-        chord: Some("ctrl+q"),
-    },
-    Command {
-        id: CommandId::CaptureClipboard,
-        label: "capture clipboard",
-        chord: Some("ctrl+shift+v"),
-    },
-    Command {
-        id: CommandId::InsertLink,
-        label: "insert link",
-        chord: Some("ctrl+l"),
+        id: CommandId::FilterCards,
+        label: "filter cards",
+        chord: Some("ctrl+f"),
     },
     Command {
         id: CommandId::FollowLink,
@@ -83,54 +90,9 @@ pub const COMMANDS: [Command; 29] = [
         chord: Some("ctrl+enter"),
     },
     Command {
-        id: CommandId::OpenLoops,
-        label: "open loops",
-        chord: None,
-    },
-    Command {
-        id: CommandId::OpenDaily,
-        label: "open daily",
-        chord: Some("ctrl+d"),
-    },
-    Command {
-        id: CommandId::PreviousDaily,
-        label: "open previous daily",
-        chord: None,
-    },
-    Command {
-        id: CommandId::NextDaily,
-        label: "open next daily",
-        chord: None,
-    },
-    Command {
-        id: CommandId::OpenWeekly,
-        label: "open weekly",
-        chord: None,
-    },
-    Command {
-        id: CommandId::PreviousWeekly,
-        label: "open previous weekly",
-        chord: None,
-    },
-    Command {
-        id: CommandId::NextWeekly,
-        label: "open next weekly",
-        chord: None,
-    },
-    Command {
-        id: CommandId::OpenSeason,
-        label: "open season",
-        chord: None,
-    },
-    Command {
-        id: CommandId::PreviousSeason,
-        label: "open previous season",
-        chord: None,
-    },
-    Command {
-        id: CommandId::NextSeason,
-        label: "open next season",
-        chord: None,
+        id: CommandId::GoToLogs,
+        label: "go to logs",
+        chord: Some("ctrl+2"),
     },
     Command {
         id: CommandId::GoToTable,
@@ -138,28 +100,14 @@ pub const COMMANDS: [Command; 29] = [
         chord: Some("ctrl+1"),
     },
     Command {
-        id: CommandId::GoToLogs,
-        label: "go to logs",
-        chord: Some("ctrl+2"),
+        id: CommandId::InsertLink,
+        label: "insert link",
+        chord: Some("ctrl+l"),
     },
     Command {
-        id: CommandId::NewNote,
-        label: "new note",
-        chord: Some("ctrl+n"),
-    },
-    // deliberately chordless: destruction earns a summon-and-name, never a
-    // keystroke (adr/2026-08-delete-note-palette-only-from-sheet.md)
-    Command {
-        id: CommandId::DeleteNote,
-        label: "delete note",
-        chord: None,
-    },
-    // the status history: everything the notice line ever showed
-    // (adr/2026-08-status-surface-owns-notices.md)
-    Command {
-        id: CommandId::Notices,
-        label: "notices",
-        chord: None,
+        id: CommandId::JumpToNote,
+        label: "jump to note",
+        chord: Some("ctrl+o"),
     },
     // the conflict's fork, chordless like delete: picking a side between
     // two authors earns a summon-and-name
@@ -170,35 +118,96 @@ pub const COMMANDS: [Command; 29] = [
         chord: None,
     },
     Command {
+        id: CommandId::NewNote,
+        label: "new note",
+        chord: Some("ctrl+n"),
+    },
+    // the status history: everything the notice line ever showed
+    // (adr/2026-08-status-surface-owns-notices.md)
+    Command {
+        id: CommandId::Notices,
+        label: "notices",
+        chord: None,
+    },
+    Command {
+        id: CommandId::OpenDaily,
+        label: "open daily",
+        chord: Some("ctrl+d"),
+    },
+    Command {
+        id: CommandId::OpenLoops,
+        label: "open loops",
+        chord: None,
+    },
+    Command {
+        id: CommandId::NextDaily,
+        label: "open next daily",
+        chord: None,
+    },
+    Command {
+        id: CommandId::NextSeason,
+        label: "open next season",
+        chord: None,
+    },
+    Command {
+        id: CommandId::NextWeekly,
+        label: "open next weekly",
+        chord: None,
+    },
+    Command {
+        id: CommandId::PreviousDaily,
+        label: "open previous daily",
+        chord: None,
+    },
+    Command {
+        id: CommandId::PreviousSeason,
+        label: "open previous season",
+        chord: None,
+    },
+    Command {
+        id: CommandId::PreviousWeekly,
+        label: "open previous weekly",
+        chord: None,
+    },
+    Command {
+        id: CommandId::OpenSeason,
+        label: "open season",
+        chord: None,
+    },
+    Command {
+        id: CommandId::OpenWeekly,
+        label: "open weekly",
+        chord: None,
+    },
+    Command {
+        id: CommandId::Quit,
+        label: "quit",
+        chord: Some("ctrl+q"),
+    },
+    // the visit log's picker, Obsidian's Ctrl+O-style switcher
+    // (adr/2026-08-ctrl-b-recent-notes-picker.md)
+    Command {
+        id: CommandId::Back,
+        label: "recent notes",
+        chord: Some("ctrl+b"),
+    },
+    // the theme toggle and font-size stepper, session-only
+    // (adr/2026-08-settings-overlay.md)
+    Command {
+        id: CommandId::OpenSettings,
+        label: "settings",
+        chord: Some("ctrl+,"),
+    },
+    Command {
         id: CommandId::TakeDisk,
         label: "take disk",
         chord: None,
     },
+    // ctrl+t went to the todo toggle (adr/2026-08-ctrl-t-toggles-the-todo.md);
+    // toggling the theme is now found only by name
     Command {
-        id: CommandId::ZoomToBodies,
-        label: "zoom to bodies",
-        chord: Some("ctrl+="),
-    },
-    Command {
-        id: CommandId::ZoomToTitles,
-        label: "zoom to titles",
-        chord: Some("ctrl+-"),
-    },
-    Command {
-        id: CommandId::FilterCards,
-        label: "filter cards",
-        chord: Some("ctrl+f"),
-    },
-    Command {
-        id: CommandId::JumpToNote,
-        label: "jump to note",
-        chord: Some("ctrl+o"),
-    },
-    // chordless: layout is rare and deliberate — "at most a command"
-    // (adr/2026-08-arrange-cluster-command.md)
-    Command {
-        id: CommandId::ArrangeCluster,
-        label: "arrange cluster",
+        id: CommandId::ToggleTheme,
+        label: "toggle theme",
         chord: None,
     },
     // found by "undo"; the rendered row wears the register's own words
@@ -210,12 +219,15 @@ pub const COMMANDS: [Command; 29] = [
         label: "undo",
         chord: None,
     },
-    // chordless: reshaping what every future note looks like is rare and
-    // deliberate (adr/2026-08-template-editing-in-the-one-editor.md)
     Command {
-        id: CommandId::EditTemplate,
-        label: "edit template",
-        chord: None,
+        id: CommandId::ZoomToBodies,
+        label: "zoom to bodies",
+        chord: Some("ctrl+="),
+    },
+    Command {
+        id: CommandId::ZoomToTitles,
+        label: "zoom to titles",
+        chord: Some("ctrl+-"),
     },
 ];
 
@@ -351,7 +363,7 @@ mod tests {
         assert_eq!(labels(&filter("theme", EDITING)), vec!["toggle theme"]);
         assert_eq!(
             labels(&filter("WEEKLY", EDITING)),
-            vec!["open weekly", "open previous weekly", "open next weekly"]
+            vec!["open next weekly", "open previous weekly", "open weekly"]
         );
         assert_eq!(filter("xyzzy", EDITING), Vec::<&Command>::new());
     }
@@ -362,25 +374,25 @@ mod tests {
             labels(&filter("previous", READING)),
             vec![
                 "open previous daily",
-                "open previous weekly",
-                "open previous season"
+                "open previous season",
+                "open previous weekly"
             ]
         );
         assert_eq!(
             labels(&filter("next", READING)),
-            vec!["open next daily", "open next weekly", "open next season"]
+            vec!["open next daily", "open next season", "open next weekly"]
         );
         assert_eq!(
             labels(&filter("daily", READING)),
-            vec!["open daily", "open previous daily", "open next daily"]
+            vec!["open daily", "open next daily", "open previous daily"]
         );
         assert_eq!(
             labels(&filter("weekly", READING)),
-            vec!["open weekly", "open previous weekly", "open next weekly"]
+            vec!["open next weekly", "open previous weekly", "open weekly"]
         );
         assert_eq!(
             labels(&filter("season", READING)),
-            vec!["open season", "open previous season", "open next season"]
+            vec!["open next season", "open previous season", "open season"]
         );
     }
 
@@ -514,9 +526,24 @@ mod tests {
         assert!(!on_table.contains(&"go to table"));
     }
 
+    /// The palette lists every command alphabetically by label, not in
+    /// registration order (`adr/2026-08-palette-order-and-overlay-placement.md`).
+    #[test]
+    fn the_registry_is_alphabetized_by_label() {
+        let labels: Vec<&str> = COMMANDS.iter().map(|c| c.label).collect();
+        let mut sorted = labels.clone();
+        sorted.sort_unstable();
+        assert_eq!(labels, sorted, "the registry must stay alphabetical");
+    }
+
     /// The completeness audit the roadmap demands: the registry against the
     /// chords the app answers. A new chord must touch this list — and its
-    /// palette entry — in the same change.
+    /// palette entry — in the same change. Two documented exceptions answer
+    /// to no `CommandId` at all, buffer-level like Ctrl+L: Ctrl+T
+    /// (`adr/2026-08-ctrl-t-toggles-the-todo.md`) and Ctrl+Shift+D
+    /// (`adr/2026-08-delete-note-chord.md`) — the chord and the palette's
+    /// "delete note" row both reach `delete_note`, but only the row goes
+    /// through this registry.
     #[test]
     fn the_registered_set_matches_the_apps_chords() {
         let chords: Vec<&str> = COMMANDS
@@ -526,18 +553,19 @@ mod tests {
         assert_eq!(
             chords,
             vec![
-                "ctrl+q",
-                "ctrl+shift+v",
-                "ctrl+l",
+                "ctrl+f",
                 "ctrl+enter",
-                "ctrl+d",
-                "ctrl+1",
                 "ctrl+2",
+                "ctrl+1",
+                "ctrl+l",
+                "ctrl+o",
                 "ctrl+n",
+                "ctrl+d",
+                "ctrl+q",
+                "ctrl+b",
+                "ctrl+,",
                 "ctrl+=",
                 "ctrl+-",
-                "ctrl+f",
-                "ctrl+o",
             ]
         );
         let chordless: Vec<&str> = COMMANDS
@@ -548,23 +576,23 @@ mod tests {
         assert_eq!(
             chordless,
             vec![
-                "toggle theme",
-                "open loops",
-                "open previous daily",
-                "open next daily",
-                "open weekly",
-                "open previous weekly",
-                "open next weekly",
-                "open season",
-                "open previous season",
-                "open next season",
-                "delete note",
-                "notices",
-                "keep mine",
-                "take disk",
                 "arrange cluster",
-                "undo",
-                "edit template"
+                "delete note",
+                "edit template",
+                "keep mine",
+                "notices",
+                "open loops",
+                "open next daily",
+                "open next season",
+                "open next weekly",
+                "open previous daily",
+                "open previous season",
+                "open previous weekly",
+                "open season",
+                "open weekly",
+                "take disk",
+                "toggle theme",
+                "undo"
             ]
         );
         let mut names: Vec<&str> =

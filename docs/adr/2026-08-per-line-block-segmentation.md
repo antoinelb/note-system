@@ -1,5 +1,7 @@
 # Blocks are one per physical line; multi-line constructs and the preamble run merge honestly
 
+**The rendering half is superseded by `adr/2026-08-cursor-split-rendering.md`**: fragments now compile as two cursor-split regions, not one per block; `blocks::segment` itself, and everything below about what a block *is*, stands unchanged.
+
 ## Context
 
 `2026-07-block-segmentation-parbreak-tiling.md` cut blocks at top-level `Parbreak` nodes — a block was a maximal run of markup between blank lines, so a heading, a two-line list, or a paragraph all rode as one editable unit.

@@ -1,5 +1,7 @@
 # The reading scale bumps one step and the editor wears the prose face
 
+**Refined by `adr/2026-08-one-font-size-for-source-and-render.md`**: the 18px/13.5pt numbers chosen here stand, but the parity was only apparent — the rendered SVG silently scaled with the window while the textarea did not, so they agreed on paper and disagreed on screen. That ADR stops the SVG from scaling and threads one `--prose-size` token through both faces instead.
+
 ## Context
 
 First real writing sessions in the hybrid editor found the frozen type

@@ -1,5 +1,7 @@
 # Delete is a palette command over the open sheet
 
+**Superseded in part by `adr/2026-08-delete-note-chord.md`**: the "no chord" call below is reversed — Ctrl+Shift+D now deletes the sheet's note directly. The palette-only path, the unconfirmed/no-trash stance, and everything else here stand unchanged.
+
 ## Context
 
 Phase 4 extends `adr/2026-07-delete-unconfirmed-no-trash.md` to permanent notes: unconfirmed, no trash.

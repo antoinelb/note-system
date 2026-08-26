@@ -1,5 +1,7 @@
 # `- [ ]` and `- [x]` render as task circles
 
+**Extended by `adr/2026-08-nested-checklist-indentation.md`**: the matching rule here never accounted for nesting, so a nested `- [ ]` rendered with no indentation and a done parent struck its open children along with itself. That ADR splits the label from any trailing nested `list.item`s so each level indents and strikes independently; the bracket-matching rule itself is unchanged.
+
 ## Context
 
 The daily template seeds a Tasks section with `- [ ]`, the Obsidian habit
