@@ -91,6 +91,17 @@ pub enum Motion {
     WordForward,
     WordBack,
     WordEnd,
+    /// W B E: the same three over WORDs, which fold punctuation into the
+    /// word class (adr/2026-08-word-motions-add-their-big-siblings.md).
+    BigWordForward,
+    BigWordBack,
+    BigWordEnd,
+    /// ge gE: backward to the previous word's end.
+    WordEndBack,
+    BigWordEndBack,
+    /// %: the bracket matching the one at or after the caret
+    /// (adr/2026-08-percent-matches-vims-default-pairs.md).
+    MatchPair,
     LineStart,
     FirstNonBlank,
     LineEnd,
@@ -144,18 +155,35 @@ pub fn motion(
             Some(vertical(text, lines, row, at, count, goal, false))
         }
         Motion::Up => Some(vertical(text, lines, row, at, count, goal, true)),
-        Motion::WordForward => {
+        Motion::WordForward | Motion::BigWordForward => {
+            let big = motion == Motion::BigWordForward;
             let target =
-                (0..count).fold(at, |from, _| word_forward(text, from));
+                (0..count).fold(at, |from, _| word_forward(text, from, big));
             Some((settle(text, lines, target), None))
         }
-        Motion::WordBack => {
-            let target = (0..count).fold(at, |from, _| word_back(text, from));
+        Motion::WordBack | Motion::BigWordBack => {
+            let big = motion == Motion::BigWordBack;
+            let target =
+                (0..count).fold(at, |from, _| word_back(text, from, big));
             Some((target, None))
         }
-        Motion::WordEnd => {
-            let target = (0..count).fold(at, |from, _| word_end(text, from));
+        Motion::WordEnd | Motion::BigWordEnd => {
+            let big = motion == Motion::BigWordEnd;
+            let target =
+                (0..count).fold(at, |from, _| word_end(text, from, big));
             Some((target, None))
+        }
+        Motion::WordEndBack | Motion::BigWordEndBack => {
+            let big = motion == Motion::BigWordEndBack;
+            let target =
+                (0..count).fold(at, |from, _| word_end_back(text, from, big));
+            Some((target, None))
+        }
+        // vim's [count]% means "go to N% of the file", which a note has no
+        // use for: the count is spent and ignored
+        // (adr/2026-08-percent-matches-vims-default-pairs.md)
+        Motion::MatchPair => {
+            match_pair(text, &line, at).map(|hit| (hit, None))
         }
         Motion::LineStart => Some((line.start, None)),
         Motion::FirstNonBlank => Some((first_non_blank(text, &line), None)),
@@ -279,28 +307,30 @@ enum Class {
     Blank,
 }
 
-fn class(ch: char) -> Class {
+fn class(ch: char, big: bool) -> Class {
     if ch.is_whitespace() {
         Class::Blank
-    } else if ch.is_alphanumeric() || ch == '_' {
+    } else if big || ch.is_alphanumeric() || ch == '_' {
         Class::Word
     } else {
         Class::Punct
     }
 }
 
-/// w: the start of the next word — past the current run, over the blanks.
-fn word_forward(text: &str, at: usize) -> usize {
+/// w and W: the start of the next word — past the current run, over the
+/// blanks. `big` is the whole difference between the two
+/// (adr/2026-08-word-motions-add-their-big-siblings.md).
+fn word_forward(text: &str, at: usize, big: bool) -> usize {
     let Some(first) = text.get(at..).and_then(|rest| rest.chars().next())
     else {
         return at;
     };
-    let start_class = class(first);
+    let start_class = class(first, big);
     let run_end = text
         .get(at..)
         .and_then(|rest| {
             rest.char_indices()
-                .find(|(_, ch)| class(*ch) != start_class)
+                .find(|(_, ch)| class(*ch, big) != start_class)
                 .map(|(offset, _)| at + offset)
         })
         .unwrap_or(text.len());
@@ -310,7 +340,7 @@ fn word_forward(text: &str, at: usize) -> usize {
     text.get(run_end..)
         .and_then(|rest| {
             rest.char_indices()
-                .find(|(_, ch)| class(*ch) != Class::Blank)
+                .find(|(_, ch)| class(*ch, big) != Class::Blank)
                 .map(|(offset, _)| run_end + offset)
         })
         .unwrap_or(text.len())
@@ -318,13 +348,13 @@ fn word_forward(text: &str, at: usize) -> usize {
 
 /// b: the start of the current word, or of the one before when already on
 /// a start — one cluster back, over the blanks, then to the run's head.
-fn word_back(text: &str, at: usize) -> usize {
+fn word_back(text: &str, at: usize, big: bool) -> usize {
     let from = caret::prev_cluster(text, at);
     let scan = text.get(..caret::next_cluster(text, from)).unwrap_or("");
     scan.char_indices()
         .rev()
         .scan(None, |run, (offset, ch)| {
-            let current = class(ch);
+            let current = class(ch, big);
             match run {
                 None if current == Class::Blank => Some(None),
                 None => {
@@ -340,15 +370,15 @@ fn word_back(text: &str, at: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// e: the last cluster of the current or next word — one cluster forward,
-/// over the blanks, then to the run's tail.
-fn word_end(text: &str, at: usize) -> usize {
+/// e and E: the last cluster of the current or next word — one cluster
+/// forward, over the blanks, then to the run's tail.
+fn word_end(text: &str, at: usize, big: bool) -> usize {
     let from = caret::next_cluster(text, at);
     let start = text
         .get(from..)
         .and_then(|rest| {
             rest.char_indices()
-                .find(|(_, ch)| class(*ch) != Class::Blank)
+                .find(|(_, ch)| class(*ch, big) != Class::Blank)
                 .map(|(offset, _)| from + offset)
         })
         .unwrap_or(text.len());
@@ -357,16 +387,42 @@ fn word_end(text: &str, at: usize) -> usize {
         // nothing ahead: the motion fails in place, as vim's e does
         return at;
     };
-    let run_class = class(first);
+    let run_class = class(first, big);
     let run_end = text
         .get(start..)
         .and_then(|rest| {
             rest.char_indices()
-                .find(|(_, ch)| class(*ch) != run_class)
+                .find(|(_, ch)| class(*ch, big) != run_class)
                 .map(|(offset, _)| start + offset)
         })
         .unwrap_or(text.len());
     caret::prev_cluster(text, run_end)
+}
+
+/// ge and gE: the last cluster of the *previous* word. Spelled as the
+/// predicate rather than as word_end's mirror — a word end is any non-blank
+/// whose next character belongs to another class (or ends the note), so the
+/// nearest one behind the caret is the landing, and the "am I still inside
+/// my own run" case falls out instead of needing its own branch.
+fn word_end_back(text: &str, at: usize, big: bool) -> usize {
+    text.get(..at)
+        .unwrap_or_default()
+        .char_indices()
+        .rev()
+        .find(|(offset, ch)| {
+            let here = class(*ch, big);
+            here != Class::Blank
+                && text
+                    .get(offset + ch.len_utf8()..)
+                    .and_then(|rest| rest.chars().next())
+                    .is_none_or(|next| class(next, big) != here)
+        })
+        // the run's final *char* may sit inside a cluster (a combining
+        // accent); the caret rests on cluster starts, as word_end settles too
+        .map(|(offset, ch)| caret::prev_cluster(text, offset + ch.len_utf8()))
+        // nothing behind: the motion fails onto the note's start, as vim's
+        // ge does at the first word
+        .unwrap_or(0)
 }
 
 /// f F t T: the count'th occurrence on the caret's line, landed on or
@@ -412,6 +468,74 @@ fn find(
     }
 }
 
+/// The pairs % walks: vim's own default `matchpairs`, plus the guillemets a
+/// French vault types. `<>` stays out — in prose a bare `<` is a comparison
+/// far more often than a Typst label, and a % that lands somewhere wrong is
+/// worse than one that does nothing
+/// (adr/2026-08-percent-matches-vims-default-pairs.md).
+const PAIRS: [(char, char); 4] =
+    [('(', ')'), ('[', ']'), ('{', '}'), ('«', '»')];
+
+/// %: from the first pair character at or after the caret *on its own line*
+/// — vim's rule — to the one that matches it, counting nesting of that same
+/// pair. The search for the partner is note-global, so a multi-line
+/// `#table(…)` matches across the lines it spans. `None` when the line
+/// carries no bracket at all, or when nothing closes the one it does.
+fn match_pair(text: &str, line: &Range<usize>, at: usize) -> Option<usize> {
+    // line comes from the table over this same text and `at` rests on a
+    // cluster, so both slices always answer
+    let slice = text.get(line.clone()).unwrap_or_default();
+    let from = at.saturating_sub(line.start).min(slice.len());
+    let (offset, bracket, (open, close, forward)) = slice
+        .get(from..)
+        .unwrap_or_default()
+        .char_indices()
+        .find_map(|(offset, ch)| pair_of(ch).map(|pair| (offset, ch, pair)))?;
+    let start = line.start + from + offset;
+    if forward {
+        let after = start + bracket.len_utf8();
+        text.get(after..)
+            .unwrap_or_default()
+            .char_indices()
+            .scan(1i32, |depth, (offset, ch)| {
+                *depth += nesting(ch, open, close);
+                Some((after + offset, *depth))
+            })
+            .find(|(_, depth)| *depth == 0)
+            .map(|(hit, _)| hit)
+    } else {
+        text.get(..start)
+            .unwrap_or_default()
+            .char_indices()
+            .rev()
+            .scan(1i32, |depth, (offset, ch)| {
+                *depth -= nesting(ch, open, close);
+                Some((offset, *depth))
+            })
+            .find(|(_, depth)| *depth == 0)
+            .map(|(hit, _)| hit)
+    }
+}
+
+/// Which pair a character belongs to, and whether it opens it.
+fn pair_of(ch: char) -> Option<(char, char, bool)> {
+    PAIRS.iter().find_map(|&(open, close)| match ch {
+        _ if ch == open => Some((open, close, true)),
+        _ if ch == close => Some((open, close, false)),
+        _ => None,
+    })
+}
+
+/// How one character moves the nesting depth of the pair being matched,
+/// counted in the opener's direction; the backward scan subtracts it.
+fn nesting(ch: char, open: char, close: char) -> i32 {
+    match ch {
+        _ if ch == open => 1,
+        _ if ch == close => -1,
+        _ => 0,
+    }
+}
+
 /// A linewise span over rows `first..=last`: whole lines, each trailing
 /// newline included only when it is block content — the newline after a
 /// block's final line is the separator's, and deleting up to it leaves the
@@ -439,6 +563,9 @@ pub fn linewise_span(
 pub enum ObjectKind {
     /// iw aw: the run of same-class clusters around the caret.
     Word,
+    /// iW aW: the same run with punctuation folded in
+    /// (adr/2026-08-word-motions-add-their-big-siblings.md).
+    BigWord,
     /// i" a" and the sibling quotes: a same-character pair on the line.
     Quote(char),
     /// i( a) and the sibling pairs: a nested pair inside the block.
@@ -462,9 +589,13 @@ pub fn object(
     let block = blocks.get(crate::blocks::block_at(blocks, at))?;
     let content = block.content();
     match kind {
-        ObjectKind::Word => {
-            word_object(text, &Lines::of(text, blocks).around(at), at, around)
-        }
+        ObjectKind::Word | ObjectKind::BigWord => word_object(
+            text,
+            &Lines::of(text, blocks).around(at),
+            at,
+            around,
+            kind == ObjectKind::BigWord,
+        ),
         ObjectKind::Quote(quote) => quote_object(
             text,
             &Lines::of(text, blocks).around(at),
@@ -516,17 +647,19 @@ pub fn surround_spans(
                     ..content.start + close + close_ch.len_utf8(),
             ))
         }
-        ObjectKind::Word | ObjectKind::Block => None,
+        ObjectKind::Word | ObjectKind::BigWord | ObjectKind::Block => None,
     }
 }
 
-/// iw / aw: the same-class run under the caret, widened by its trailing
-/// (else leading) blanks for `around`. Line-scoped, as vim's word is.
+/// iw / aw and their iW / aW siblings: the same-class run under the caret,
+/// widened by its trailing (else leading) blanks for `around`. Line-scoped,
+/// as vim's word is.
 fn word_object(
     text: &str,
     line: &Range<usize>,
     at: usize,
     around: bool,
+    big: bool,
 ) -> Option<Range<usize>> {
     let slice = text.get(line.clone()).unwrap_or_default();
     if slice.is_empty() {
@@ -543,25 +676,25 @@ fn word_object(
     let wanted = slice[anchor..]
         .chars()
         .next()
-        .map(class)
+        .map(|ch| class(ch, big))
         .unwrap_or(Class::Blank);
     let start = slice[..anchor]
         .char_indices()
         .rev()
-        .take_while(|(_, ch)| class(*ch) == wanted)
+        .take_while(|(_, ch)| class(*ch, big) == wanted)
         .last()
         .map(|(offset, _)| offset)
         .unwrap_or(anchor);
     let end = slice[anchor..]
         .char_indices()
-        .find(|(_, ch)| class(*ch) != wanted)
+        .find(|(_, ch)| class(*ch, big) != wanted)
         .map(|(offset, _)| anchor + offset)
         .unwrap_or(slice.len());
     let mut span = start..end;
     if around && wanted != Class::Blank {
         let trailed = slice[end..]
             .char_indices()
-            .find(|(_, ch)| class(*ch) != Class::Blank)
+            .find(|(_, ch)| class(*ch, big) != Class::Blank)
             .map(|(offset, _)| end + offset)
             .unwrap_or(slice.len());
         if trailed > end {
@@ -570,7 +703,7 @@ fn word_object(
             let led = slice[..start]
                 .char_indices()
                 .rev()
-                .take_while(|(_, ch)| class(*ch) == Class::Blank)
+                .take_while(|(_, ch)| class(*ch, big) == Class::Blank)
                 .last()
                 .map(|(offset, _)| offset)
                 .unwrap_or(start);
@@ -578,6 +711,27 @@ fn word_object(
         }
     }
     Some(line.start + span.start..line.start + span.end)
+}
+
+/// What * and # take as their pattern: the word the caret sits on, or the
+/// next one along its line. vim scans forward for a *keyword* character
+/// rather than taking whatever run the caret happens to stand in, so a
+/// caret on a space or on a comma still finds the word after it
+/// (adr/2026-08-star-searches-whole-words.md). `None` when the rest of the
+/// line carries no word at all.
+pub fn word_at_or_after(
+    text: &str,
+    line: &Range<usize>,
+    at: usize,
+) -> Option<Range<usize>> {
+    let slice = text.get(line.clone()).unwrap_or_default();
+    let from = at.saturating_sub(line.start).min(slice.len());
+    let (offset, _) = slice
+        .get(from..)
+        .unwrap_or_default()
+        .char_indices()
+        .find(|(_, ch)| class(*ch, false) == Class::Word)?;
+    word_object(text, line, line.start + from + offset, false, false)
 }
 
 /// i" / a": the quoted span the caret stands in or before, paired left to
@@ -769,13 +923,13 @@ pub fn search(
     text: &str,
     lines: &Lines,
     from: usize,
-    pattern: &str,
+    pattern: &Pattern,
     forward: bool,
 ) -> Option<usize> {
-    if pattern.is_empty() {
+    if pattern.text.is_empty() {
         return None;
     }
-    let smart = pattern.chars().all(|ch| !ch.is_uppercase());
+    let smart = smartcase(&pattern.text);
     let hits: Vec<usize> = (0..lines.rows())
         .flat_map(|row| {
             let line = lines.row(row);
@@ -803,26 +957,78 @@ pub fn search(
     }
 }
 
-/// Whether the pattern matches at this offset, char by char — folding the
-/// candidate's case when the pattern asked for smartcase.
-fn matches_at(slice: &str, offset: usize, pattern: &str, smart: bool) -> bool {
-    let candidate = slice.get(offset..).unwrap_or_default();
-    let mut wanted = pattern.chars();
-    let mut have = candidate.chars();
-    for expected in wanted.by_ref() {
-        let Some(found) = have.next() else {
-            return false;
-        };
+/// What / committed or * built: the text, and whether only whole words
+/// count. `*` is not `*` without the second field
+/// (adr/2026-08-star-searches-whole-words.md), and it rides the pattern so
+/// n and N keep walking the same kind of hit the first jump found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pattern {
+    pub text: String,
+    pub whole_word: bool,
+}
+
+impl Pattern {
+    /// What the / prompt commits: a substring, matching anywhere.
+    pub fn loose(text: String) -> Pattern {
+        Pattern {
+            text,
+            whole_word: false,
+        }
+    }
+}
+
+/// The smartcase rule / and :s share: an all-lowercase pattern matches any
+/// case, a capital anywhere makes it exact
+/// (adr/2026-08-search-lands-through-place.md).
+pub fn smartcase(pattern: &str) -> bool {
+    pattern.chars().all(|ch| !ch.is_uppercase())
+}
+
+/// How many bytes of `slice` the literal pattern matches at `offset`, or
+/// `None` for no match — folding the candidate's case when the caller asked
+/// for smartcase. Public because the ex line's substitute measures its hits
+/// with it, so `/` and `:s` cannot drift on what a match even is
+/// (adr/2026-08-ex-line-is-literal-and-global.md).
+pub fn match_len(
+    slice: &str,
+    offset: usize,
+    pattern: &str,
+    smart: bool,
+) -> Option<usize> {
+    let mut have = slice.get(offset..).unwrap_or_default().chars();
+    pattern.chars().try_fold(0, |length, expected| {
+        let found = have.next()?;
         let matched = if smart {
             found.to_lowercase().eq(expected.to_lowercase())
         } else {
             found == expected
         };
-        if !matched {
-            return false;
-        }
-    }
-    true
+        matched.then(|| length + found.len_utf8())
+    })
+}
+
+/// Whether the pattern matches at this offset, and — when it asked for
+/// whole words — that the hit is not glued to a word character.
+fn matches_at(
+    slice: &str,
+    offset: usize,
+    pattern: &Pattern,
+    smart: bool,
+) -> bool {
+    let Some(length) = match_len(slice, offset, &pattern.text, smart) else {
+        return false;
+    };
+    // the line's own ends bound a word as surely as a space does, and a
+    // match never straddles lines, so the line slice is the whole context
+    !pattern.whole_word
+        || (slice[..offset]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| class(ch, false) != Class::Word)
+            && slice[offset + length..]
+                .chars()
+                .next()
+                .is_none_or(|ch| class(ch, false) != Class::Word))
 }
 
 /// What , repeats: the last find, the other way — public because the
@@ -1335,20 +1541,40 @@ mod tests {
         let text = "Un café.\n\nEncore un Café noir.\n";
         let lines = table(text);
         // smartcase: a lowercase pattern matches both cafés
-        let first = search(text, &lines, 0, "café", true);
+        let first =
+            search(text, &lines, 0, &Pattern::loose("café".into()), true);
         assert_eq!(first, Some(3));
-        let second = search(text, &lines, 3, "café", true);
+        let second =
+            search(text, &lines, 3, &Pattern::loose("café".into()), true);
         assert_eq!(second, Some(21));
         // wrap-around forward and back
-        assert_eq!(search(text, &lines, 21, "café", true), Some(3));
-        assert_eq!(search(text, &lines, 3, "café", false), Some(21));
+        assert_eq!(
+            search(text, &lines, 21, &Pattern::loose("café".into()), true),
+            Some(3)
+        );
+        assert_eq!(
+            search(text, &lines, 3, &Pattern::loose("café".into()), false),
+            Some(21)
+        );
         // a capital makes it exact
-        assert_eq!(search(text, &lines, 0, "Café", true), Some(21));
+        assert_eq!(
+            search(text, &lines, 0, &Pattern::loose("Café".into()), true),
+            Some(21)
+        );
         // no match, empty pattern: nothing
-        assert_eq!(search(text, &lines, 0, "thé", true), None);
-        assert_eq!(search(text, &lines, 0, "", true), None);
+        assert_eq!(
+            search(text, &lines, 0, &Pattern::loose("thé".into()), true),
+            None
+        );
+        assert_eq!(
+            search(text, &lines, 0, &Pattern::loose("".into()), true),
+            None
+        );
         // a pattern longer than the line's tail cannot match past it
-        assert_eq!(search(text, &lines, 0, "noir.x", true), None);
+        assert_eq!(
+            search(text, &lines, 0, &Pattern::loose("noir.x".into()), true),
+            None
+        );
     }
 
     #[test]
@@ -1365,5 +1591,153 @@ mod tests {
             None,
         );
         assert_eq!(hit.map(|(h, _)| h), Some(3), "the second é, char-wise");
+    }
+
+    // -- W B E, ge gE, and the WORD objects ----------------------------------
+
+    /// The whole difference between w and W is that punctuation stops
+    /// counting as its own word — adr/2026-08-word-motions-add-their-big-siblings.md
+    #[test]
+    fn big_word_motions_walk_over_the_punctuation_small_ones_stop_at() {
+        // "l'idée" is three small words (l, ', idée) and one WORD
+        let text = "l'idée, vraiment.\n";
+        // w stops at the apostrophe, W crosses the whole cluster of them
+        assert_eq!(go(text, 0, Motion::WordForward, 1), Some((1, None)));
+        assert_eq!(go(text, 0, Motion::BigWordForward, 1), Some((9, None)));
+        // e ends at the l; E ends at the comma that closes the WORD
+        assert_eq!(go(text, 0, Motion::WordEnd, 1), Some((1, None)));
+        assert_eq!(go(text, 0, Motion::BigWordEnd, 1), Some((7, None)));
+        // b from "vraiment" walks back over the comma, B past the lot
+        assert_eq!(go(text, 9, Motion::WordBack, 1), Some((7, None)));
+        assert_eq!(go(text, 9, Motion::BigWordBack, 1), Some((0, None)));
+    }
+
+    #[test]
+    fn ge_lands_on_the_previous_words_last_cluster() {
+        let text = "une idée noire\n";
+        // from inside "noire" the previous end is the last e of "idée"
+        assert_eq!(go(text, 11, Motion::WordEndBack, 1), Some((8, None)));
+        // and from that e, the e of "une"
+        assert_eq!(go(text, 8, Motion::WordEndBack, 1), Some((2, None)));
+        // a count chains them
+        assert_eq!(go(text, 11, Motion::WordEndBack, 2), Some((2, None)));
+        // nothing behind the first word: the motion fails onto the start
+        assert_eq!(go(text, 1, Motion::WordEndBack, 1), Some((0, None)));
+    }
+
+    #[test]
+    fn ge_and_g_e_differ_exactly_where_punctuation_does() {
+        let text = "mot, suivant\n";
+        // ge from "suivant" stops on the comma, its own small word
+        assert_eq!(go(text, 5, Motion::WordEndBack, 1), Some((3, None)));
+        // gE reads "mot," as one WORD and stops on the same comma — which
+        // is that WORD's end too, so the difference shows one step deeper
+        assert_eq!(go(text, 5, Motion::BigWordEndBack, 1), Some((3, None)));
+        assert_eq!(go(text, 3, Motion::WordEndBack, 1), Some((2, None)));
+        assert_eq!(go(text, 3, Motion::BigWordEndBack, 1), Some((0, None)));
+    }
+
+    #[test]
+    fn a_word_object_folds_punctuation_when_it_is_big() {
+        let text = "prends l'idée, vite\n";
+        let parsed = blocks::segment(text);
+        // iw on the "idée" run alone
+        assert_eq!(
+            object(text, &parsed, 10, ObjectKind::Word, false),
+            Some(9..14)
+        );
+        // iW takes "l'idée," entire, comma and all
+        assert_eq!(
+            object(text, &parsed, 10, ObjectKind::BigWord, false),
+            Some(7..15)
+        );
+        // aW rides its trailing blank
+        assert_eq!(
+            object(text, &parsed, 10, ObjectKind::BigWord, true),
+            Some(7..16)
+        );
+    }
+
+    // -- % ------------------------------------------------------------------
+
+    #[test]
+    fn percent_walks_to_the_partner_of_the_first_bracket_on_the_line() {
+        let text = "#f(a, (b), c) et rien\n";
+        // from the line's start the first bracket is the outer (
+        assert_eq!(go(text, 0, Motion::MatchPair, 1), Some((12, None)));
+        // and from the closer, back to it — nesting counted, not the
+        // nearest bracket
+        assert_eq!(go(text, 12, Motion::MatchPair, 1), Some((2, None)));
+        // the inner pair answers from inside itself
+        assert_eq!(go(text, 6, Motion::MatchPair, 1), Some((8, None)));
+        assert_eq!(go(text, 8, Motion::MatchPair, 1), Some((6, None)));
+    }
+
+    #[test]
+    fn percent_matches_the_guillemets_and_ignores_the_count() {
+        let text = "il dit « oui » enfin\n";
+        assert_eq!(go(text, 0, Motion::MatchPair, 1), Some((14, None)));
+        // vim's [count]% means "go to N% of the file"; a note has no use
+        // for it, so the count is spent and the motion is unchanged
+        assert_eq!(go(text, 0, Motion::MatchPair, 7), Some((14, None)));
+    }
+
+    #[test]
+    fn percent_reaches_across_the_lines_a_construct_spans() {
+        // a multi-line #table is one block; % walks its whole extent
+        let text = "#table(\n  [a],\n  [b],\n)\n";
+        assert_eq!(go(text, 0, Motion::MatchPair, 1), Some((22, None)));
+    }
+
+    #[test]
+    fn percent_fails_with_no_bracket_and_with_no_partner() {
+        let bare = "rien du tout\n";
+        assert_eq!(go(bare, 0, Motion::MatchPair, 1), None);
+        // an opener nothing closes, and a closer nothing opened
+        let open = "un ( sans fin\n";
+        assert_eq!(go(open, 0, Motion::MatchPair, 1), None);
+        let close = "un ) tout seul\n";
+        assert_eq!(go(close, 0, Motion::MatchPair, 1), None);
+    }
+
+    // -- the * word and the whole-word pattern ------------------------------
+
+    #[test]
+    fn star_takes_the_word_the_caret_is_on_or_the_next_one_along() {
+        let text = "  une, idée\n";
+        let line = table(text).around(0);
+        // on a blank: the first keyword character after it
+        assert_eq!(word_at_or_after(text, &line, 0), Some(2..5));
+        // on the comma, which is not a keyword character either
+        assert_eq!(word_at_or_after(text, &line, 5), Some(7..12));
+        // inside a word: that word
+        assert_eq!(word_at_or_after(text, &line, 3), Some(2..5));
+        // nothing but a word character left on the line
+        let bare = "une,\n";
+        let tail = table(bare).around(0);
+        assert_eq!(word_at_or_after(bare, &tail, 3), None);
+    }
+
+    #[test]
+    fn a_whole_word_pattern_refuses_a_hit_glued_to_a_word_character() {
+        let text = "le mot, un motif, et mot.\n";
+        let lines = table(text);
+        let loose = Pattern::loose("mot".into());
+        let strict = Pattern {
+            text: "mot".into(),
+            whole_word: true,
+        };
+        // loose finds the "mot" inside "motif"
+        assert_eq!(search(text, &lines, 0, &loose, true), Some(3));
+        assert_eq!(search(text, &lines, 3, &loose, true), Some(11));
+        // whole-word skips it and lands on the last one
+        assert_eq!(search(text, &lines, 3, &strict, true), Some(21));
+        // the line's own ends bound a word as surely as a space does
+        let alone = "mot\n";
+        assert_eq!(
+            search(alone, &table(alone), 3, &strict, true),
+            Some(0),
+            "wrapping onto a word that fills its whole line"
+        );
     }
 }

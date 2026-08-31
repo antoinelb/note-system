@@ -196,6 +196,18 @@ impl Notice {
 
     /// The autosave's and the flush's failure: the data-loss class, so the
     /// ladder's top — resolved by the next save that lands.
+    /// A `:` line the grammar could not read, or one that found nothing to
+    /// do. `detail` already carries what happened and what to type instead
+    /// (AIR ERR-1, adr/2026-08-ex-line-is-literal-and-global.md); a typo in
+    /// a prompt destroys no work, so it warns rather than shouting.
+    pub fn ex_refused(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Editor,
+            text: detail.to_string(),
+        }
+    }
+
     pub fn save_failed(detail: &str) -> Notice {
         Notice {
             severity: Severity::Critical,

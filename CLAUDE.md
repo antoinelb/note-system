@@ -40,6 +40,9 @@ Rust throughout — reasoning preserved in the ADRs:
 - **Strict buffer/widget separation in the editor**, so the v2 vim modal layer can be inserted without a rewrite. Insert mode is the phase-0 writing flow: the grammar owns only Escape and Tab there, and what closes a pair or continues a list marker as you type belongs to the editor, not the grammar (`adr/2026-08-autopairs-in-the-typing-path.md`, `adr/2026-08-tab-indents-in-every-mode.md`).
 - Note **type is a `#meta` field, not a directory**: directories encode only the four categories (`permanent/`, `time/`, `capture/`, `generated/`); the index, not the filesystem, is the authority for querying by type.
 - **A block is still one physical line**, unchanged by the cursor-split rendering above: `blocks::segment` names the block map, and `dd`, `ip`/`ap`, and every motion still act on one line at a time. Only which blocks a compile groups together for *rendering* changed — never what a block *is* (`adr/2026-08-cursor-split-rendering.md`, `adr/2026-08-per-line-block-segmentation.md`).
+- **The one register is the clipboard, and a verb that rewrites in place never touches it**: `gu`/`gU`/`g~` and visual `p` both diverge from vim here, because the register persists across applications and clobbering it costs more than vim's consistency buys (`adr/2026-08-case-operators-are-verbs.md`, `adr/2026-08-visual-gains-p-r-s-and-gv.md`).
+- **The scroll anchor is consumed by the mount that uses it.** `zz`/`zt`/`zb` and every `j`/`k` name where the caret sits in the pane, and the next mount falls back to `Nearest` — the caret also remounts when an async compile lands, and a latched anchor would move the viewport with no keystroke behind it (`adr/2026-08-scroll-anchor-is-consumed-once.md`).
+- **The ex line is literal and always global**: `:s/old/new/` replaces every occurrence in range with no regex and no `g` flag, and a line it cannot read speaks through the status surface rather than falling silent (`adr/2026-08-ex-line-is-literal-and-global.md`).
 - **Deleting a note is unconfirmed and trashless**, from the palette's "delete note" row over an open sheet or immediately via Ctrl+Shift+D (guarded to a sheet already being open) — no confirmation dialog either path (`adr/2026-07-delete-unconfirmed-no-trash.md`, `adr/2026-08-delete-note-chord.md`).
 
 ## Roadmap
@@ -47,7 +50,7 @@ Rust throughout — reasoning preserved in the ADRs:
 Four versions:
 - **v0 — daily driver for writing**: vault structure + `#meta`/`#l` conventions, file CRUD from per-type templates, daily notes, hybrid block editor (fallback: a single pane toggling source ⇄ rendered), the design language (palette + type scale as theme variables, dark and light), the logs screen, link index + backlinks + dangling-link detection, capture notes + open-loops panel.
 - **v1 — the table**: canvas with persistent positions, semantic zoom, modal card editing, filters, auto-placement. The v1 list is the ceiling, not the floor.
-- **v2 — vim**: modal editing layer on the existing buffer architecture.
+- **v2 — vim**: modal editing layer on the existing buffer architecture. The ceiling named six things it left out; the ex line has since crossed it, and marks, macros, named registers, visual block and the jumplist stay out with their reasons recorded (`adr/2026-08-the-ex-line-enters-the-v2-ceiling.md`).
 - **v3 — AI**: `claude` CLI integration (tags, link suggestions), ghost-text Tab-completion, MCP server exposing the vault.
 
 ## Design
