@@ -62,6 +62,8 @@ All UI strings (labels, placeholders, error messages) are English; note content 
 
 One `--prose-size` token drives both the editor's textarea and the rendered SVG's type scale — no separate size for source and render (`adr/2026-08-one-font-size-for-source-and-render.md`). A settings overlay (Ctrl+,) holds the only controls that move it, alongside a theme toggle; both are session-only, with no persistence file (`adr/2026-08-settings-overlay.md`).
 
+Every aspect of the interface should be keyboard-driven first and then usable by mouse.
+
 ## Other instructions
 
 - Implementation is Claude's job — code, tests, docs; the user directs, decides, and reviews (`adr/2026-08-implementation-is-claudes-job.md`)
@@ -70,4 +72,5 @@ One `--prose-size` token drives both the editor's textarea and the rendered SVG'
 - Never use while loops
 - Code should be structured to avoid expect in the production code as much as possible
 - Running `make test` should give 100% coverage once a feature is done implementing
+- `make test` sees markup, never the window: `make e2e` drives the shipped binary with real keystrokes in a headless X server and asserts on the `.typ` files they produce (`adr/2026-08-headless-x11-e2e.md`). It is not in the pre-commit hook. `tests/e2e/session.sh` opens the same app for the `note-taker` persona to explore by hand; its report is never committed — a finding becomes an ADR or a scenario
 - Always delegate commit to a haiku agent
