@@ -1,4 +1,4 @@
-.PHONY: init static test check-vault upgrade
+.PHONY: init static test check-vault e2e upgrade
 
 VAULT := tests/fixtures/vault
 
@@ -22,6 +22,19 @@ test:
 	  --fail-under-regions 100 \
 	  --fail-under-lines 100 \
 	  --fail-under-functions 100
+
+# The shipped window, driven by keystrokes in a headless X server: the one
+# layer `make test` cannot see, since dioxus_ssr renders markup and not a
+# WebKitGTK surface (adr/2026-08-headless-x11-e2e.md). Release, because a
+# debug typst compile turns every settle into a race. Not in the pre-commit
+# hook: each scenario costs seconds, not milliseconds.
+e2e:
+	cargo build --release
+	@fails=0; \
+	for t in tests/e2e/*.test.sh; do \
+		sh $$t || fails=$$((fails+1)); \
+	done; \
+	[ $$fails -eq 0 ] && echo "e2e: all scenarios passed" || { echo "e2e: $$fails failure(s)"; exit 1; }
 
 # a persistent scratch vault outside the repo, seeded from the fixtures:
 # running against the fixtures themselves pollutes canonical test data
