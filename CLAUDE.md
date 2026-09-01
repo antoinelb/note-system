@@ -41,6 +41,9 @@ Rust throughout — reasoning preserved in the ADRs:
 - Note **type is a `#meta` field, not a directory**: directories encode only the four categories (`permanent/`, `time/`, `capture/`, `generated/`); the index, not the filesystem, is the authority for querying by type.
 - **A block is still one physical line**, unchanged by which renderer draws it: `blocks::segment` names the block map, and `dd`, `ip`/`ap`, and every motion still act on one line at a time. Only what draws a block's content changed — never what a block *is* (`adr/2026-08-per-line-block-segmentation.md`, `adr/2026-08-css-draws-the-markup.md`).
 - **The editor draws with CSS; export and the table's card bodies compile with Typst.** A block's own parse-tree node-kind verdict decides, per block, which one draws it — CSS for markup the model owns, the embedded compiler otherwise — so the two pipelines can diverge in mechanism as long as they agree in appearance (`adr/2026-08-css-draws-the-markup.md`).
+- **The one register is the clipboard, and a verb that rewrites in place never touches it**: `gu`/`gU`/`g~` and visual `p` both diverge from vim here, because the register persists across applications and clobbering it costs more than vim's consistency buys (`adr/2026-08-case-operators-are-verbs.md`, `adr/2026-08-visual-gains-p-r-s-and-gv.md`).
+- **The scroll anchor is consumed by the mount that uses it.** `zz`/`zt`/`zb` and every `j`/`k` name where the caret sits in the pane, and the next mount falls back to `Nearest` — the caret also remounts when an async compile lands, and a latched anchor would move the viewport with no keystroke behind it (`adr/2026-08-scroll-anchor-is-consumed-once.md`).
+- **The ex line is literal and always global**: `:s/old/new/` replaces every occurrence in range with no regex and no `g` flag, and a line it cannot read speaks through the status surface rather than falling silent (`adr/2026-08-ex-line-is-literal-and-global.md`).
 - **Deleting a note is unconfirmed and trashless**, from the palette's "delete note" row over an open sheet or immediately via Ctrl+Shift+D (guarded to a sheet already being open) — no confirmation dialog either path (`adr/2026-07-delete-unconfirmed-no-trash.md`, `adr/2026-08-delete-note-chord.md`).
 
 ## Roadmap
@@ -48,7 +51,7 @@ Rust throughout — reasoning preserved in the ADRs:
 Four versions:
 - **v0 — daily driver for writing**: vault structure + `#meta`/`#l` conventions, file CRUD from per-type templates, daily notes, hybrid block editor (fallback: a single pane toggling source ⇄ rendered), the design language (palette + type scale as theme variables, dark and light), the logs screen, link index + backlinks + dangling-link detection, capture notes + open-loops panel.
 - **v1 — the table**: canvas with persistent positions, semantic zoom, modal card editing, filters, auto-placement. The v1 list is the ceiling, not the floor.
-- **v2 — vim**: modal editing layer on the existing buffer architecture.
+- **v2 — vim**: modal editing layer on the existing buffer architecture. The ceiling named six things it left out; the ex line has since crossed it, and marks, macros, named registers, visual block and the jumplist stay out with their reasons recorded (`adr/2026-08-the-ex-line-enters-the-v2-ceiling.md`).
 - **v3 — AI**: `claude` CLI integration (tags, link suggestions), ghost-text Tab-completion, MCP server exposing the vault.
 
 ## Design
@@ -61,6 +64,8 @@ A line beginning `> ` is a block quote, stored literally and taught to vanilla T
 
 One `--prose-size` token drives both the editor's textarea and the rendered SVG's type scale — no separate size for source and render (`adr/2026-08-one-font-size-for-source-and-render.md`). A settings overlay (Ctrl+,) holds the only controls that move it, alongside a theme toggle; both are session-only, with no persistence file (`adr/2026-08-settings-overlay.md`).
 
+Every aspect of the interface should be keyboard-driven first and then usable by mouse.
+
 ## Other instructions
 
 - Implementation is Claude's job — code, tests, docs; the user directs, decides, and reviews (`adr/2026-08-implementation-is-claudes-job.md`)
@@ -69,4 +74,5 @@ One `--prose-size` token drives both the editor's textarea and the rendered SVG'
 - Never use while loops
 - Code should be structured to avoid expect in the production code as much as possible
 - Running `make test` should give 100% coverage once a feature is done implementing
+- `make test` sees markup, never the window: `make e2e` drives the shipped binary with real keystrokes in a headless X server and asserts on the `.typ` files they produce (`adr/2026-08-headless-x11-e2e.md`). It is not in the pre-commit hook. `tests/e2e/session.sh` opens the same app for the `note-taker` persona to explore by hand; its report is never committed — a finding becomes an ADR or a scenario
 - Always delegate commit to a haiku agent

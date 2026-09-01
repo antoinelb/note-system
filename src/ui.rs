@@ -516,6 +516,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // open-or-not plus its moving query, the overlay split as ever
     let mut search_prompt = use_signal(|| false);
     let mut search_query = use_signal(String::new);
+    // the : prompt, the / prompt's twin: same widget, same region, other
+    // sigil (adr/2026-08-ex-line-is-literal-and-global.md)
+    let mut ex_prompt = use_signal(|| false);
+    let mut ex_query = use_signal(String::new);
+    // where the next caret mount should sit in the pane, and a nonce so a
+    // bare zz — which moves the caret not at all — still remounts it. The
+    // anchor is consumed by the mount that uses it and falls back to
+    // Nearest, so an async fragment landing never moves the viewport on
+    // its own (adr/2026-08-scroll-anchor-is-consumed-once.md)
+    let mut scroll_anchor = use_signal(|| (vim::Anchor::Nearest, 0u32));
     // a drag in flight, and whether a hit probe is already out — plain
     // cells, like QuitFlush: only the mouse handlers read them
     let dragging = use_hook(|| Rc::new(std::cell::Cell::new(false)));
@@ -1412,6 +1422,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 || jump.read().is_some()
                 || template_picker.read().is_some()
                 || search_prompt()
+                || ex_prompt()
                 || back.read().is_some()
                 || listing
                 // absent from this list, closing either overlay left the
@@ -1823,6 +1834,67 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         search_query.set(String::new());
                         search_prompt.set(true);
                     }
+                    // the same one-line prompt in the same place, wearing
+                    // the other sigil; a visual : arrives with its range
+                    // already spelled
+                    // (adr/2026-08-ex-line-is-literal-and-global.md)
+                    vim::Act::OpenEx { prefill } => {
+                        ex_query.set(prefill);
+                        ex_prompt.set(true);
+                    }
+                    // :w — the buffer reaches disk now instead of at the
+                    // next debounced pause; a refusal speaks through the
+                    // status surface like every other save's does
+                    vim::Act::Save => {
+                        editor.write().flush();
+                        if let Some(trouble) = editor.write().take_trouble() {
+                            status
+                                .write()
+                                .report(Notice::from_trouble(trouble));
+                        }
+                    }
+                    // gf: the one follow path Ctrl+Enter, Ctrl+click and
+                    // the palette already share
+                    // (adr/2026-08-gf-follows-the-link.md)
+                    vim::Act::FollowLink => follow_at.call(()),
+                    // the nonce is what makes a bare zz move anything: the
+                    // caret's key carries it, so the span remounts even
+                    // when the head did not budge
+                    // (adr/2026-08-scroll-anchor-is-consumed-once.md)
+                    vim::Act::Scroll(anchor) => {
+                        let (_, nonce) = scroll_anchor();
+                        scroll_anchor.set((anchor, nonce.wrapping_add(1)));
+                    }
+                    // visual p: the clipboard replaces the span, and what
+                    // it replaced does not go back out
+                    // (adr/2026-08-visual-gains-p-r-s-and-gv.md)
+                    vim::Act::PasteOver { span, linewise } => {
+                        let Some(clipboard) = clipboard.clone() else {
+                            continue;
+                        };
+                        spawn(async move {
+                            let Some(clip) = clipboard_answer(
+                                (clipboard.0)().await,
+                                status,
+                            ) else {
+                                return;
+                            };
+                            if clip.is_empty() {
+                                return;
+                            }
+                            // a line-wise selection swallowed its own
+                            // newline, so the clip keeps its one; a
+                            // char-wise span takes the text alone
+                            let text = if linewise {
+                                clip
+                            } else {
+                                clip.trim_end_matches('\n').to_string()
+                            };
+                            let caret = span.start
+                                + caret::prev_cluster(&text, text.len());
+                            editor.write().splice(span, &text, caret);
+                        });
+                    }
                     // the grammar cannot see the webview's wrapped lines:
                     // the whole run goes over the geometry seam in one
                     // round trip, the logical fallback taking over — and
@@ -1834,6 +1906,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         count,
                         extend,
                     } => {
+                        // every vertical move pins the caret to the pane's
+                        // centre — the gjzz / gkzz the user's own vim maps
+                        // (adr/2026-08-scroll-anchor-is-consumed-once.md)
+                        let (_, nonce) = scroll_anchor();
+                        scroll_anchor
+                            .set((vim::Anchor::Center, nonce.wrapping_add(1)));
                         let count = bounded_steps(&editor.peek(), count);
                         spawn(walk_visual(
                             editor,
@@ -2123,42 +2201,32 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                                         "{text}"
                                                                     }
                                                                 },
-                                                                // both carets: keyed by position, so every move
-                                                                // remounts them — restarting the bar's blink
-                                                                // (solid while typing) and the scroll-into-view.
-                                                                // No markup class here — the caret's own classes
-                                                                // stay untouched, since the `j`/`k` line walk and
-                                                                // the mouse hit probe key off them
-                                                                // (adr/2026-08-css-draws-the-markup.md)
+                                                                // both carets: keyed by position *and* by the
+                                                                // scroll nonce, so every move — and every zz,
+                                                                // which moves nothing — remounts them,
+                                                                // restarting the bar's blink (solid while
+                                                                // typing) and the scroll-into-view. No markup
+                                                                // class here either — the caret's own classes
+                                                                // stay untouched, since the `j`/`k` line walk
+                                                                // and the mouse hit probe key off them
+                                                                // (adr/2026-08-scroll-anchor-is-consumed-once.md,
+                                                                // adr/2026-08-css-draws-the-markup.md)
                                                                 caret::Piece::Caret => rsx! {
                                                                     span {
-                                                                        key: "caret-{head}",
+                                                                        key: "caret-{head}-{scroll_anchor().1}",
                                                                         class: "caret",
                                                                         onmounted: move |event: Event<MountedData>| async move {
-                                                                            let _ = event
-                                                                                .scroll_to_with_options(ScrollToOptions {
-                                                                                    behavior: ScrollBehavior::Instant,
-                                                                                    // nearest: a visible caret scrolls nothing
-                                                                                    vertical: ScrollLogicalPosition::Nearest,
-                                                                                    horizontal: ScrollLogicalPosition::Nearest,
-                                                                                })
-                                                                                .await;
+                                                                            settle_caret(event, scroll_anchor).await;
                                                                         },
                                                                     }
                                                                 },
                                                                 caret::Piece::CaretBox { start, cluster } => rsx! {
                                                                     span {
-                                                                        key: "caret-{head}",
+                                                                        key: "caret-{head}-{scroll_anchor().1}",
                                                                         class: "caret-box",
                                                                         "data-start": "{start}",
                                                                         onmounted: move |event: Event<MountedData>| async move {
-                                                                            let _ = event
-                                                                                .scroll_to_with_options(ScrollToOptions {
-                                                                                    behavior: ScrollBehavior::Instant,
-                                                                                    vertical: ScrollLogicalPosition::Nearest,
-                                                                                    horizontal: ScrollLogicalPosition::Nearest,
-                                                                                })
-                                                                                .await;
+                                                                            settle_caret(event, scroll_anchor).await;
                                                                         },
                                                                         "{cluster}"
                                                                     }
@@ -2625,6 +2693,79 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 ));
                                 if let vim::Outcome::Acts(acts) = outcome {
                                     apply_vim.call(acts);
+                                }
+                            }
+                            _ => {}
+                        }
+                        // the prompt owns every plain key while it is
+                        // open; the ctrl chords still bubble
+                        if !event.modifiers().ctrl() {
+                            event.stop_propagation();
+                        }
+                    },
+                }
+            }
+        }
+    };
+
+    // the : prompt, the / prompt's twin: the same widget in the same
+    // region, wearing the other sigil, so the one place a one-line command
+    // appears stays the one place (AIR LAY-1). Enter resolves it in the
+    // grammar and Escape backs out leaving the caret and the selection
+    // exactly as they stood (AIR ERR-6,
+    // adr/2026-08-ex-line-is-literal-and-global.md)
+    let ex_view = move || -> Element {
+        if !ex_prompt() {
+            return rsx! {};
+        }
+        rsx! {
+            div { class: "link-picker",
+                input {
+                    class: "picker-query",
+                    placeholder: ":",
+                    initial_value: "{ex_query()}",
+                    onmounted: move |event| async move {
+                        let _ = event.set_focus(true).await;
+                    },
+                    oninput: move |event| ex_query.set(event.value()),
+                    onkeydown: move |event: KeyboardEvent| {
+                        match event.key() {
+                            Key::Escape => ex_prompt.set(false),
+                            Key::Enter => {
+                                let line = ex_query.peek().clone();
+                                ex_prompt.set(false);
+                                // the same shape the grammar callback uses:
+                                // the prompt only opens over a note, so the
+                                // zip never comes up empty, and the editor
+                                // guard drops before an act writes it back
+                                let resolved = {
+                                    let snapshot = editor.peek();
+                                    snapshot.note().zip(snapshot.caret()).map_or(
+                                        vim::ExOutcome::Acts(Vec::new()),
+                                        |((_, note_text), at)| {
+                                            vim.write().commit_ex(
+                                                &line,
+                                                &vim::View {
+                                                    text: note_text,
+                                                    blocks: snapshot.blocks(),
+                                                    head: at.head,
+                                                    anchor: at.anchor,
+                                                },
+                                            )
+                                        },
+                                    )
+                                };
+                                // a line that could not be read says so
+                                // rather than vanishing (AIR ERR-2)
+                                match resolved {
+                                    vim::ExOutcome::Acts(acts) => {
+                                        apply_vim.call(acts);
+                                    }
+                                    vim::ExOutcome::Refused(reason) => {
+                                        status
+                                            .write()
+                                            .report(Notice::ex_refused(&reason));
+                                    }
                                 }
                             }
                             _ => {}
@@ -3784,6 +3925,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     {picker_view()}
                     {template_view()}
                     {search_view()}
+                    {ex_view()}
                     {
                         match footer {
                             Some(Ok((back, out))) if !back.is_empty() || !out.is_empty() => rsx! {
@@ -4404,6 +4546,37 @@ fn remember(goal: &Cell<Goal>, store: impl FnOnce(&mut Goal)) {
 /// reach further than its last drawn line, and `999999999j` asks the
 /// webview for a walk it can finish (CLAUDE.md: bounded loops with
 /// explicit iteration limits). No note open, nothing to walk: one step.
+/// Where a freshly mounted caret puts itself in the pane, and the one rule
+/// that keeps it honest: the anchor is **consumed** by the mount that uses
+/// it and falls back to `Nearest`. The caret also remounts whenever an
+/// async fragment compile lands, and a latched `Center` would scroll the
+/// note out from under a reader who pressed nothing at all — the interface
+/// moves only when the user moved it (AIR LAY-2,
+/// adr/2026-08-scroll-anchor-is-consumed-once.md).
+async fn settle_caret(
+    event: Event<MountedData>,
+    mut anchor: Signal<(vim::Anchor, u32)>,
+) {
+    let (wanted, nonce) = anchor();
+    if wanted != vim::Anchor::Nearest {
+        anchor.set((vim::Anchor::Nearest, nonce));
+    }
+    let vertical = match wanted {
+        vim::Anchor::Nearest => ScrollLogicalPosition::Nearest,
+        vim::Anchor::Center => ScrollLogicalPosition::Center,
+        vim::Anchor::Top => ScrollLogicalPosition::Start,
+        vim::Anchor::Bottom => ScrollLogicalPosition::End,
+    };
+    let _ = event
+        .scroll_to_with_options(ScrollToOptions {
+            behavior: ScrollBehavior::Instant,
+            vertical,
+            // the pane never scrolls sideways on its own
+            horizontal: ScrollLogicalPosition::Nearest,
+        })
+        .await;
+}
+
 fn bounded_steps(editor: &Editor, count: usize) -> usize {
     editor
         .note()
@@ -8009,7 +8182,7 @@ mod tests {
         press(
             &mut dom,
             sink,
-            Key::Character("z".into()),
+            Key::Character("q".into()),
             Modifiers::empty(),
         );
         press(&mut dom, sink, Key::Enter, Modifiers::empty());
@@ -16898,5 +17071,416 @@ mod tests {
         fn convert_visible_data(&self, _: &PlatformEventData) -> VisibleData {
             unreachable!("the shell never listens for this event")
         }
+    }
+
+    // -- gf, the ex prompt and the scroll anchor -----------------------------
+
+    /// adr/2026-08-gf-follows-the-link.md
+    #[test]
+    fn gf_follows_the_link_under_the_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_link(&mut dom, &clicks);
+
+        // the same landing Ctrl+Enter reaches, spelled the way the user's
+        // own vim spells it
+        place_caret(&mut dom, block, &hit, IN_LINK);
+        for key in ["g", "f"] {
+            press(
+                &mut dom,
+                keys,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "gf jumped to the linked day: {html}"
+        );
+    }
+
+    /// adr/2026-08-ex-line-is-literal-and-global.md
+    #[test]
+    fn the_ex_prompt_substitutes_and_one_undo_takes_it_back() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        assert!(
+            source_of(&dom).contains("2026-07-23"),
+            "{}",
+            source_of(&dom)
+        );
+
+        // : opens the same one-line prompt / uses, in the same region,
+        // wearing the other sigil (AIR LAY-1)
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"placeholder=":""#), "{html}");
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+
+        type_into(&mut dom, prompt_input, "s/2026/2027/");
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"placeholder=":""#), "the prompt closed");
+        assert!(
+            source_of(&dom).contains("2027-07-23"),
+            "{}",
+            source_of(&dom)
+        );
+
+        // one splice, so one u reverses the whole substitution (AIR ACT-2).
+        // The click that woke the heading never dirtied the text, so its
+        // checkpoint deduped away and undo falls back to the file-open one,
+        // waking that snapshot's own last block rather than the heading
+        // (adr/2026-08-undo-at-vim-grain.md) — the note's text is what the
+        // press is about either way.
+        press(
+            &mut dom,
+            sink,
+            Key::Character("u".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            !dioxus_ssr::render(&dom).contains("2027"),
+            "one press took the whole substitution back"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_ex_prompt_leaving_the_note_untouched() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        type_into(&mut dom, prompt_input, "s/2026/2027/");
+        press(&mut dom, prompt_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"placeholder=":""#), "the prompt closed");
+        assert_eq!(source_of(&dom), before, "and changed nothing (AIR ERR-6)");
+
+        // an unrelated key inside the prompt is neither a commit nor a
+        // cancel: the prompt owns it and stays open
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        press(&mut dom, prompt_keys, Key::ArrowLeft, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"placeholder=":""#), "still open: {html}");
+    }
+
+    /// A submitted line that cannot be read speaks through the status
+    /// surface rather than vanishing (AIR ERR-2,
+    /// adr/2026-08-status-surface-owns-notices.md).
+    #[test]
+    fn an_unreadable_ex_line_reaches_the_status_surface() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        type_into(&mut dom, prompt_input, "nope");
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("unknown command"), "{html}");
+        assert!(html.contains(":w saves"), "and says what to type: {html}");
+    }
+
+    #[test]
+    fn the_ex_line_writes_the_note_to_disk_on_demand() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // type into the buffer, then :w rather than waiting for the pause
+        for key in ["A", "!"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        type_into(&mut dom, prompt_input, "w");
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+
+        let on_disk =
+            std::fs::read_to_string(vault.path().join("time/2026-07-23.typ"))
+                .expect("the day note is on disk");
+        assert!(on_disk.contains("2026-07-23!"), "{on_disk}");
+    }
+
+    /// adr/2026-08-visual-gains-p-r-s-and-gv.md
+    #[test]
+    fn visual_p_replaces_the_selection_from_the_clipboard() {
+        let vault = temp_vault();
+        let (mut dom, clicks, written) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Ok("collée".to_string()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        for key in ["v", "l", "l", "p"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+        assert!(source_of(&dom).contains("collée"), "{}", source_of(&dom));
+        assert!(
+            written.lock().expect("the write cell").is_empty(),
+            "what it replaced never went back out to the clipboard"
+        );
+    }
+
+    /// adr/2026-08-scroll-anchor-is-consumed-once.md. The headless DOM
+    /// cannot read a `ScrollLogicalPosition`, but it can see the caret
+    /// span remount — which is the whole mechanism: the span's key carries
+    /// the nonce, so a `zz` that moves the caret not at all still gets a
+    /// fresh mount to scroll from.
+    #[test]
+    fn each_scroll_anchor_remounts_the_caret_and_the_mount_consumes_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        for anchor in ["z", "t", "b"] {
+            // z alone only arms the prefix: nothing has moved yet
+            let armed = press_for_mutations(
+                &mut dom,
+                sink,
+                Key::Character("z".into()),
+                Modifiers::empty(),
+            );
+            assert!(
+                listeners(&armed, "mounted").is_empty(),
+                "z{anchor}: the bare z scrolls nothing",
+            );
+            let asked = press_for_mutations(
+                &mut dom,
+                sink,
+                Key::Character(anchor.into()),
+                Modifiers::empty(),
+            );
+            let mounts = listeners(&asked, "mounted");
+            assert!(!mounts.is_empty(), "z{anchor} remounted the caret");
+            // the mount consumes the anchor and falls back to Nearest, so
+            // the async fragment landings that remount this same span
+            // later move nothing (AIR LAY-2)
+            mount(&mut dom, mounts[0]);
+            block_on(settle(&mut dom));
+        }
+
+        // this editor has no folds: za asks for no scroll at all
+        press(
+            &mut dom,
+            sink,
+            Key::Character("z".into()),
+            Modifiers::empty(),
+        );
+        let inert = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("a".into()),
+            Modifiers::empty(),
+        );
+        assert!(listeners(&inert, "mounted").is_empty(), "za moved nothing",);
+    }
+
+    #[test]
+    fn a_refused_ex_write_says_so_instead_of_failing_quietly() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, sink) = activate_heading(&mut dom, &clicks);
+        type_into(&mut dom, input, "= pas encore sauvé\n");
+
+        lock_dir(&vault.path().join("time"), true);
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        type_into(&mut dom, prompt_input, "w");
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("notice-critical"), "{html}");
+        assert!(
+            html.contains("2026-07-23.typ"),
+            "the refusal names the file: {html}"
+        );
+    }
+
+    #[test]
+    fn an_ex_line_submitted_with_no_note_open_does_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let opened = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character(":".into()),
+            Modifiers::empty(),
+        );
+        let prompt_input = listeners(&opened, "input")[0];
+        let prompt_keys = listeners(&opened, "keydown")[0];
+        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        type_into(&mut dom, prompt_input, "s/2026/2027/");
+
+        // the prompt owns every plain key but lets the ctrl chords bubble,
+        // so the screen can change out from under an open line
+        press(
+            &mut dom,
+            prompt_keys,
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        assert!(
+            !dioxus_ssr::render(&dom).contains("2027"),
+            "with no note there is nothing to substitute in"
+        );
+    }
+
+    #[test]
+    fn visual_p_with_no_clipboard_seam_at_all_changes_nothing() {
+        let vault = temp_vault();
+        // rendered_app installs no Clipboard context
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        for key in ["v", "l", "p"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before);
+    }
+
+    #[test]
+    fn visual_p_over_a_failed_or_empty_read_leaves_the_selection_standing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Err("read denied".to_string()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        for key in ["v", "l", "p"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before, "the text survived the refusal");
+        assert!(
+            dioxus_ssr::render(&dom).contains("clipboard: read denied"),
+            "and the failed read did not stay silent (AIR ERR-2)"
+        );
+
+        // an empty clipboard is not a refusal, and still replaces nothing
+        let (mut dom, clicks, _) =
+            clipboard_app(Some(vault.path().to_path_buf()), Ok(String::new()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        for key in ["v", "l", "p"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before);
+    }
+
+    #[test]
+    fn a_line_wise_visual_p_keeps_the_clips_own_newline() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _) = clipboard_app(
+            Some(vault.path().to_path_buf()),
+            Ok("= collée\n".to_string()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        for key in ["V", "p"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom).contains("collée"),
+            "the whole line went over"
+        );
     }
 }

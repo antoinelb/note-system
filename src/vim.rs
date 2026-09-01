@@ -11,7 +11,7 @@ use dioxus::html::{Key, Modifiers};
 
 use crate::blocks::Block;
 use crate::caret;
-use crate::motions::{self, FindKind, Lines, Motion, ObjectKind};
+use crate::motions::{self, FindKind, Lines, Motion, ObjectKind, Pattern};
 
 /// Which grammar the keys speak. A note opens thinking — normal is the
 /// birth mode, as vim's is, and i is one key away
@@ -84,8 +84,14 @@ pub struct Vim {
     /// an empty entry means that keystroke appended past the line's end
     /// and overwrote nothing (adr/2026-08-replace-mode-session-and-backspace.md).
     replaced: Vec<String>,
-    /// What n walks and N walks backward — the committed / pattern.
-    search: Option<String>,
+    /// What n walks and N walks backward — the pattern / committed or *
+    /// built (adr/2026-08-star-searches-whole-words.md).
+    search: Option<Pattern>,
+    /// What gv puts back: the kind and the two ends of the selection the
+    /// last visual mode died with. Replayed as Place + Extend, because the
+    /// selection *is* the anchor and needs no state of its own
+    /// (adr/2026-08-visual-gains-p-r-s-and-gv.md).
+    last_visual: Option<(VisualKind, usize, usize)>,
 }
 
 /// One recorded change, semantic rather than keystrokes: . resolves it
@@ -108,6 +114,11 @@ enum Change {
         count: usize,
     },
     Toggle {
+        count: usize,
+    },
+    /// J and gJ (adr/2026-08-join-walks-the-visible-rows.md).
+    Join {
+        spaced: bool,
         count: usize,
     },
     Paste {
@@ -183,17 +194,35 @@ enum InsertEntry {
     Above,
 }
 
-/// The three verbs (adr/2026-08-one-register-the-clipboard.md).
+/// The verbs: three that move text through the one register
+/// (adr/2026-08-one-register-the-clipboard.md), and three that rewrite it
+/// in place without touching the clipboard at all
+/// (adr/2026-08-case-operators-are-verbs.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
     Delete,
     Change,
     Yank,
+    /// gu gU g~ — armed behind g, doubled as guu gUU g~~.
+    Lower,
+    Upper,
+    Flip,
+}
+
+impl Operator {
+    /// Whether the verb only recases what it spans: no register write, no
+    /// insert session, the caret left at the span's start.
+    fn recasing(self) -> bool {
+        matches!(self, Operator::Lower | Operator::Upper | Operator::Flip)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Prefix {
     Go,
+    /// z: zz zt zb name where the caret should sit in the pane
+    /// (adr/2026-08-scroll-anchor-is-consumed-once.md).
+    Scroll,
     Find(FindKind),
     Replace,
     Object {
@@ -261,6 +290,28 @@ pub enum Act {
     /// / — the widget opens its one-line prompt
     /// (adr/2026-08-search-lands-through-place.md).
     OpenSearch,
+    /// : — the same prompt, wearing the other sigil; `prefill` carries the
+    /// visual range so a selection survives the mode change
+    /// (adr/2026-08-ex-line-is-literal-and-global.md).
+    OpenEx {
+        prefill: String,
+    },
+    /// :w — the buffer reaches the disk now rather than at the next pause.
+    Save,
+    /// gf — the link under the caret opens, through the one follow path
+    /// Ctrl+Enter and the palette already share
+    /// (adr/2026-08-gf-follows-the-link.md).
+    FollowLink,
+    /// zz zt zb, and the centring every j and k asks for: where the caret
+    /// should sit in the pane for the next mount, and only that one
+    /// (adr/2026-08-scroll-anchor-is-consumed-once.md).
+    Scroll(Anchor),
+    /// v after an operator's span is spent: the selection comes back
+    /// (adr/2026-08-visual-gains-p-r-s-and-gv.md).
+    PasteOver {
+        span: Range<usize>,
+        linewise: bool,
+    },
     /// Plain j and k walk the lines the webview draws, which the grammar
     /// cannot see: the executor resolves the landing.
     WalkVisual {
@@ -268,6 +319,42 @@ pub enum Act {
         count: usize,
         extend: bool,
     },
+}
+
+/// Where a scroll should put the caret in the pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Anchor {
+    /// The stock behaviour: a caret already in view scrolls nothing.
+    #[default]
+    Nearest,
+    Center,
+    Top,
+    Bottom,
+}
+
+/// What a submitted `:` line resolved to. A command line that fails must
+/// never fall silent the way an unbound keystroke does, so the failure is a
+/// sentence for the status surface rather than a swallow (AIR ERR-2,
+/// adr/2026-08-ex-line-is-literal-and-global.md).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExOutcome {
+    Acts(Vec<Act>),
+    Refused(String),
+}
+
+/// The ranges the ex line understands, and no arithmetic beyond them
+/// (adr/2026-08-ex-line-is-literal-and-global.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExRange {
+    /// No range at all: the caret's own line.
+    Line,
+    /// `%`
+    Whole,
+    /// `'<,'>` — the rows the selection covered, which a visual `:` spells
+    /// into the prompt for you.
+    Selection,
+    /// `N` or `N,M`, one-based as vim counts.
+    Rows(usize, usize),
 }
 
 /// What the grammar decided about one keystroke.
@@ -332,6 +419,14 @@ impl Vim {
                 return Outcome::Acts(vec![Act::Redo]);
             }
             return Outcome::Pass;
+        }
+        // one seam remembers the selection for gv: every keystroke that
+        // reaches visual mode sees the live anchor and head, so whatever
+        // the *last* such keystroke saw is exactly the selection the mode
+        // died with — no bookkeeping at each of the half-dozen exits
+        // (adr/2026-08-visual-gains-p-r-s-and-gv.md)
+        if let Mode::Visual(kind) = self.mode {
+            self.last_visual = Some((kind, view.anchor, view.head));
         }
         // shift+Escape is the one way out of a note: the mode closes its
         // own session exactly as a plain Escape would — insert's caret
@@ -655,12 +750,42 @@ impl Vim {
             "w" => self.run_motion(Motion::WordForward, view),
             "b" => self.run_motion(Motion::WordBack, view),
             "e" => self.run_motion(Motion::WordEnd, view),
+            "W" => self.run_motion(Motion::BigWordForward, view),
+            "B" => self.run_motion(Motion::BigWordBack, view),
+            "E" => self.run_motion(Motion::BigWordEnd, view),
+            "%" => self.run_motion(Motion::MatchPair, view),
             "0" => self.run_motion(Motion::LineStart, view),
             "^" => self.run_motion(Motion::FirstNonBlank, view),
             "$" => self.run_motion(Motion::LineEnd, view),
             "G" => self.run_motion(Motion::LastLine, view),
             ";" => self.run_motion(Motion::RepeatFind, view),
             "," => self.run_motion(Motion::RepeatFindBack, view),
+            // the doubled case verbs: guu gUU g~~, whose second key is not
+            // a verb key and so cannot reach operator_key's doubling rule.
+            // Ahead of u's undo and ~'s single-cluster flip, both of which
+            // only answer with no verb pending
+            // (adr/2026-08-case-operators-are-verbs.md)
+            "u" if self.operator == Some(Operator::Lower) => {
+                self.current_lines(Operator::Lower, view)
+            }
+            "U" if self.operator == Some(Operator::Upper) => {
+                self.current_lines(Operator::Upper, view)
+            }
+            "~" if self.operator == Some(Operator::Flip) => {
+                self.current_lines(Operator::Flip, view)
+            }
+            "J" if self.operator.is_none() => self.join(true, view),
+            "*" if self.operator.is_none() => self.search_word(true, view),
+            "#" if self.operator.is_none() => self.search_word(false, view),
+            "z" if self.operator.is_none() => {
+                self.await_prefix(Prefix::Scroll)
+            }
+            ":" if self.operator.is_none() => {
+                self.reset();
+                Outcome::Acts(vec![Act::OpenEx {
+                    prefill: String::new(),
+                }])
+            }
             "i" => self.begin_insert(InsertEntry::Before, view, &line),
             "a" => self.begin_insert(InsertEntry::After, view, &line),
             "I" if self.operator.is_none() => {
@@ -833,8 +958,28 @@ impl Vim {
             }
             "o" => Outcome::Acts(vec![Act::SwapEnds]),
             "d" | "x" => self.visual_operate(Operator::Delete, kind, view),
-            "c" => self.visual_operate(Operator::Change, kind, view),
+            // s is c, as vim's is. S is not vim's line-wise change here,
+            // because surround owns it — which is exactly what vim-surround
+            // does to the same key in a real vim
+            // (adr/2026-08-visual-gains-p-r-s-and-gv.md)
+            "c" | "s" => self.visual_operate(Operator::Change, kind, view),
             "y" => self.visual_operate(Operator::Yank, kind, view),
+            "u" => self.visual_operate(Operator::Lower, kind, view),
+            "U" => self.visual_operate(Operator::Upper, kind, view),
+            "~" => self.visual_operate(Operator::Flip, kind, view),
+            "r" => self.await_prefix(Prefix::Replace),
+            "p" => self.visual_paste(kind, view),
+            // the objects reach visual: i and a name a span the selection
+            // takes rather than one a verb eats
+            // (adr/2026-08-objects-reach-visual-mode.md)
+            "i" => self.await_prefix(Prefix::Object { around: false }),
+            "a" => self.await_prefix(Prefix::Object { around: true }),
+            "z" => self.await_prefix(Prefix::Scroll),
+            // the range comes spelled, as vim spells it
+            // (adr/2026-08-ex-line-is-literal-and-global.md)
+            ":" => Outcome::Acts(vec![Act::OpenEx {
+                prefill: "'<,'>".to_string(),
+            }]),
             // S: the same span the verbs take, wrapped instead of cut — no
             // Change recorded, the dot after S replays whatever change came
             // before, deliberately. The mode stays visual until the pair
@@ -866,6 +1011,10 @@ impl Vim {
             "w" => self.run_motion(Motion::WordForward, view),
             "b" => self.run_motion(Motion::WordBack, view),
             "e" => self.run_motion(Motion::WordEnd, view),
+            "W" => self.run_motion(Motion::BigWordForward, view),
+            "B" => self.run_motion(Motion::BigWordBack, view),
+            "E" => self.run_motion(Motion::BigWordEnd, view),
+            "%" => self.run_motion(Motion::MatchPair, view),
             "0" => self.run_motion(Motion::LineStart, view),
             "^" => self.run_motion(Motion::FirstNonBlank, view),
             "$" => self.run_motion(Motion::LineEnd, view),
@@ -918,6 +1067,48 @@ impl Vim {
         match prefix {
             Prefix::Go if character == "g" => {
                 self.run_motion(Motion::FirstLine, view)
+            }
+            Prefix::Go if character == "e" => {
+                self.run_motion(Motion::WordEndBack, view)
+            }
+            Prefix::Go if character == "E" => {
+                self.run_motion(Motion::BigWordEndBack, view)
+            }
+            // the doubled forms guu gUU g~~ cannot reach operator_key's
+            // own doubling rule, because their second key is not a verb key
+            // (adr/2026-08-case-operators-are-verbs.md)
+            Prefix::Go if character == "u" => {
+                self.case_key(Operator::Lower, view)
+            }
+            Prefix::Go if character == "U" => {
+                self.case_key(Operator::Upper, view)
+            }
+            Prefix::Go if character == "~" => {
+                self.case_key(Operator::Flip, view)
+            }
+            // gJ joins without the space, and gf opens what the caret
+            // stands on (adr/2026-08-gf-follows-the-link.md)
+            Prefix::Go if character == "J" && self.operator.is_none() => {
+                self.join(false, view)
+            }
+            Prefix::Go if character == "f" && self.operator.is_none() => {
+                self.reset();
+                Outcome::Acts(vec![Act::FollowLink])
+            }
+            Prefix::Go if character == "v" && self.operator.is_none() => {
+                self.reselect()
+            }
+            // z: zz zt zb, and nothing else — this editor has no folds, so
+            // za and zR stay inert rather than pretending
+            // (adr/2026-08-scroll-anchor-is-consumed-once.md)
+            Prefix::Scroll => {
+                self.reset();
+                match character.as_str() {
+                    "z" => Outcome::Acts(vec![Act::Scroll(Anchor::Center)]),
+                    "t" => Outcome::Acts(vec![Act::Scroll(Anchor::Top)]),
+                    "b" => Outcome::Acts(vec![Act::Scroll(Anchor::Bottom)]),
+                    _ => Outcome::Swallow,
+                }
             }
             Prefix::Find(kind) => match character.chars().next() {
                 Some(wanted) => {
@@ -1088,13 +1279,17 @@ impl Vim {
             .get(view.head..)
             .and_then(|rest| rest.chars().next())
             .is_some_and(|ch| !ch.is_whitespace());
-        let motion = if op == Operator::Change
-            && motion == Motion::WordForward
-            && on_word
-        {
-            Motion::WordEnd
-        } else {
-            motion
+        // cw acts as ce on a word, and cW as cE — vim's own quirk, kept
+        // for both sizes
+        // (adr/2026-08-word-motions-add-their-big-siblings.md)
+        let motion = match motion {
+            Motion::WordForward if op == Operator::Change && on_word => {
+                Motion::WordEnd
+            }
+            Motion::BigWordForward if op == Operator::Change && on_word => {
+                Motion::BigWordEnd
+            }
+            other => other,
         };
         // ; and , normalize into the find they repeat, so the span kind
         // reads off the motion itself
@@ -1152,8 +1347,12 @@ impl Vim {
                 if kind == SpanKind::Inclusive {
                     high = caret::next_cluster(view.text, high);
                 }
-                // dw stops at the line's end rather than eating the break
-                if motion == Motion::WordForward {
+                // dw stops at the line's end rather than eating the
+                // break; dW likewise
+                if matches!(
+                    motion,
+                    Motion::WordForward | Motion::BigWordForward
+                ) {
                     let line = lines.around(view.head);
                     high = high.min(line.end).max(low);
                 }
@@ -1169,12 +1368,76 @@ impl Vim {
         around: bool,
         view: &View,
     ) -> Outcome {
-        let (Some(op), Some(kind)) = (self.operator, object_kind(character))
-        else {
+        let Some(kind) = object_kind(character) else {
+            self.reset();
+            return Outcome::Swallow;
+        };
+        // in visual the object names a span the *selection* takes, so the
+        // anchor lands on one end and the head on the other — the same
+        // Place-then-Extend pair gv uses, and no verb is involved
+        // (adr/2026-08-objects-reach-visual-mode.md)
+        if let Mode::Visual(visual) = self.mode {
+            self.reset();
+            let Some(span) = motions::object(
+                view.text,
+                view.blocks,
+                view.head,
+                kind,
+                around,
+            ) else {
+                return Outcome::Swallow;
+            };
+            return Outcome::Acts(select_span(span, visual, view));
+        }
+        let Some(op) = self.operator else {
             self.reset();
             return Outcome::Swallow;
         };
         self.object_noun(op, kind, around, view)
+    }
+
+    /// gu gU g~: arm the verb, or take the current lines when the same one
+    /// is already armed — gugu and gUgU alongside guu and gUU
+    /// (adr/2026-08-case-operators-are-verbs.md).
+    fn case_key(&mut self, op: Operator, view: &View) -> Outcome {
+        match self.operator {
+            Some(pending) if pending == op => self.current_lines(op, view),
+            Some(_) => {
+                self.reset();
+                Outcome::Swallow
+            }
+            None => {
+                self.operator = Some(op);
+                Outcome::Swallow
+            }
+        }
+    }
+
+    /// gv: the selection the last visual mode died with comes back. The
+    /// selection *is* phase 0's anchor, so restoring it is a Place on one
+    /// end and an Extend to the other — it needs no act of its own
+    /// (adr/2026-08-visual-gains-p-r-s-and-gv.md).
+    fn reselect(&mut self) -> Outcome {
+        self.reset();
+        let Some((kind, anchor, head)) = self.last_visual else {
+            return Outcome::Swallow;
+        };
+        self.mode = Mode::Visual(kind);
+        Outcome::Acts(vec![Act::Place(anchor), Act::Extend(head)])
+    }
+
+    /// Visual p: the clipboard replaces the span, and the *replaced* text
+    /// does not go back out. Vim clobbers its unnamed register here, but
+    /// the register is the OS clipboard
+    /// (adr/2026-08-one-register-the-clipboard.md), so clobbering would
+    /// spend the clip on its first use and break pasting one thing over
+    /// several spans — which is what visual p is for
+    /// (adr/2026-08-visual-gains-p-r-s-and-gv.md).
+    fn visual_paste(&mut self, kind: VisualKind, view: &View) -> Outcome {
+        let (span, linewise) = visual_span(kind, view);
+        self.reset();
+        self.mode = Mode::Normal;
+        Outcome::Acts(vec![Act::Checkpoint, Act::PasteOver { span, linewise }])
     }
 
     /// The object side of `finish_object`, taking the kind directly —
@@ -1327,8 +1590,10 @@ impl Vim {
             acts.push(Act::Checkpoint);
         }
         // a charwise nothing yanks nothing; a linewise nothing is still a
-        // line and its newline reaches the register, as vim's dd does
-        if !yanked.is_empty() {
+        // line and its newline reaches the register, as vim's dd does — and
+        // a recasing verb moves no text at all, so it fills no register
+        // (adr/2026-08-case-operators-are-verbs.md)
+        if !yanked.is_empty() && !op.recasing() {
             acts.push(Act::SetClipboard(yanked));
         }
         match op {
@@ -1370,6 +1635,18 @@ impl Vim {
                 acts.push(Act::Splice {
                     span,
                     text: String::new(),
+                    caret,
+                });
+            }
+            // the same landing rule the yank uses, for the same reason:
+            // nothing moved, so a linewise recasing leaves the caret alone
+            // and a charwise one owns its span's start
+            // (adr/2026-08-case-operators-are-verbs.md)
+            Operator::Lower | Operator::Upper | Operator::Flip => {
+                let caret = if linewise { view.head } else { span.start };
+                acts.push(Act::Splice {
+                    text: recase(cut, op),
+                    span,
                     caret,
                 });
             }
@@ -1465,10 +1742,20 @@ impl Vim {
     /// on the line than the count and the whole thing fails, as vim's does.
     fn replace_clusters(&mut self, character: &str, view: &View) -> Outcome {
         let total = self.count.max(1) as usize;
+        let visual = match self.mode {
+            Mode::Visual(kind) => Some(kind),
+            _ => None,
+        };
         self.reset();
         let Some(wanted) = character.chars().next() else {
             return Outcome::Swallow;
         };
+        // visual r overwrites the whole selection, count and all ignored;
+        // the newlines inside it stay newlines, or the lines would merge
+        // (adr/2026-08-visual-gains-p-r-s-and-gv.md)
+        if let Some(kind) = visual {
+            return self.replace_selection(kind, wanted, view);
+        }
         let line = Lines::of(view.text, view.blocks).around(view.head);
         let end = (0..total).fold(view.head, |from, _| {
             caret::next_cluster(view.text, from).min(line.end)
@@ -1503,6 +1790,62 @@ impl Vim {
     }
 
     /// ~: flip the case of [count] clusters and step past them.
+    /// J and gJ: the caret's row and the ones below it become one line.
+    /// The substrate is the visible-line table, never the raw newlines —
+    /// the bytes between two rows may be a block separator, and replacing
+    /// them collapses the two blocks exactly as a cross-block operator span
+    /// already does (adr/2026-08-join-walks-the-visible-rows.md).
+    fn join(&mut self, spaced: bool, view: &View) -> Outcome {
+        // vim's J takes two lines at count 1 and at count 2 alike
+        let total = self.effective_count().max(2);
+        self.reset();
+        let lines = Lines::of(view.text, view.blocks);
+        let first = lines.row_of(view.head);
+        let last = (first + total - 1).min(lines.rows() - 1);
+        if last == first {
+            // the note's last line has nothing below to pull up
+            return Outcome::Swallow;
+        }
+        let head = lines.row(first);
+        let span = head.start..lines.row(last).end;
+        let joined = (first..=last).fold(String::new(), |mut out, row| {
+            let slice = view.text.get(lines.row(row)).unwrap_or_default();
+            if row == first {
+                out.push_str(slice);
+                return out;
+            }
+            // gJ takes the next line exactly as it stands, indent included
+            let tail = if spaced { slice.trim_start() } else { slice };
+            if spaced && joins_with_space(&out, tail) {
+                out.push(' ');
+            }
+            out.push_str(tail);
+            out
+        });
+        // the caret rests where the join happened — on the space it
+        // inserted — and clamps back onto a cluster when the pulled-up
+        // line was empty and there is nothing at the boundary to rest on
+        let boundary = head.end;
+        let end = span.start + joined.len();
+        let caret = if boundary >= end && !joined.is_empty() {
+            span.start + caret::prev_cluster(&joined, joined.len())
+        } else {
+            boundary
+        };
+        self.record(Change::Join {
+            spaced,
+            count: total,
+        });
+        Outcome::Acts(vec![
+            Act::Checkpoint,
+            Act::Splice {
+                span,
+                text: joined,
+                caret,
+            },
+        ])
+    }
+
     fn toggle_case(&mut self, view: &View, line: &Range<usize>) -> Outcome {
         let total = self.count.max(1) as usize;
         self.reset();
@@ -1513,19 +1856,10 @@ impl Vim {
         if span.is_empty() {
             return Outcome::Swallow;
         }
-        let flipped: String = view
-            .text
-            .get(span.clone())
-            .unwrap_or_default()
-            .chars()
-            .flat_map(|ch| {
-                if ch.is_uppercase() {
-                    ch.to_lowercase().collect::<Vec<char>>()
-                } else {
-                    ch.to_uppercase().collect::<Vec<char>>()
-                }
-            })
-            .collect();
+        let flipped = recase(
+            view.text.get(span.clone()).unwrap_or_default(),
+            Operator::Flip,
+        );
         let caret = if end >= line.end {
             caret::prev_cluster(view.text, line.end).max(line.start)
         } else {
@@ -1581,8 +1915,65 @@ impl Vim {
     /// n and N: the committed pattern's next occurrence, wrap-around; the
     /// landing activates whichever block holds it
     /// (adr/2026-08-search-lands-through-place.md).
+    /// Visual r: every cluster of the selection becomes the character,
+    /// newlines excepted — they keep the lines apart. The selection is
+    /// spent and the caret lands on its start, as vim leaves it.
+    fn replace_selection(
+        &mut self,
+        kind: VisualKind,
+        wanted: char,
+        view: &View,
+    ) -> Outcome {
+        self.mode = Mode::Normal;
+        let (span, _) = visual_span(kind, view);
+        let text: String = view
+            .text
+            .get(span.clone())
+            .unwrap_or_default()
+            .chars()
+            .map(|ch| if ch == '\n' { '\n' } else { wanted })
+            .collect();
+        if text.is_empty() {
+            return Outcome::Acts(vec![Act::Place(span.start)]);
+        }
+        Outcome::Acts(vec![
+            Act::Checkpoint,
+            Act::Splice {
+                caret: span.start,
+                span,
+                text,
+            },
+        ])
+    }
+
     fn search_jump(&mut self, forward: bool, view: &View) -> Outcome {
         self.reset();
+        self.jump_to_search(forward, view)
+    }
+
+    /// The word under the caret becomes the pattern — whole-word, which is
+    /// the whole point of `*` — and the caret walks to the next or previous
+    /// one. `n` and `N` then keep walking that same kind of hit
+    /// (adr/2026-08-star-searches-whole-words.md).
+    fn search_word(&mut self, forward: bool, view: &View) -> Outcome {
+        self.reset();
+        let lines = Lines::of(view.text, view.blocks);
+        let Some(span) = motions::word_at_or_after(
+            view.text,
+            &lines.around(view.head),
+            view.head,
+        ) else {
+            // no word left on this line: nothing to search for
+            return Outcome::Swallow;
+        };
+        self.search = Some(Pattern {
+            text: view.text.get(span).unwrap_or_default().to_string(),
+            whole_word: true,
+        });
+        self.jump_to_search(forward, view)
+    }
+
+    fn jump_to_search(&mut self, forward: bool, view: &View) -> Outcome {
         let Some(pattern) = self.search.clone() else {
             return Outcome::Swallow;
         };
@@ -1592,6 +1983,133 @@ impl Vim {
             Some(hit) => Outcome::Acts(vec![Act::Place(hit)]),
             None => Outcome::Swallow,
         }
+    }
+
+    /// One submitted `:` line. Pure over the same `View` every keystroke
+    /// sees, so the whole ex vocabulary tests headlessly
+    /// (adr/2026-08-ex-line-is-literal-and-global.md).
+    pub fn commit_ex(&mut self, line: &str, view: &View) -> ExOutcome {
+        let line = line.trim();
+        let (range, rest) = split_range(line);
+        match rest {
+            // a bare Enter closes the prompt and does nothing, as vim's does
+            "" => self.ex_place(range, line, view),
+            "w" => ExOutcome::Acts(vec![Act::Save]),
+            "s" => ExOutcome::Refused(
+                "\":s\" needs a pattern — spell it :s/old/new/".to_string(),
+            ),
+            _ => match rest.strip_prefix('s').map(str::chars) {
+                // vim's own rule: the delimiter is whatever follows the s,
+                // and it may never be a letter or a digit — :sort would
+                // otherwise read its own o as one
+                Some(mut body) => match body.next() {
+                    Some(delim) if !delim.is_alphanumeric() => {
+                        self.substitute(range, delim, body.as_str(), view)
+                    }
+                    _ => ExOutcome::Refused(unknown_command(line)),
+                },
+                None => ExOutcome::Refused(unknown_command(line)),
+            },
+        }
+    }
+
+    /// `:N` — the only command spelled entirely as its range.
+    fn ex_place(
+        &mut self,
+        range: ExRange,
+        spelled: &str,
+        view: &View,
+    ) -> ExOutcome {
+        let lines = Lines::of(view.text, view.blocks);
+        match range {
+            ExRange::Line => ExOutcome::Acts(Vec::new()),
+            ExRange::Rows(row, _) => {
+                let rows = lines.rows();
+                if row < 1 || row > rows {
+                    return ExOutcome::Refused(format!(
+                        "\":{spelled}\" is past the note's {rows} lines — \
+                         the caret stayed"
+                    ));
+                }
+                let target = lines.row(row - 1);
+                ExOutcome::Acts(vec![Act::Place(motions::first_non_blank(
+                    view.text, &target,
+                ))])
+            }
+            ExRange::Whole | ExRange::Selection => {
+                ExOutcome::Refused(format!(
+                    "\":{spelled}\" names a range with no command — \
+                     add s/old/new/ after it"
+                ))
+            }
+        }
+    }
+
+    /// `:[range]s/old/new/`. Literal substrings, never regex — no regex
+    /// crate enters for this, and reading Typst prose with one is what the
+    /// never-regex rule already forbids. Every occurrence on every row in
+    /// range goes, always: `gdefault` is how the user's own vim is
+    /// configured, so a trailing `g` is accepted and ignored
+    /// (adr/2026-08-ex-line-is-literal-and-global.md).
+    fn substitute(
+        &mut self,
+        range: ExRange,
+        delim: char,
+        body: &str,
+        view: &View,
+    ) -> ExOutcome {
+        // an unterminated :s/old is vim's "replace with nothing"
+        let (pattern, tail) = body.split_once(delim).unwrap_or((body, ""));
+        let (replacement, _flags) =
+            tail.split_once(delim).unwrap_or((tail, ""));
+        if pattern.is_empty() {
+            return ExOutcome::Refused(
+                "\":s\" needs a pattern — spell it :s/old/new/".to_string(),
+            );
+        }
+        let lines = Lines::of(view.text, view.blocks);
+        let (first, last) = range.rows(&lines, view);
+        let span = lines.row(first).start..lines.row(last).end;
+        let smart = motions::smartcase(pattern);
+        let mut out = String::new();
+        let mut caret = span.start;
+        let mut hits = 0;
+        let mut seam = span.start;
+        for row in first..=last {
+            let line = lines.row(row);
+            // the bytes between two rows — a newline, or a whole block
+            // separator — are nobody's line and ride along untouched
+            out.push_str(view.text.get(seam..line.start).unwrap_or_default());
+            let opened = out.len();
+            let (replaced, found) = replace_all(
+                view.text.get(line.clone()).unwrap_or_default(),
+                pattern,
+                replacement,
+                smart,
+            );
+            if found > 0 {
+                // vim leaves the caret on the last row it touched
+                caret = span.start + opened;
+                hits += found;
+            }
+            out.push_str(&replaced);
+            seam = line.end;
+        }
+        if hits == 0 {
+            return ExOutcome::Refused(format!(
+                "\":s\" found no \"{pattern}\" in the range — widen it with \
+                 :%s, or check the case"
+            ));
+        }
+        // one splice, so one u takes the whole substitution back (AIR ACT-2)
+        ExOutcome::Acts(vec![
+            Act::Checkpoint,
+            Act::Splice {
+                span,
+                text: out,
+                caret,
+            },
+        ])
     }
 
     /// A fresh note begins thinking: normal mode, the pending grammar
@@ -1620,7 +2138,7 @@ impl Vim {
     /// n the widget synthesizes right after.
     pub fn commit_search(&mut self, pattern: String) {
         if !pattern.is_empty() {
-            self.search = Some(pattern);
+            self.search = Some(Pattern::loose(pattern));
         }
     }
 
@@ -1658,6 +2176,10 @@ impl Vim {
             Change::Toggle { count } => {
                 self.count = over.unwrap_or(count) as u32;
                 self.toggle_case(view, &line)
+            }
+            Change::Join { spaced, count } => {
+                self.count = over.unwrap_or(count) as u32;
+                self.join(spaced, view)
             }
             Change::Paste { before, count } => Outcome::Acts(vec![
                 Act::Checkpoint,
@@ -1896,6 +2418,22 @@ fn indented(body: &str, spaces: usize, deeper: bool) -> usize {
 /// selection sees it — char-wise takes both end clusters, as vim's visual
 /// does; line-wise takes the whole lines. Shared so the wrap S arms and
 /// the cut a verb makes can never drift apart.
+/// Putting a span *into* the selection rather than handing it to a verb:
+/// the anchor takes one end, the head the other, and the caret rests on
+/// the span's last cluster the way visual mode always draws its head
+/// (adr/2026-08-objects-reach-visual-mode.md).
+fn select_span(span: Range<usize>, kind: VisualKind, view: &View) -> Vec<Act> {
+    let head = match kind {
+        // a line-wise selection redraws itself from its ends' rows, so the
+        // raw end is enough; a char-wise one rests on the last cluster
+        VisualKind::Line => span.end,
+        VisualKind::Char => {
+            caret::prev_cluster(view.text, span.end).max(span.start)
+        }
+    };
+    vec![Act::Place(span.start), Act::Extend(head)]
+}
+
 fn visual_span(kind: VisualKind, view: &View) -> (Range<usize>, bool) {
     let low = view.head.min(view.anchor);
     let high = view.head.max(view.anchor);
@@ -1917,12 +2455,136 @@ fn visual_span(kind: VisualKind, view: &View) -> (Range<usize>, bool) {
 /// and the forward finds are inclusive, the verticals and whole-note jumps
 /// linewise, everything else exclusive — ; and , arrive here already
 /// normalized into the find they repeat.
+impl ExRange {
+    /// The row window this range names, low to high and clamped onto the
+    /// table.
+    fn rows(self, lines: &Lines, view: &View) -> (usize, usize) {
+        let top = lines.rows() - 1;
+        let (first, last) = match self {
+            ExRange::Line => {
+                let row = lines.row_of(view.head);
+                (row, row)
+            }
+            ExRange::Whole => (0, top),
+            ExRange::Selection => (
+                lines.row_of(view.head.min(view.anchor)),
+                lines.row_of(view.head.max(view.anchor)),
+            ),
+            // spelled one-based, as vim counts its lines
+            ExRange::Rows(first, last) => (
+                first.saturating_sub(1).min(top),
+                last.saturating_sub(1).min(top),
+            ),
+        };
+        (first.min(last), first.max(last))
+    }
+}
+
+/// The range a `:` line opens with, and whatever command follows it.
+fn split_range(line: &str) -> (ExRange, &str) {
+    if let Some(rest) = line.strip_prefix('%') {
+        return (ExRange::Whole, rest.trim_start());
+    }
+    if let Some(rest) = line.strip_prefix("'<,'>") {
+        return (ExRange::Selection, rest.trim_start());
+    }
+    let (Some(first), rest) = take_number(line) else {
+        return (ExRange::Line, line);
+    };
+    let Some(after) = rest.strip_prefix(',') else {
+        return (ExRange::Rows(first, first), rest.trim_start());
+    };
+    let (second, rest) = take_number(after);
+    (
+        ExRange::Rows(first, second.unwrap_or(first)),
+        rest.trim_start(),
+    )
+}
+
+/// The digits a range opens with, if any, and what is left after them.
+fn take_number(line: &str) -> (Option<usize>, &str) {
+    let digits = line
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(line.len());
+    (line[..digits].parse().ok(), &line[digits..])
+}
+
+/// Every occurrence of the literal pattern on one row, left to right and
+/// non-overlapping, and how many there were
+/// (adr/2026-08-ex-line-is-literal-and-global.md).
+fn replace_all(
+    slice: &str,
+    pattern: &str,
+    replacement: &str,
+    smart: bool,
+) -> (String, usize) {
+    let mut out = String::new();
+    let mut kept = 0;
+    let mut hits = 0;
+    for (offset, _) in slice.char_indices() {
+        // a hit consumed the bytes up to `kept`; nothing inside one can
+        // start another
+        if offset < kept {
+            continue;
+        }
+        let Some(length) = motions::match_len(slice, offset, pattern, smart)
+        else {
+            continue;
+        };
+        out.push_str(slice.get(kept..offset).unwrap_or_default());
+        out.push_str(replacement);
+        kept = offset + length;
+        hits += 1;
+    }
+    out.push_str(slice.get(kept..).unwrap_or_default());
+    (out, hits)
+}
+
+/// What the status surface says about a `:` line it could not read: what
+/// happened, and what to type instead (AIR ERR-1).
+fn unknown_command(line: &str) -> String {
+    format!(
+        "unknown command \":{line}\" — :w saves, :s/old/new/ substitutes, \
+         :12 goes to a line"
+    )
+}
+
+/// The three case verbs over one span. `~` on a single cluster is the same
+/// arithmetic as `g~` over a motion, so both go through here
+/// (adr/2026-08-case-operators-are-verbs.md).
+fn recase(text: &str, op: Operator) -> String {
+    text.chars()
+        .flat_map(|ch| match op {
+            Operator::Upper => ch.to_uppercase().collect::<Vec<char>>(),
+            Operator::Lower => ch.to_lowercase().collect(),
+            _ if ch.is_uppercase() => ch.to_lowercase().collect(),
+            _ => ch.to_uppercase().collect(),
+        })
+        .collect()
+}
+
+/// vim's rules for the space J puts between two lines: none when there is
+/// nothing on either side of the join, when the first line already ends in
+/// whitespace, or when the second opens with a closing bracket
+/// (adr/2026-08-join-walks-the-visible-rows.md).
+fn joins_with_space(before: &str, after: &str) -> bool {
+    !before.is_empty()
+        && !before.ends_with(char::is_whitespace)
+        && !after.is_empty()
+        && !after.starts_with(')')
+}
+
 fn span_kind(motion: Motion) -> SpanKind {
     match motion {
         Motion::Down | Motion::Up | Motion::FirstLine | Motion::LastLine => {
             SpanKind::Linewise
         }
-        Motion::WordEnd | Motion::LineEnd => SpanKind::Inclusive,
+        Motion::WordEnd
+        | Motion::BigWordEnd
+        | Motion::WordEndBack
+        | Motion::BigWordEndBack
+        | Motion::MatchPair
+        | Motion::LineEnd => SpanKind::Inclusive,
         Motion::Find(kind, _) => find_span(kind),
         _ => SpanKind::Exclusive,
     }
@@ -2024,6 +2686,7 @@ fn entry_acts(
 fn object_kind(character: &str) -> Option<ObjectKind> {
     match character {
         "w" => Some(ObjectKind::Word),
+        "W" => Some(ObjectKind::BigWord),
         "\"" => Some(ObjectKind::Quote('"')),
         "'" => Some(ObjectKind::Quote('\'')),
         "`" => Some(ObjectKind::Quote('`')),
@@ -5016,7 +5679,7 @@ mod tests {
             Outcome::Acts(vec![Act::SwapEnds]),
         );
         assert_eq!(
-            feed(&mut vim, "z", &spread(NOTE, &parsed, 27, 2)),
+            feed(&mut vim, "q", &spread(NOTE, &parsed, 27, 2)),
             Outcome::Swallow,
         );
         // escape returns to normal with the caret at the head
@@ -5898,5 +6561,933 @@ mod tests {
             assert_eq!(vim.operator, None, "{keys}");
             assert_eq!(vim.prefix, None, "{keys}");
         }
+    }
+
+    // -- the WORD siblings, % and * -----------------------------------------
+
+    /// adr/2026-08-word-motions-add-their-big-siblings.md
+    #[test]
+    fn the_big_word_keys_answer_in_both_modes() {
+        // "allons-y" is three small words and one WORD
+        let text = "allons-y vite\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "W", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(9)]),
+            "W crosses the hyphen w stops at"
+        );
+        assert_eq!(
+            feed(&mut vim, "w", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(6)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "B", &view(text, &parsed, 9)),
+            Outcome::Acts(vec![Act::Place(0)]),
+        );
+        assert_eq!(
+            feed(&mut vim, "E", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(7)]),
+        );
+        // and the same three extend a selection rather than placing it
+        let mut visual = Vim {
+            mode: Mode::Visual(VisualKind::Char),
+            ..Vim::default()
+        };
+        for (key, from, landing) in [("W", 0, 9), ("E", 0, 7), ("B", 9, 0)] {
+            assert_eq!(
+                feed(&mut visual, key, &spread(text, &parsed, from, from)),
+                Outcome::Acts(vec![Act::Extend(landing)]),
+                "{key} in visual",
+            );
+        }
+        // % answers in visual too, over the same brackets
+        let bracketed = "a (b) c\n";
+        let parsed = blocks::segment(bracketed);
+        assert_eq!(
+            feed(&mut visual, "%", &spread(bracketed, &parsed, 0, 0)),
+            Outcome::Acts(vec![Act::Extend(4)]),
+        );
+    }
+
+    #[test]
+    fn ge_and_g_uppercase_e_ride_the_g_prefix() {
+        let text = "allons-y vite\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "ge", &view(text, &parsed, 9)),
+            Outcome::Acts(vec![Act::Place(7)]),
+            "the y, end of the small word before vite"
+        );
+        assert_eq!(
+            feed(&mut vim, "gE", &view(text, &parsed, 9)),
+            Outcome::Acts(vec![Act::Place(7)]),
+            "the same y, which ends the WORD too"
+        );
+        assert_eq!(
+            feed(&mut vim, "gE", &view(text, &parsed, 7)),
+            Outcome::Acts(vec![Act::Place(0)]),
+            "from inside the WORD there is nothing but the note's start"
+        );
+    }
+
+    #[test]
+    fn the_big_siblings_inherit_the_two_house_quirks() {
+        // cw acts as ce on a word, and so must cW as cE
+        let text = "allons-y vite\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "cW", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("allons-y".into()),
+                Act::Splice {
+                    span: 0..8,
+                    text: String::new(),
+                    caret: 0,
+                },
+            ]),
+            "cW took the WORD, not its trailing blank"
+        );
+        assert_eq!(vim.mode, Mode::Insert);
+        // and dW on a line's last WORD stops at the line's end
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "dW", &view(text, &parsed, 9))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("vite".into()),
+                Act::Splice {
+                    span: 9..13,
+                    text: String::new(),
+                    caret: 8,
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn the_big_word_object_answers_behind_a_verb() {
+        let text = "prends l'idée, vite\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "diW", &view(text, &parsed, 10))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("l'idée,".into()),
+                Act::Splice {
+                    span: 7..15,
+                    text: String::new(),
+                    caret: 7,
+                },
+            ]),
+        );
+    }
+
+    /// adr/2026-08-percent-matches-vims-default-pairs.md
+    #[test]
+    fn percent_jumps_and_carries_its_bracket_under_a_verb() {
+        let text = "a (b) c\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "%", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(4)]),
+        );
+        // inclusive, so d% takes the closing bracket too
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "d%", &view(text, &parsed, 2))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("(b)".into()),
+                Act::Splice {
+                    span: 2..5,
+                    text: String::new(),
+                    caret: 2,
+                },
+            ]),
+        );
+        // a line with no bracket consumes the key and stays
+        let bare = "rien\n";
+        let parsed = blocks::segment(bare);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "%", &view(bare, &parsed, 0)),
+            Outcome::Swallow,
+        );
+    }
+
+    /// adr/2026-08-star-searches-whole-words.md
+    #[test]
+    fn star_searches_whole_words_and_n_keeps_walking_them() {
+        let text = "le mot, un motif, et mot.\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "*", &view(text, &parsed, 3)),
+            Outcome::Acts(vec![Act::Place(21)]),
+            "the mot inside motif is not a whole word"
+        );
+        // n inherits the whole-word rule the * pattern was born with
+        assert_eq!(
+            feed(&mut vim, "n", &view(text, &parsed, 21)),
+            Outcome::Acts(vec![Act::Place(3)]),
+            "wrapping past motif, not into it"
+        );
+        // # is the same walk backward
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "#", &view(text, &parsed, 21)),
+            Outcome::Acts(vec![Act::Place(3)]),
+        );
+    }
+
+    #[test]
+    fn star_with_no_word_left_on_the_line_consumes_its_key_and_stays() {
+        let text = "!!\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "*", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+        // and a word with no second occurrence anywhere still fails the jump
+        let alone = "seul.\n";
+        let parsed = blocks::segment(alone);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "*", &view(alone, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(0)]),
+            "one occurrence wraps onto itself, as vim's does"
+        );
+    }
+
+    // -- J, gJ, and the case verbs ------------------------------------------
+
+    /// adr/2026-08-join-walks-the-visible-rows.md
+    #[test]
+    fn j_joins_the_next_row_with_one_space() {
+        let text = "une idée\n  et sa suite\nplus loin\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "J", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..23,
+                text: "une idée et sa suite".into(),
+                caret: 9,
+            }]),
+            "the second line's indent goes, one space stands in its place"
+        );
+        // the checkpoint is there, so one u takes the join back
+        let mut vim = normal();
+        assert!(matches!(
+            feed(&mut vim, "J", &view(text, &parsed, 0)),
+            Outcome::Acts(acts) if acts.first() == Some(&Act::Checkpoint)
+        ));
+    }
+
+    #[test]
+    fn a_count_joins_that_many_lines_and_gj_keeps_the_indent() {
+        let text = "une idée\n  et sa suite\nplus loin\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "3J", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..33,
+                text: "une idée et sa suite plus loin".into(),
+                caret: 9,
+            }]),
+        );
+        // gJ takes the next row exactly as it stands, indent and all
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "gJ", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..23,
+                text: "une idée  et sa suite".into(),
+                caret: 9,
+            }]),
+        );
+    }
+
+    #[test]
+    fn join_obeys_vims_no_space_rules_and_stops_at_the_notes_end() {
+        // A row that already ends in a blank takes no second one. It has
+        // to be a row *inside* a multi-line construct: an ordinary line's
+        // trailing spaces belong to the block separator, not to the row
+        // (adr/2026-08-per-line-block-segmentation.md), so only a block
+        // that spans lines can hand a join one.
+        let text = "#f(a, \n   b)\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "J", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..12,
+                text: "#f(a, b)".into(),
+                caret: 6,
+            }]),
+            "no second space after the one already there"
+        );
+        let closing = "#f(a\n) et\n";
+        let parsed = blocks::segment(closing);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "J", &view(closing, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..9,
+                text: "#f(a) et".into(),
+                caret: 4,
+            }]),
+            "a closing bracket takes no space before it"
+        );
+        // an empty row pulled up adds nothing, and the caret clamps back
+        // onto a cluster rather than resting past the line's end
+        let trailing = "mot\n\n";
+        let parsed = blocks::segment(trailing);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "J", &view(trailing, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..4,
+                text: "mot".into(),
+                caret: 2,
+            }]),
+        );
+        // the note's last row has nothing below it to pull up
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "J", &view(trailing, &parsed, trailing.len())),
+            Outcome::Swallow,
+        );
+    }
+
+    #[test]
+    fn a_join_of_two_blank_rows_leaves_the_caret_at_the_start() {
+        let text = "\n\n\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "J", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..1,
+                text: String::new(),
+                caret: 0,
+            }]),
+        );
+    }
+
+    #[test]
+    fn the_dot_repeats_a_join() {
+        let text = "une\ndeux\ntrois\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        feed(&mut vim, "J", &view(text, &parsed, 0));
+        let joined = "une deux\ntrois\n";
+        let reparsed = blocks::segment(joined);
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(joined, &reparsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..14,
+                text: "une deux trois".into(),
+                caret: 8,
+            }]),
+        );
+    }
+
+    /// adr/2026-08-case-operators-are-verbs.md
+    #[test]
+    fn the_case_verbs_take_a_motion_and_fill_no_register() {
+        let text = "une idée noire\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "gUw", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..4,
+                    text: "UNE ".into(),
+                    caret: 0,
+                },
+            ]),
+            "no SetClipboard: a recasing verb moves no text"
+        );
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(
+                &mut vim,
+                "guiw",
+                &view("UNE IDÉE\n", &blocks::segment("UNE IDÉE\n"), 0)
+            )),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..3,
+                text: "une".into(),
+                caret: 0,
+            }]),
+        );
+        // g~ flips what it spans
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "g~w", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..4,
+                text: "UNE ".into(),
+                caret: 0,
+            }]),
+        );
+    }
+
+    #[test]
+    fn the_case_verbs_double_onto_the_current_line_both_ways() {
+        let text = "une idée\ndeux\n";
+        let parsed = blocks::segment(text);
+        // guu, whose second key is not a verb key
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "gUU", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..10,
+                text: "UNE IDÉE\n".into(),
+                caret: 0,
+            }]),
+        );
+        // and gUgU, which reaches the same place through the g prefix
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "gUgU", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..10,
+                text: "UNE IDÉE\n".into(),
+                caret: 0,
+            }]),
+        );
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(
+                &mut vim,
+                "guu",
+                &view("UNE\ndeux\n", &blocks::segment("UNE\ndeux\n"), 0)
+            )),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..4,
+                text: "une\n".into(),
+                caret: 0,
+            }]),
+        );
+        let mut vim = normal();
+        assert_eq!(
+            stripped(feed(&mut vim, "g~~", &view(text, &parsed, 0))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..10,
+                text: "UNE IDÉE\n".into(),
+                caret: 0,
+            }]),
+        );
+    }
+
+    #[test]
+    fn a_case_verb_crossed_with_another_aborts_and_the_dot_replays_it() {
+        let text = "une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "gUgu", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+            "two different case verbs cancel, as d then c does"
+        );
+        assert_eq!(vim.operator, None, "the grammar recovered");
+        // the dot replays a case change through the same resolution path
+        let mut vim = normal();
+        feed(&mut vim, "gUw", &view(text, &parsed, 0));
+        let shouted = "UNE idée\n";
+        let reparsed = blocks::segment(shouted);
+        assert_eq!(
+            stripped(feed(&mut vim, ".", &view(shouted, &reparsed, 4))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 4..9,
+                text: "IDÉE".into(),
+                caret: 4,
+            }]),
+        );
+    }
+
+    // -- visual gains its verbs ---------------------------------------------
+
+    fn visual(kind: VisualKind) -> Vim {
+        Vim {
+            mode: Mode::Visual(kind),
+            ..Vim::default()
+        }
+    }
+
+    /// adr/2026-08-visual-gains-p-r-s-and-gv.md
+    #[test]
+    fn visual_s_is_c_and_the_case_verbs_answer_over_the_selection() {
+        let text = "une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            stripped(feed(&mut vim, "s", &spread(text, &parsed, 0, 2))),
+            Outcome::Acts(vec![
+                Act::SetClipboard("une".into()),
+                Act::Splice {
+                    span: 0..3,
+                    text: String::new(),
+                    caret: 0,
+                },
+            ]),
+            "s changes the selection exactly as c does"
+        );
+        assert_eq!(vim.mode, Mode::Insert);
+        for (key, wanted) in [("U", "UNE"), ("u", "une"), ("~", "UNE")] {
+            let mut vim = visual(VisualKind::Char);
+            assert_eq!(
+                stripped(feed(&mut vim, key, &spread(text, &parsed, 0, 2))),
+                Outcome::Acts(vec![Act::Splice {
+                    span: 0..3,
+                    text: wanted.into(),
+                    caret: 0,
+                }]),
+                "visual {key} recases and fills no register",
+            );
+            assert_eq!(vim.mode, Mode::Normal, "the selection is spent");
+        }
+    }
+
+    #[test]
+    fn visual_r_overwrites_every_cluster_and_keeps_the_newlines() {
+        let text = "une\ndeux\n";
+        let parsed = blocks::segment(text);
+        let mut vim = visual(VisualKind::Line);
+        assert_eq!(
+            stripped(feed(&mut vim, "rx", &spread(text, &parsed, 0, 5))),
+            Outcome::Acts(vec![Act::Splice {
+                span: 0..9,
+                text: "xxx\nxxxx\n".into(),
+                caret: 0,
+            }]),
+            "the line breaks stand, or the lines would merge"
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+        // a selection standing on the note's real trailing empty line has
+        // nothing to overwrite, and checkpoints nothing
+        // (adr/2026-08-cursor-always-in-the-note.md)
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            feed(&mut vim, "rx", &spread(text, &parsed, 9, 9)),
+            Outcome::Acts(vec![Act::Place(9)]),
+        );
+    }
+
+    #[test]
+    fn visual_p_replaces_the_span_without_clobbering_the_clipboard() {
+        let text = "une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            feed(&mut vim, "p", &spread(text, &parsed, 0, 2)),
+            Outcome::Acts(vec![
+                Act::Checkpoint,
+                Act::PasteOver {
+                    span: 0..3,
+                    linewise: false,
+                },
+            ]),
+            "no SetClipboard: what it replaced does not go back out"
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+        // a V selection keeps its line-wise shape
+        let mut vim = visual(VisualKind::Line);
+        assert_eq!(
+            feed(&mut vim, "p", &spread(text, &parsed, 0, 2)),
+            Outcome::Acts(vec![
+                Act::Checkpoint,
+                Act::PasteOver {
+                    span: 0..10,
+                    linewise: true,
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn gv_puts_the_last_selection_back() {
+        let text = "une idée\n";
+        let parsed = blocks::segment(text);
+        let mut vim = visual(VisualKind::Char);
+        // the selection the mode dies with is the one the exiting keystroke
+        // saw — here, Escape's
+        vim.handle(
+            &Key::Escape,
+            Modifiers::empty(),
+            &spread(text, &parsed, 0, 4),
+        );
+        assert_eq!(vim.mode, Mode::Normal);
+        assert_eq!(
+            feed(&mut vim, "gv", &view(text, &parsed, 0)),
+            Outcome::Acts(vec![Act::Place(0), Act::Extend(4)]),
+        );
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Char));
+        // with nothing remembered, gv consumes its keys and stays
+        let mut fresh = normal();
+        assert_eq!(
+            feed(&mut fresh, "gv", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+    }
+
+    /// adr/2026-08-objects-reach-visual-mode.md
+    #[test]
+    fn objects_reach_visual_mode_and_take_the_selection() {
+        let text = "prends « une idée » vite\n";
+        let parsed = blocks::segment(text);
+        let mut vim = visual(VisualKind::Char);
+        // viw over "une": the head rests on the run's last cluster
+        assert_eq!(
+            feed(&mut vim, "iw", &spread(text, &parsed, 10, 10)),
+            Outcome::Acts(vec![Act::Place(10), Act::Extend(12)]),
+        );
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Char), "still visual");
+        // a« takes the guillemets with it
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            feed(&mut vim, "a«", &spread(text, &parsed, 10, 10)),
+            Outcome::Acts(vec![Act::Place(7), Act::Extend(20)]),
+        );
+        // a line-wise selection takes the object's raw ends
+        let mut vim = visual(VisualKind::Line);
+        assert_eq!(
+            feed(&mut vim, "iw", &spread(text, &parsed, 10, 10)),
+            Outcome::Acts(vec![Act::Place(10), Act::Extend(13)]),
+        );
+        // an object that names nothing consumes its keys and stays
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            feed(&mut vim, "i(", &spread(text, &parsed, 10, 10)),
+            Outcome::Swallow,
+        );
+        assert_eq!(vim.mode, Mode::Visual(VisualKind::Char));
+        // and an unknown object key aborts the prefix
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            feed(&mut vim, "iz", &spread(text, &parsed, 10, 10)),
+            Outcome::Swallow,
+        );
+        assert_eq!(vim.prefix, None, "the grammar recovered");
+    }
+
+    #[test]
+    fn an_object_key_with_no_verb_and_no_selection_aborts() {
+        let text = "une idée\n";
+        let parsed = blocks::segment(text);
+        // reached only through the dot's replay path, which resolves an
+        // object noun without arming the operator first
+        let mut vim = normal();
+        vim.prefix = Some(Prefix::Object { around: false });
+        assert_eq!(
+            feed(&mut vim, "w", &view(text, &parsed, 0)),
+            Outcome::Swallow
+        );
+        assert_eq!(vim.prefix, None, "the grammar recovered");
+    }
+
+    // -- zz zt zb, gf ------------------------------------------------------
+
+    /// adr/2026-08-scroll-anchor-is-consumed-once.md
+    #[test]
+    fn the_z_prefix_names_where_the_caret_sits_and_binds_nothing_else() {
+        let text = "une idée\n";
+        let parsed = blocks::segment(text);
+        for (keys, anchor) in [
+            ("zz", Anchor::Center),
+            ("zt", Anchor::Top),
+            ("zb", Anchor::Bottom),
+        ] {
+            let mut vim = normal();
+            assert_eq!(
+                feed(&mut vim, keys, &view(text, &parsed, 0)),
+                Outcome::Acts(vec![Act::Scroll(anchor)]),
+                "{keys}",
+            );
+        }
+        // this editor has no folds: za and zR stay inert rather than
+        // pretending to be something
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "za", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+        assert_eq!(vim.prefix, None, "the grammar recovered");
+        // and it answers in visual too
+        let mut vim = visual(VisualKind::Char);
+        assert_eq!(
+            feed(&mut vim, "zz", &spread(text, &parsed, 0, 2)),
+            Outcome::Acts(vec![Act::Scroll(Anchor::Center)]),
+        );
+    }
+
+    /// adr/2026-08-gf-follows-the-link.md
+    #[test]
+    fn gf_asks_the_executor_to_follow_the_link_under_the_caret() {
+        let text = "voir #l(\"une-idee\")\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "gf", &view(text, &parsed, 10)),
+            Outcome::Acts(vec![Act::FollowLink]),
+        );
+        // behind a verb, f is the find prefix and g's own f means nothing
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, "dgf", &view(text, &parsed, 0)),
+            Outcome::Swallow,
+        );
+    }
+
+    // -- the ex line --------------------------------------------------------
+
+    /// The three-line fixture the substitutes work over: the middle row is
+    /// the caret's, and "vieux" stands on two of the three.
+    const EX: &str = "un vieux mot\nun vieux vieux\nrien\n";
+
+    fn ex(vim: &mut Vim, line: &str, at: usize) -> ExOutcome {
+        let parsed = blocks::segment(EX);
+        vim.commit_ex(line, &view(EX, &parsed, at))
+    }
+
+    /// adr/2026-08-ex-line-is-literal-and-global.md
+    #[test]
+    fn the_colon_opens_the_prompt_and_visual_spells_its_range() {
+        let parsed = blocks::segment(EX);
+        let mut vim = normal();
+        assert_eq!(
+            feed(&mut vim, ":", &view(EX, &parsed, 0)),
+            Outcome::Acts(vec![Act::OpenEx {
+                prefill: String::new()
+            }]),
+        );
+        let mut vim = visual(VisualKind::Line);
+        assert_eq!(
+            feed(&mut vim, ":", &spread(EX, &parsed, 0, 14)),
+            Outcome::Acts(vec![Act::OpenEx {
+                prefill: "'<,'>".into()
+            }]),
+        );
+        assert_eq!(
+            vim.mode,
+            Mode::Visual(VisualKind::Line),
+            "the selection lives until the line is submitted (AIR ERR-6)"
+        );
+    }
+
+    #[test]
+    fn an_empty_line_does_nothing_and_w_saves() {
+        let mut vim = normal();
+        assert_eq!(ex(&mut vim, "", 0), ExOutcome::Acts(Vec::new()));
+        assert_eq!(ex(&mut vim, "   ", 0), ExOutcome::Acts(Vec::new()));
+        assert_eq!(ex(&mut vim, "w", 0), ExOutcome::Acts(vec![Act::Save]),);
+    }
+
+    #[test]
+    fn a_bare_number_goes_to_that_line() {
+        let mut vim = normal();
+        assert_eq!(
+            ex(&mut vim, "2", 0),
+            ExOutcome::Acts(vec![Act::Place(13)]),
+            "one-based, and landing on the first non-blank"
+        );
+        // out of range says so rather than moving somewhere arbitrary
+        let ExOutcome::Refused(reason) = ex(&mut vim, "42", 0) else {
+            panic!("a line past the note's end must refuse");
+        };
+        assert!(reason.contains("past the note's 4 lines"), "{reason}");
+        assert!(reason.contains("the caret stayed"), "{reason}");
+        let ExOutcome::Refused(zero) = ex(&mut vim, "0", 0) else {
+            panic!("there is no line zero");
+        };
+        assert!(zero.contains("past the note's"), "{zero}");
+    }
+
+    #[test]
+    fn substitute_replaces_every_hit_on_the_caret_line() {
+        let mut vim = normal();
+        // gdefault: no g needed, and a g is accepted and ignored
+        for spelled in ["s/vieux/neuf/", "s/vieux/neuf/g", "s/vieux/neuf"] {
+            assert_eq!(
+                ex(&mut vim, spelled, 13),
+                ExOutcome::Acts(vec![
+                    Act::Checkpoint,
+                    Act::Splice {
+                        span: 13..27,
+                        text: "un neuf neuf".into(),
+                        caret: 13,
+                    },
+                ]),
+                "{spelled}",
+            );
+        }
+    }
+
+    #[test]
+    fn substitute_takes_whatever_delimiter_follows_the_s() {
+        let mut vim = normal();
+        assert_eq!(
+            ex(&mut vim, "s#vieux#ne/uf#", 0),
+            ExOutcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..12,
+                    text: "un ne/uf mot".into(),
+                    caret: 0,
+                },
+            ]),
+            "a replacement carrying a slash needs another delimiter"
+        );
+    }
+
+    #[test]
+    fn substitute_ranges_span_the_note_the_rows_and_the_selection() {
+        let mut vim = normal();
+        // % walks the whole note, and the bytes between rows ride along
+        assert_eq!(
+            ex(&mut vim, "%s/vieux/neuf/", 0),
+            ExOutcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..33,
+                    text: "un neuf mot\nun neuf neuf\nrien\n".into(),
+                    // the last row it touched, measured in the *new* text:
+                    // row 0 shrank by one byte on the way past
+                    caret: 12,
+                },
+            ]),
+            "the caret lands on the last row it touched"
+        );
+        // an explicit row window, in either order
+        for spelled in ["1,1s/vieux/neuf/", "1s/vieux/neuf/"] {
+            assert_eq!(
+                ex(&mut vim, spelled, 20),
+                ExOutcome::Acts(vec![
+                    Act::Checkpoint,
+                    Act::Splice {
+                        span: 0..12,
+                        text: "un neuf mot".into(),
+                        caret: 0,
+                    },
+                ]),
+                "{spelled}",
+            );
+        }
+        // and the visual range, which reads the live anchor and head
+        let parsed = blocks::segment(EX);
+        let mut vim = visual(VisualKind::Line);
+        assert_eq!(
+            vim.commit_ex("'<,'>s/vieux/neuf/", &spread(EX, &parsed, 20, 3)),
+            ExOutcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..27,
+                    text: "un neuf mot\nun neuf neuf".into(),
+                    caret: 12,
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn a_reversed_or_overshot_row_range_still_names_a_window() {
+        let mut vim = normal();
+        // the order the two ends are spelled in does not matter
+        assert_eq!(
+            ex(&mut vim, "3,1s/vieux/neuf/", 0),
+            ex(&mut vim, "1,3s/vieux/neuf/", 0),
+        );
+        // and a row past the note's end clamps onto its last, rather than
+        // refusing the way a bare :99 does — the range named a window, and
+        // the window exists
+        assert_eq!(
+            ex(&mut vim, "1,99s/vieux/neuf/", 0),
+            ex(&mut vim, "%s/vieux/neuf/", 0),
+        );
+    }
+
+    /// A submitted command line that fails says so — it must never fall
+    /// silent the way an unbound keystroke does (AIR ERR-2).
+    #[test]
+    fn every_refusal_says_what_happened_and_what_to_type_instead() {
+        let mut vim = normal();
+        let cases = [
+            ("nope", "unknown command"),
+            ("sort", "unknown command"),
+            ("s", "needs a pattern"),
+            ("s//neuf/", "needs a pattern"),
+            ("s/absent/neuf/", "found no \"absent\""),
+            ("%", "names a range with no command"),
+            ("'<,'>", "names a range with no command"),
+        ];
+        for (spelled, wanted) in cases {
+            let ExOutcome::Refused(reason) = ex(&mut vim, spelled, 0) else {
+                panic!("\":{spelled}\" must refuse");
+            };
+            assert!(reason.contains(wanted), "\":{spelled}\" said {reason:?}");
+            // every one of them names a way forward, not just a complaint
+            assert!(
+                reason.contains(" — ") || reason.contains("spell it"),
+                "\":{spelled}\" said {reason:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn substitute_folds_case_by_the_same_smartcase_rule_the_slash_uses() {
+        let text = "Un Vieux vieux\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        // all-lowercase matches both
+        assert_eq!(
+            vim.commit_ex("s/vieux/neuf/", &view(text, &parsed, 0)),
+            ExOutcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..14,
+                    text: "Un neuf neuf".into(),
+                    caret: 0,
+                },
+            ]),
+        );
+        // a capital makes it exact
+        assert_eq!(
+            vim.commit_ex("s/Vieux/neuf/", &view(text, &parsed, 0)),
+            ExOutcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..14,
+                    text: "Un neuf vieux".into(),
+                    caret: 0,
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn overlapping_hits_are_consumed_left_to_right() {
+        let text = "aaaa\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        assert_eq!(
+            vim.commit_ex("s/aa/b/", &view(text, &parsed, 0)),
+            ExOutcome::Acts(vec![
+                Act::Checkpoint,
+                Act::Splice {
+                    span: 0..4,
+                    text: "bb".into(),
+                    caret: 0,
+                },
+            ]),
+            "two hits, not three: nothing inside a hit starts another"
+        );
     }
 }
