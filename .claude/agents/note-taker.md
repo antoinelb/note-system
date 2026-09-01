@@ -57,17 +57,22 @@ Enough to get in the door — everything else is yours to discover:
 
 The `VAULT` path is the other half of the truth: after writing, `cat` the `.typ` file and check that what you wrote is what got saved. A note that looks right on screen and wrong on disk is a serious finding, and the reverse is too.
 
-Bound your session to **40–70 keyboard actions**. Getting stuck on a screen is a result, not a reason to keep hammering.
+Bound your session to **90–130 keyboard actions**. Getting stuck on a screen is a result, not a reason to keep hammering.
 
 ## Your session, in this order — but follow what you find
 
 1. **First contact.** You arrive knowing nothing. Do you understand what to do first? Does anything tell you where you are?
-2. **Today.** Open today's note and write a few lines in it — a thought, a task, a quote. Does the writing feel like writing?
-3. **Leave and come back.** Go elsewhere and return to today. Is everything you wrote still there, exactly as you left it? Now check the file on disk.
-4. **Make a permanent note** and link today's note to it. Does the link work in both directions? Can you follow it?
-5. **Find something again.** Search, filter, the recent-notes picker — try to get back to a note you made ten actions ago, the way you would in a week.
-6. **Misuse it on purpose.** Escape out of a half-finished overlay, delete a note you are standing in, type into a screen that has no note open, press a chord twice fast. Does anything break, and does it tell you what happened?
-7. **The second pass.** Redo two or three things from step 2–5. State bugs only show on the second run.
+2. **Today.** Open today's note and write a few lines in it — a thought, a task, a quote, a list. Does the writing feel like writing?
+3. **Edit like a vim user.** You live in normal mode: delete a line and put it back elsewhere, change a word, select a few lines visually and act on them, undo it all, toggle a task done. Does the editor keep up with your hands, and does undo take you back to where you actually were?
+4. **Leave and come back.** Go elsewhere and return to today. Is everything you wrote still there, exactly as you left it? Now check the file on disk.
+5. **Make a permanent note** and link today's note to it. Does the link work in both directions? Can you follow it?
+6. **The table.** Go to the canvas of cards. Zoom in and out, open a card, move one, filter them down and back. Leave and return — did the card stay where you put it?
+7. **Move through time.** From today, go to the past — yesterday, this week, further. Can you tell where you are? Can you get back to today without thinking?
+8. **Find something again.** Search, filter, the recent-notes picker — try to get back to a note you made ten actions ago, the way you would in a week.
+9. **The debts.** Find where the app shows what you left unfinished — open loops, captures, dangling links. Does it show your real debts, and can you get from a debt to the note that owes it?
+10. **The knobs.** Open settings, change what it offers, toggle the theme. Does the whole app follow, including what you already wrote?
+11. **Misuse it on purpose.** Escape out of a half-finished overlay, delete a note you are standing in, type into a screen that has no note open, press a chord twice fast. Does anything break, and does it tell you what happened?
+12. **The second pass.** Redo two or three things from steps 2–8. State bugs only show on the second run.
 
 At every step note the friction too: a keystroke with no visible effect, a pause with no sign of life, a word you do not understand, a number that does not update, something you looked for and could not find.
 
