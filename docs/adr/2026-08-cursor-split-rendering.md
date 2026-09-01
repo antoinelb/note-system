@@ -1,5 +1,7 @@
 # Rendering splits at the cursor into two fragments, not one per line
 
+**The rendering half is superseded by `adr/2026-08-css-draws-the-markup.md`**: most blocks now draw as CSS spans from a parse-tree markup model, with the `Typst`-verdict fallback cached one widget per block instead of two cursor-keyed regions; `blocks::segment` and "a block is one physical line" stand unchanged, and the Context below (the survey of family (a)/(b) editors, and the per-line-compile cost that motivated the two-region split) still explains why line-level compiled fragments were the wrong shape before CSS rendering existed as an option.
+
 ## Context
 
 A short survey of how live-preview editors keep source and rendered views in sync around the cursor, one line each:

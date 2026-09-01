@@ -384,13 +384,12 @@ mod tests {
     /// interface.
     fn fragment_job(vault: &Path) -> Job {
         let note = vault.join("permanent/zettelkasten.typ");
-        let crate::render::FragmentView::Pending { job: Some(job), .. } =
+        let crate::render::FragmentView::Pending { job: Some(job) } =
             crate::render::FragmentCache::default().probe(
                 vault,
                 &note,
                 "= titre\n",
                 RenderTheme::Paper(DEFAULT_SIZE),
-                crate::render::Side::Above,
             )
         else {
             panic!("a fresh cache queues the compile");

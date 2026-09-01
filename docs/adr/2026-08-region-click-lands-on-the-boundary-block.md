@@ -1,5 +1,7 @@
 # A click anywhere in a compiled region activates the block next to the active line, not the block under the pointer
 
+**Superseded by `adr/2026-08-css-draws-the-markup.md`**: compiled regions are gone — one widget per block again, whether CSS-drawn or Typst-compiled — so a click now lands on the block it actually hit, not the one bordering the active line. Placing the caret at the exact byte offset inside a clicked, non-active block remains unimplemented; a click still only activates the block, same coarse resolution as before.
+
 ## Context
 
 ADR `2026-08-cursor-split-rendering` merges every block above (and below) the active line into one compiled Typst fragment per side. Before that change, one fragment existed per block, so a click carried its own block's identity for free — the fragment a click landed in was the block to activate. A merged region has no such per-line seam once it compiles: `typst-svg` hands back one SVG for the whole region, with no surviving per-source-line marker a click's pixel position could be resolved against.

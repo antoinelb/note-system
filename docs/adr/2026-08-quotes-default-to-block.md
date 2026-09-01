@@ -15,5 +15,5 @@ Seeding a fresh vault carries the change automatically (`adr/2026-08-templates-s
 
 ## Rejected
 
-- **Pass `block: true` at every `#quote` call site instead** — every note already written, and every future `>`-expansion, would need the argument spelled out by hand; a template default removes the chance to forget it.
+- **Pass `block: true` at every `#quote` call site instead** — every note already written, and every future `>` line, would need the argument spelled out by hand; a template default removes the chance to forget it. (Originally written against the Enter-time `>`-expansion of `adr/2026-08-greater-than-expands-to-quote.md`; that expansion is gone, but a stored `>` line still resolves to a `quote` call through the template's `show par:` rule, `adr/2026-08-greater-than-is-the-stored-quote.md`, and still needs this default.)
 - **Auto-migrate existing vaults' `template.typ` on launch** — contradicts `adr/2026-08-templates-seeded-from-embedded-fixtures.md`'s explicit design: the user's edited template always wins over the shipped default, and a template is an editable note like any other.

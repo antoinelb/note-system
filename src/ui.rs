@@ -21,12 +21,13 @@ use crate::index::{Index, TableNote};
 use crate::keymap;
 use crate::links;
 use crate::logs::{self, Selection};
+use crate::markup;
 use crate::motions::{self, Lines, Motion};
 use crate::palette;
 use crate::positions::Positions;
 use crate::render::{
     BodyCache, BodyView, DEFAULT_SIZE, FragmentCache, FragmentView,
-    RenderTheme, Side,
+    RenderTheme,
 };
 use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
@@ -160,6 +161,15 @@ impl Goal {
 
 /// One clipboard write, done when the future resolves.
 pub type Written = Pin<Box<dyn Future<Output = ()>>>;
+
+/// One block's caret-laid-out lines, each piece tagged with the markup role
+/// it renders under — or untagged (`None`) on the Typst verdict, where the
+/// rsx below omits the class attribute outright, leaving the fallback's
+/// markup byte-for-byte what it was before this block drew styled
+/// (adr/2026-08-css-draws-the-markup.md). Shared by `Pane::Source` and
+/// `Pane::Selected`, which both build it from the same
+/// `markup::model`/`markup::tint` pair.
+type TintedLines = Vec<Vec<(Option<(markup::Role, bool)>, caret::Piece)>>;
 
 /// How Ctrl+C reaches the system clipboard: `main` injects a JS
 /// `navigator.clipboard.writeText`, the headless tests inject a recorder —
@@ -1930,6 +1940,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         vim.read().mode,
                                         vim::Mode::Visual(vim::VisualKind::Line)
                                     );
+                                    // the same verdict that decides an
+                                    // inactive block's rendering: CSS draws
+                                    // this block's markup roles too, with
+                                    // caret::layout kept as the one place
+                                    // that knows where the caret, the
+                                    // selection and the IME preview land
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let draw = markup::model(&text);
                                     let lines = caret::layout(
                                         &text,
                                         anchor,
@@ -1938,10 +1956,66 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         shape,
                                         linewise,
                                     );
+                                    // every piece tagged with the role it
+                                    // renders under, or untagged on the
+                                    // Typst verdict — tagged as `None` so
+                                    // the `if let` below omits the class
+                                    // attribute outright, leaving the
+                                    // fallback's markup byte-for-byte what
+                                    // it was before this block drew styled
+                                    let rendered_lines: TintedLines = match &draw
+                                    {
+                                        markup::Draw::Css(model) => lines
+                                            .into_iter()
+                                            .map(|line| {
+                                                markup::tint(
+                                                    &model.spans,
+                                                    line.pieces,
+                                                )
+                                                .into_iter()
+                                                .map(|(role, delimiter, piece)| {
+                                                    (Some((role, delimiter)), piece)
+                                                })
+                                                .collect()
+                                            })
+                                            .collect(),
+                                        markup::Draw::Typst => lines
+                                            .into_iter()
+                                            .map(|line| {
+                                                line.pieces
+                                                    .into_iter()
+                                                    .map(|piece| (None, piece))
+                                                    .collect()
+                                            })
+                                            .collect(),
+                                    };
+                                    // the block's structural role
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    // — `None` on the Typst verdict, since a
+                                    // fallback block has no markup block
+                                    // role to draw, leaving `.block-active`
+                                    // exactly what it drew before this task
+                                    let block_class = match &draw {
+                                        markup::Draw::Css(model) => {
+                                            Some(markup::block_class(model.block))
+                                        }
+                                        markup::Draw::Typst => None,
+                                    };
+                                    // a nested list item's indent, same
+                                    // treatment as `block_class` above
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let item_style = match &draw {
+                                        markup::Draw::Css(model) => {
+                                            markup::item_indent_style(model.block)
+                                        }
+                                        markup::Draw::Typst => None,
+                                    };
                                     rsx! {
                                         div {
                                             key: "{start}",
                                             class: "block-active",
+                                            class: if let Some(bc) = &block_class { "{bc}" },
+                                            style: if let Some(s) = &item_style { "{s}" },
                                             // a press asks the hit probe which character it
                                             // landed on; Ctrl makes it a follow, like
                                             // Ctrl+Enter (adr/2026-08-ctrl-enter-opens-time-links.md)
@@ -2010,23 +2084,52 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                 let dragging = dragging.clone();
                                                 move |_| dragging.set(false)
                                             },
-                                            for (row, line) in lines.into_iter().enumerate() {
+                                            for (row, line) in rendered_lines.into_iter().enumerate() {
                                                 div { key: "{row}", class: "source-line",
-                                                    for piece in line.pieces {
+                                                    for (tag, piece) in line {
                                                         {
+                                                            // the piece's own existing class stays exactly what it
+                                                            // was; the role only ever adds a second class, and the
+                                                            // Typst verdict's `None` tag makes that addition a
+                                                            // no-op, so the fallback still draws byte-for-byte
+                                                            // what it did before this block drew styled
+                                                            let markup_class = tag.map(|(role, delimiter)| {
+                                                                markup::class(role, delimiter)
+                                                            });
                                                             match piece {
                                                                 caret::Piece::Text { start, text } => rsx! {
-                                                                    span { key: "{start}-", "data-start": "{start}", "{text}" }
+                                                                    span {
+                                                                        key: "{start}-",
+                                                                        class: if let Some(mc) = markup_class { "{mc}" },
+                                                                        "data-start": "{start}",
+                                                                        "{text}"
+                                                                    }
                                                                 },
                                                                 caret::Piece::Selected { start, text } => rsx! {
-                                                                    span { key: "{start}-sel", class: "sel", "data-start": "{start}", "{text}" }
+                                                                    span {
+                                                                        key: "{start}-sel",
+                                                                        class: "sel",
+                                                                        class: if let Some(mc) = markup_class { "{mc}" },
+                                                                        "data-start": "{start}",
+                                                                        "{text}"
+                                                                    }
                                                                 },
                                                                 caret::Piece::Preview { start, text } => rsx! {
-                                                                    span { key: "{start}-compose", class: "compose", "data-start": "{start}", "{text}" }
+                                                                    span {
+                                                                        key: "{start}-compose",
+                                                                        class: "compose",
+                                                                        class: if let Some(mc) = markup_class { "{mc}" },
+                                                                        "data-start": "{start}",
+                                                                        "{text}"
+                                                                    }
                                                                 },
                                                                 // both carets: keyed by position, so every move
                                                                 // remounts them — restarting the bar's blink
-                                                                // (solid while typing) and the scroll-into-view
+                                                                // (solid while typing) and the scroll-into-view.
+                                                                // No markup class here — the caret's own classes
+                                                                // stay untouched, since the `j`/`k` line walk and
+                                                                // the mouse hit probe key off them
+                                                                // (adr/2026-08-css-draws-the-markup.md)
                                                                 caret::Piece::Caret => rsx! {
                                                                     span {
                                                                         key: "caret-{head}",
@@ -2203,10 +2306,65 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 // textarea socket — only the active block
                                 // is ever the widget
                                 // (adr/2026-08-visual-selection-drawn-across-lines.md)
-                                Pane::Selected { start, lines } => rsx! {
+                                Pane::Selected { start, lines, text } => {
+                                    // same verdict, same tint: a covered
+                                    // block draws its markup roles too, not
+                                    // just its highlight
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let draw = markup::model(&text);
+                                    // the block's structural role, same
+                                    // treatment as `.block-active` above:
+                                    // `None` on the Typst verdict leaves
+                                    // `.block-selected` exactly what it
+                                    // drew before this task
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let block_class = match &draw {
+                                        markup::Draw::Css(model) => {
+                                            Some(markup::block_class(model.block))
+                                        }
+                                        markup::Draw::Typst => None,
+                                    };
+                                    // a nested list item's indent, same
+                                    // treatment as `block_class` above
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let item_style = match &draw {
+                                        markup::Draw::Css(model) => {
+                                            markup::item_indent_style(model.block)
+                                        }
+                                        markup::Draw::Typst => None,
+                                    };
+                                    let rendered_lines: TintedLines = match &draw
+                                    {
+                                        markup::Draw::Css(model) => lines
+                                            .into_iter()
+                                            .map(|line| {
+                                                markup::tint(
+                                                    &model.spans,
+                                                    line.pieces,
+                                                )
+                                                .into_iter()
+                                                .map(|(role, delimiter, piece)| {
+                                                    (Some((role, delimiter)), piece)
+                                                })
+                                                .collect()
+                                            })
+                                            .collect(),
+                                        markup::Draw::Typst => lines
+                                            .into_iter()
+                                            .map(|line| {
+                                                line.pieces
+                                                    .into_iter()
+                                                    .map(|piece| (None, piece))
+                                                    .collect()
+                                            })
+                                            .collect(),
+                                    };
+                                    rsx! {
                                     div {
                                         key: "{start}",
                                         class: "block-selected",
+                                        class: if let Some(bc) = &block_class { "{bc}" },
+                                        style: if let Some(s) = &item_style { "{s}" },
                                         onclick: {
                                             let fragments = fragments.clone();
                                             let goal = goal.clone();
@@ -2217,15 +2375,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                             }
                                         },
                                         div { class: "selected-source",
-                                            for (row, line) in lines.into_iter().enumerate() {
+                                            for (row, line) in rendered_lines.into_iter().enumerate() {
                                                 div { key: "{row}", class: "source-line",
-                                                    for piece in line.pieces {
+                                                    for (tag, piece) in line {
                                                         {
                                                             let (selected, piece_start, text) = piece_span(piece);
+                                                            let markup_class = tag.map(|(role, delimiter)| {
+                                                                markup::class(role, delimiter)
+                                                            });
                                                             rsx! {
                                                                 span {
                                                                     key: "{piece_start}-{selected}",
                                                                     class: if selected { "sel" },
+                                                                    class: if let Some(mc) = markup_class { "{mc}" },
                                                                     "data-start": "{piece_start}",
                                                                     "{text}"
                                                                 }
@@ -2236,11 +2398,66 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                             }
                                         }
                                     }
-                                },
+                                    }
+                                }
+                                // a block CSS can draw: the markup model's
+                                // structural role and spans laid out as
+                                // styled DOM text rather than a compiled
+                                // SVG (adr/2026-08-css-draws-the-markup.md)
+                                Pane::Css { start, block, spans, text } => {
+                                    let class = markup::block_class(block);
+                                    // a blank block carries the same
+                                    // shape class an active blank line
+                                    // sits inside, so entering or leaving
+                                    // it never shifts anything below
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let blank = block == markup::BlockRole::Blank;
+                                    // a nested list item's indent
+                                    // (adr/2026-08-css-draws-the-markup.md)
+                                    let item_style = markup::item_indent_style(block);
+                                    let lines = markup_lines(&text, &spans);
+                                    rsx! {
+                                        div {
+                                            key: "{start}",
+                                            class: "block block-css {class}",
+                                            class: if blank { "block-blank" },
+                                            style: if let Some(s) = &item_style { "{s}" },
+                                            onclick: {
+                                                let fragments = fragments.clone();
+                                                let goal = goal.clone();
+                                                move |_| {
+                                                    goal.set(goal.get().forgotten());
+                                                    editor.write().activate(start);
+                                                    fragments.borrow_mut().sweep();
+                                                }
+                                            },
+                                            div { class: "block-source",
+                                                for (row, line) in lines.into_iter().enumerate() {
+                                                    div { key: "{row}", class: "source-line",
+                                                        for (role, delimiter, piece) in line {
+                                                            {
+                                                                let (piece_start, piece_text) = css_piece_span(piece);
+                                                                let span_class = markup::class(role, delimiter);
+                                                                rsx! {
+                                                                    span {
+                                                                        key: "{piece_start}",
+                                                                        class: "{span_class}",
+                                                                        "data-start": "{piece_start}",
+                                                                        "{piece_text}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 Pane::Fragment { start, rendered } => rsx! {
                                     div {
                                         key: "{start}",
-                                        class: "block",
+                                        class: "block block-svg",
                                         onclick: {
                                             let fragments = fragments.clone();
                                             let goal = goal.clone();
@@ -2262,22 +2479,24 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         }
                                     }
                                 },
-                                Pane::Pending { start, stale, text, job } => {
+                                Pane::Pending { start, text, job } => {
                                     // the compile rides the tier (at most
                                     // once — the probe dedups) while the
-                                    // region shows its previous compile —
-                                    // or, the first time this side has ever
-                                    // had one, its raw source dimmed —
-                                    // until the fresh SVG lands
+                                    // block's own raw source shows dimmed
+                                    // until the fresh SVG lands — a block's
+                                    // cache key is its own content only, so
+                                    // there is no previous compile of a
+                                    // *different* content to hold in its
+                                    // place meanwhile
                                     // (adr/2026-08-async-caches-pending-stale.md,
-                                    // adr/2026-08-region-recompile-keeps-the-stale-svg.md)
+                                    // adr/2026-08-css-draws-the-markup.md).
                                     if let Some(job) = job {
                                         (feed.submit)(Job::Fragment(job));
                                     }
                                     rsx! {
                                         div {
                                             key: "{start}",
-                                            class: "block block-pending",
+                                            class: "block block-svg block-pending",
                                             onclick: {
                                                 let fragments = fragments.clone();
                                                 let goal = goal.clone();
@@ -2287,16 +2506,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     fragments.borrow_mut().sweep();
                                                 }
                                             },
-                                            {
-                                                match stale {
-                                                    Some(svg) => rsx! {
-                                                        div { class: "note", dangerous_inner_html: "{svg}" }
-                                                    },
-                                                    None => rsx! {
-                                                        div { class: "pending-source", "{text}" }
-                                                    },
-                                                }
-                                            }
+                                            div { class: "pending-source", "{text}" }
                                         }
                                     }
                                 }
@@ -3913,7 +4123,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     {raised_layer.unwrap_or_else(|| rsx! {})}
                     aside {
                         class: "sheet",
-                        style: "left: {table::SHEET_LEFT}px; width: {table::SHEET_WIDTH}px",
+                        // the panel's nominal geometry (left, width) is the
+                        // table's own consts, but a narrow window must
+                        // still be able to shrink it — `.sheet-column`'s
+                        // `min(529px, 100%)` (assets/theme.css) can only
+                        // shrink what is *inside* this box, so the box
+                        // itself needs the same ceiling or it runs past a
+                        // window narrower than SHEET_LEFT + SHEET_WIDTH
+                        // (item 8, adr/2026-08-css-draws-the-markup.md)
+                        style: "left: {table::SHEET_LEFT}px; width: {table::SHEET_WIDTH}px; max-width: calc(100vw - {table::SHEET_LEFT}px - 24px)",
                         // a press inside the sheet is the sheet's own (text
                         // selection, block clicks) — never the void's pan
                         onmousedown: move |event: MouseEvent| event.stop_propagation(),
@@ -3923,7 +4141,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 None => rsx! {},
                             }
                         }
-                        {blocks_view().unwrap_or_else(|| rsx! {})}
+                        div { class: "sheet-column",
+                            {blocks_view().unwrap_or_else(|| rsx! {})}
+                        }
                         {picker_view()}
                         {
                             // backlinks only, as a count ("← 2") — absent at
@@ -4456,23 +4676,37 @@ fn sheet_backlinks(root: &Path, own: &str) -> Result<usize, String> {
     Ok(links::backlinks(&sources, own, &[]).len())
 }
 
-/// One centre-pane slot: at most three per render — the region above the
-/// active line, the active line itself as raw source for the textarea, and
-/// the region below — each tagged with a `start` byte so a click activates
-/// by coordinate rather than by shiftable index
-/// (adr/2026-08-cursor-split-rendering.md).
+/// One centre-pane slot, one per block of the note, each tagged with its
+/// own block's `start` byte so a click activates the block actually
+/// clicked rather than a fixed boundary neighbour
+/// (adr/2026-08-css-draws-the-markup.md, superseding the cursor split's
+/// merged-region compromise).
 enum Pane {
     Source {
         start: usize,
         text: String,
     },
     /// A block the note-global visual selection reaches into, drawn as
-    /// highlighted raw source rather than folded into a compiled region —
-    /// the active block keeps the widget, this one keeps only the pixels
+    /// highlighted raw source rather than through the markup model — the
+    /// active block keeps the widget, this one keeps only the pixels
     /// (adr/2026-08-visual-selection-drawn-across-lines.md).
     Selected {
         start: usize,
         lines: Vec<caret::Line>,
+        /// The block's own content, so the pane can run it through
+        /// `markup::model` the same way an active or an inactive block
+        /// does — `lines` alone carries no source text to derive a
+        /// verdict from (adr/2026-08-css-draws-the-markup.md).
+        text: String,
+    },
+    /// A block CSS can draw: its structural role and the spans tiling its
+    /// content, laid out as styled `<span>`s rather than a compiled SVG
+    /// (adr/2026-08-css-draws-the-markup.md).
+    Css {
+        start: usize,
+        block: markup::BlockRole,
+        spans: Vec<markup::Span>,
+        text: String,
     },
     Fragment {
         start: usize,
@@ -4480,27 +4714,17 @@ enum Pane {
     },
     Pending {
         start: usize,
-        // the previous compile for this region's side, shown in place of
-        // the raw source below whenever one exists — a moving cursor keeps
-        // its last good render instead of flashing to dimmed text on every
-        // line (adr/2026-08-region-recompile-keeps-the-stale-svg.md)
-        stale: Option<String>,
         text: String,
         job: Option<crate::render::FragmentJob>,
     },
 }
 
-/// Splits the note into panes around the active block: everything above
-/// compiles as one region, the active block stays raw source, everything
-/// below compiles as a second region — unless the visual selection reaches
-/// past the active block, in which case every block it covers on that side
-/// splits out of the compiled region into its own highlighted `Selected`
-/// pane, and only the remaining, uncovered slice still compiles
-/// (adr/2026-08-cursor-split-rendering.md,
-/// adr/2026-08-visual-selection-drawn-across-lines.md). A region with no
-/// block in its span (the active block leads or trails the note, or the
-/// selection swallows the region whole) is skipped rather than mounting an
-/// empty pane.
+/// Splits the note into one pane per block: the active block stays raw
+/// source, every other block the visual selection reaches into draws as
+/// highlighted raw source, and every remaining block draws from the markup
+/// model — styled CSS spans when it can, a cached compiled-SVG widget when
+/// it can't (adr/2026-08-css-draws-the-markup.md,
+/// adr/2026-08-visual-selection-drawn-across-lines.md).
 fn block_panes(
     editor: &Editor,
     root: &Path,
@@ -4533,108 +4757,52 @@ fn block_panes(
             sel
         }
     });
+    // the selection's own reach above/below the active block: only past
+    // that edge does a block need to split out into its own highlighted
+    // pane instead of the markup model's rendering
+    // (adr/2026-08-visual-selection-drawn-across-lines.md) — the boundary
+    // block on each side is found once, up front, the same way the cursor
+    // split did, rather than re-deriving it per block in the loop below
+    let above_boundary = selection
+        .as_ref()
+        .filter(|sel| sel.start < active.range.start)
+        .map(|sel| blocks::block_at(blocks, sel.start));
+    let below_boundary = selection
+        .as_ref()
+        .filter(|sel| sel.end > active.range.end)
+        .map(|sel| blocks::block_at(blocks, sel.end.saturating_sub(1)));
+    let sel = selection.unwrap_or(0..0);
 
-    let mut panes = Vec::with_capacity(3);
-    if let Some(prior) = active_index.checked_sub(1) {
-        // the selection's own reach above the active block: only when its
-        // low end lands strictly before it does anything above the active
-        // block need to split out of the compiled region at all
-        let above = selection
-            .as_ref()
-            .filter(|sel| sel.start < active.range.start)
-            .map(|sel| blocks::block_at(blocks, sel.start));
-        match above {
-            Some(boundary) => {
-                if let Some(edge) = boundary.checked_sub(1) {
-                    let pane = region_pane(
-                        text,
-                        blocks,
-                        0..blocks[boundary].range.start,
-                        blocks[edge].range.start,
-                        file,
-                        root,
-                        theme,
-                        cache,
-                        queued,
-                        Side::Above,
-                    );
-                    panes.extend(pane);
-                }
-                let sel = selection.clone().unwrap_or(0..0);
-                panes.extend(
-                    blocks[boundary..active_index]
-                        .iter()
-                        .map(|block| selected_pane(text, block, &sel)),
-                );
-            }
-            None => {
-                let pane = region_pane(
-                    text,
-                    blocks,
-                    0..active.range.start,
-                    blocks[prior].range.start,
-                    file,
-                    root,
-                    theme,
-                    cache,
-                    queued,
-                    Side::Above,
-                );
-                panes.extend(pane);
-            }
+    let mut panes = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        if index == active_index {
+            panes.push(Pane::Source {
+                start: active.range.start,
+                text: text.get(active.content()).unwrap_or("").to_string(),
+            });
+            continue;
         }
-    }
-    panes.push(Pane::Source {
-        start: active.range.start,
-        text: text.get(active.content()).unwrap_or("").to_string(),
-    });
-    if let Some(after) = blocks.get(active_index + 1) {
-        // the selection's own reach below the active block, the mirror of
-        // `above`
-        let below = selection
-            .as_ref()
-            .filter(|sel| sel.end > active.range.end)
-            .map(|sel| blocks::block_at(blocks, sel.end.saturating_sub(1)));
-        match below {
-            Some(boundary) => {
-                let sel = selection.clone().unwrap_or(0..0);
-                panes.extend(
-                    blocks[active_index + 1..=boundary]
-                        .iter()
-                        .map(|block| selected_pane(text, block, &sel)),
-                );
-                if let Some(edge) = blocks.get(boundary + 1) {
-                    let pane = region_pane(
-                        text,
-                        blocks,
-                        blocks[boundary].range.end..text.len(),
-                        edge.range.start,
-                        file,
-                        root,
-                        theme,
-                        cache,
-                        queued,
-                        Side::Below,
-                    );
-                    panes.extend(pane);
-                }
-            }
-            None => {
-                let pane = region_pane(
-                    text,
-                    blocks,
-                    active.range.end..text.len(),
-                    after.range.start,
-                    file,
-                    root,
-                    theme,
-                    cache,
-                    queued,
-                    Side::Below,
-                );
-                panes.extend(pane);
-            }
+        let selected = above_boundary
+            .is_some_and(|b| index >= b && index < active_index)
+            || below_boundary
+                .is_some_and(|b| index > active_index && index <= b);
+        if selected {
+            panes.push(selected_pane(text, block, &sel));
+            continue;
         }
+        panes.push(
+            match markup::model(text.get(block.content()).unwrap_or("")) {
+                markup::Draw::Css(markup) => Pane::Css {
+                    start: block.range.start,
+                    block: markup.block,
+                    spans: markup.spans,
+                    text: text.get(block.content()).unwrap_or("").to_string(),
+                },
+                markup::Draw::Typst => {
+                    block_pane(text, block, file, root, theme, cache, queued)
+                }
+            },
+        );
     }
     Some(panes)
 }
@@ -4670,6 +4838,7 @@ fn selected_pane(
     Pane::Selected {
         start: content.start,
         lines,
+        text: source.to_string(),
     }
 }
 
@@ -4690,54 +4859,80 @@ fn piece_span(piece: caret::Piece) -> (bool, usize, String) {
     }
 }
 
-/// One region's pane, or `None` for an empty span. `activate_at` is the
-/// byte a click on this pane resolves against: the rendered region can
-/// span several of the note's own per-line blocks, and there is no way to
-/// tell which one the pixel under the pointer belongs to once they compile
-/// into one merged SVG, so every click on a region wakes the same fixed
-/// block — the one adjacent to the active line, the caller's choice of
-/// `activate_at`
-/// (adr/2026-08-cursor-split-rendering.md,
-/// adr/2026-08-region-click-lands-on-the-boundary-block.md).
-#[allow(clippy::too_many_arguments)]
-fn region_pane(
+/// A `Css` pane's own lines: one entry per physical line of the block's
+/// content, each already split at every markup span boundary it crosses —
+/// `markup::tint` does the splitting, fed one whole-line `Piece::Text` at a
+/// time since a `Css` pane draws no caret, selection or IME preview of its
+/// own (adr/2026-08-css-draws-the-markup.md).
+fn markup_lines(
     text: &str,
-    blocks: &[blocks::Block],
-    span: Range<usize>,
-    activate_at: usize,
+    spans: &[markup::Span],
+) -> Vec<Vec<(markup::Role, bool, caret::Piece)>> {
+    let mut line_start = 0;
+    text.split('\n')
+        .map(|slice| {
+            let piece = caret::Piece::Text {
+                start: line_start,
+                text: slice.to_string(),
+            };
+            line_start += slice.len() + 1;
+            markup::tint(spans, vec![piece])
+        })
+        .collect()
+}
+
+/// One `Css` pane's own piece, reduced to its byte start and text —
+/// `markup::tint` only ever answers `Piece::Text` for the `Piece::Text`
+/// input `markup_lines` feeds it (the variant its `make` closure was given
+/// carries straight through), but the match stays exhaustive over every
+/// `Piece` rather than assuming that blind, the same call `piece_span`
+/// already makes for `Pane::Selected`.
+fn css_piece_span(piece: caret::Piece) -> (usize, String) {
+    match piece {
+        caret::Piece::Text { start, text }
+        | caret::Piece::Selected { start, text }
+        | caret::Piece::Preview { start, text } => (start, text),
+        caret::Piece::CaretBox { start, cluster } => (start, cluster),
+        caret::Piece::Caret => (0, String::new()),
+    }
+}
+
+/// One block's compiled-fallback pane: the block's own byte offset is what
+/// a click on it activates, so a click on a fallback block always lands on
+/// the block that was actually clicked
+/// (adr/2026-08-css-draws-the-markup.md, superseding the cursor split's
+/// boundary-block click compromise).
+fn block_pane(
+    text: &str,
+    block: &blocks::Block,
     file: &Path,
     root: &Path,
     theme: RenderTheme,
     cache: &mut FragmentCache,
     queued: bool,
-    side: Side,
-) -> Option<Pane> {
-    if span.is_empty() {
-        return None;
-    }
-    let source = blocks::region_source(text, blocks, span.clone());
-    Some(if queued {
+) -> Pane {
+    let source = blocks::block_source(text, block);
+    let start = block.range.start;
+    if queued {
         // the threaded adapter: never compile in the frame — probe, and
         // hand a miss's job up for the tier
         // (adr/2026-08-compute-tier-worker-seam.md)
-        match cache.probe(root, file, &source, theme, side) {
-            FragmentView::Ready(rendered) => Pane::Fragment {
-                start: activate_at,
-                rendered,
-            },
-            FragmentView::Pending { stale, job } => Pane::Pending {
-                start: activate_at,
-                stale,
-                text: text.get(span).unwrap_or("").to_string(),
+        match cache.probe(root, file, &source, theme) {
+            FragmentView::Ready(rendered) => {
+                Pane::Fragment { start, rendered }
+            }
+            FragmentView::Pending { job } => Pane::Pending {
+                start,
+                text: text.get(block.content()).unwrap_or("").to_string(),
                 job,
             },
         }
     } else {
         Pane::Fragment {
-            start: activate_at,
-            rendered: cache.render(root, file, &source, theme, side),
+            start,
+            rendered: cache.render(root, file, &source, theme),
         }
-    })
+    }
 }
 
 /// One card's body at the Bodies zoom: the SVG to show (fresh, or stale
@@ -4987,9 +5182,8 @@ mod tests {
     /// mounted-app doc): registration runs the chrome's two icons first,
     /// then jump-panel — the header's ‹ today › buttons, the three seasons,
     /// then each grid row as gutter + day cells — then the note's two
-    /// link-footer entries, one click target for the centre's merged
-    /// region above the note's own last block (the trailing empty line,
-    /// active by default — adr/2026-08-cursor-always-in-the-note.md), the
+    /// link-footer entries, one click target per block above the active
+    /// trailing empty line (adr/2026-08-css-draws-the-markup.md), the
     /// two crumb jumps, and finally the five rail rows top to bottom.
     const CHROME_TABLE: usize = 0;
     const CHROME_LOGS: usize = 1;
@@ -5000,20 +5194,20 @@ mod tests {
     const GUTTER_W31: usize = 38;
     const FOOTER_BACKLINK: usize = 44;
     const FOOTER_OUTGOING: usize = 45;
-    /// The one click target for everything above the active trailing empty
-    /// line — the fixture day note's preamble, blank line, heading and
-    /// link all compile as a single region now
-    /// (adr/2026-08-cursor-split-rendering.md). A click always wakes the
-    /// region's own adjacent block — here the link line, the block right
-    /// before the active one — so reaching the heading or the preamble
-    /// needs an ArrowUp motion afterward (`activate_heading`, below).
-    const BLOCK_ABOVE: usize = 46;
-    const CRUMB_WEEK: usize = 47;
-    const RAIL_SUMMER: usize = 49;
-    const RAIL_W30: usize = 50;
-    const RAIL_DAY_23: usize = 51;
-    const RAIL_DAY_22: usize = 52;
-    const RAIL_DAY_21: usize = 53;
+    /// The fixture day note's own preamble block — a click always wakes
+    /// exactly the block that was clicked now, so each block above the
+    /// active trailing line gets its own listener instead of one merged
+    /// region's (adr/2026-08-css-draws-the-markup.md).
+    const BLOCK_PREAMBLE: usize = 46;
+    const BLOCK_BLANK: usize = 47;
+    const BLOCK_HEADING: usize = 48;
+    const BLOCK_LINK: usize = 49;
+    const CRUMB_WEEK: usize = 50;
+    const RAIL_SUMMER: usize = 52;
+    const RAIL_W30: usize = 53;
+    const RAIL_DAY_23: usize = 54;
+    const RAIL_DAY_22: usize = 55;
+    const RAIL_DAY_21: usize = 56;
     /// July 2026 leads with two blanks, so a date's cell index is offset by
     /// one gutter per started week row (and everything sits behind the two
     /// chrome icons).
@@ -6037,7 +6231,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"style="left: 440px; width: 620px""#),
+            html.contains(r#"style="left: 440px; width: 620px; max-width: calc(100vw - 440px - 24px)""#),
             "{html}"
         );
         // the origin card left the canvas for its raised copy — one alpha
@@ -6252,7 +6446,7 @@ mod tests {
             "the tether followed the pan: {html}"
         );
         assert!(
-            html.contains(r#"style="left: 440px; width: 620px""#),
+            html.contains(r#"style="left: 440px; width: 620px; max-width: calc(100vw - 440px - 24px)""#),
             "the sheet stood still: {html}"
         );
     }
@@ -6895,13 +7089,13 @@ mod tests {
         assert!(!html.contains("alpha"), "{html}");
         assert_eq!(
             clicks.len(),
-            54,
+            57,
             "2 chrome icons + 3 header + 3 seasons + 5 gutters + 31 days \
-             + 2 footer links + 1 rendered region (the preamble, blank \
-             line, heading and link above the note's own trailing empty \
-             line — the one active by default, so it alone carries no \
-             click listener — all merge into one region now; \
-             adr/2026-08-cursor-split-rendering.md) + 2 crumbs \
+             + 2 footer links + 4 blocks (the preamble, blank line, \
+             heading and link above the note's own trailing empty line — \
+             the one active by default, so it alone carries no click \
+             listener — each now its own pane with its own click; \
+             adr/2026-08-css-draws-the-markup.md) + 2 crumbs \
              + 5 rail — the active widget listens for presses, not \
              clicks: {html}"
         );
@@ -6936,30 +7130,32 @@ mod tests {
         assert!(html.contains(">2026-07-22<"), "the chain follows: {html}");
     }
 
-    /// The broken `#let x = (` now shares its compiled region with the
-    /// preamble, the blank line and the heading above it — one bad line
-    /// takes the whole merged region down with it, not just its own line
-    /// the way per-line fragments used to isolate failures
-    /// (adr/2026-08-cursor-split-rendering.md).
+    /// The broken `#let x = (` is its own block now, compiled and cached
+    /// on its own — a bad block's failure stays on that one block instead
+    /// of taking its siblings down with it, the way the old merged region
+    /// used to (adr/2026-08-css-draws-the-markup.md).
     #[test]
-    fn a_broken_line_fails_the_whole_region_it_shares() {
+    fn a_broken_block_fails_only_itself() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        click(&mut dom, clicks[RAIL_DAY_21]);
+        let switched = click_for_mutations(&mut dom, clicks[RAIL_DAY_21]);
         // the note's own trailing empty line is what wakes active
         // (adr/2026-08-cursor-always-in-the-note.md)
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("render-error"), "{html}");
         assert!(
-            !html.contains(RENDERED_NOTE),
-            "the whole region failed together: {html}"
+            html.contains(RENDERED_NOTE),
+            "the preamble block compiles fine on its own: {html}"
         );
 
-        // activating the region lands on its own adjacent block — the
-        // broken line itself (day 21's blocks reuse day 23's element ids,
-        // and the broken line sits where day 23's link block did)
-        click(&mut dom, clicks[BLOCK_ABOVE]);
+        // the broken block is the only one whose shape changed from day
+        // 23's fixture (a styled `Pane::Css` link line there, a compiled
+        // `Pane::Fragment` here), so it is the only block this switch
+        // mounts a fresh click listener for
+        // (adr/2026-08-css-draws-the-markup.md)
+        let broken = listeners(&switched, "click")[0];
+        click(&mut dom, broken);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("render-error"), "{html}");
         assert!(html.contains("#let x = ("), "the broken source: {html}");
@@ -7154,90 +7350,104 @@ mod tests {
     #[test]
     fn clicking_a_block_opens_its_source_in_place() {
         // the note opens with its own trailing empty line already the
-        // source (adr/2026-08-cursor-always-in-the-note.md); clicking the
-        // still-rendered region above moves the source to its adjacent
-        // block — the link line — and renders the previously active line
-        // in its place (adr/2026-08-cursor-split-rendering.md)
+        // source (adr/2026-08-cursor-always-in-the-note.md); clicking any
+        // other block moves the source to exactly that block — the block
+        // actually clicked, not a neighbour
+        // (adr/2026-08-css-draws-the-markup.md) — and the previously
+        // active line renders as CSS markup in its place, being a blank
+        // line
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("block-active"), "born editing: {html}");
 
-        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_ABOVE]);
+        let mutations = click_for_mutations(&mut dom, clicks[BLOCK_LINK]);
         // the renderer announces the mount and the textarea asks for focus;
         // the fake backing refuses, which is all the handler has to absorb
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("2026-07-22"), "the link line source: {html}");
         assert!(
-            html.contains(RENDERED_NOTE),
-            "the previously active line renders in its place: {html}"
+            html.contains("mk-blank"),
+            "the previously active line renders as CSS in its place: {html}"
         );
     }
 
-    /// The three-pane shape (adr/2026-08-cursor-split-rendering.md): with
-    /// the caret mid-note, one region renders above the active line and a
-    /// second below it, each its own `class="block"` fragment, flanking
-    /// the one `class="block-active"` textarea.
+    /// The number of block panes (Css or SVG) `html` draws before and
+    /// after its one `block-active` widget, in document order — the
+    /// per-block replacement for the old cursor-split's above/below region
+    /// counts (adr/2026-08-css-draws-the-markup.md).
+    fn panes_around_active(html: &str) -> (usize, usize) {
+        let marker = r#"class="block-active"#;
+        let at = html.find(marker).expect("exactly one active block");
+        let pane = r#"class="block block-"#;
+        (
+            html[..at].matches(pane).count(),
+            html[at..].matches(pane).count(),
+        )
+    }
+
+    /// With the caret mid-note, every other block still renders — some
+    /// above the active one, some below it — each its own click-activated
+    /// pane instead of one merged region on each side
+    /// (adr/2026-08-css-draws-the-markup.md).
     #[test]
-    fn three_panes_render_with_the_caret_mid_note() {
+    fn blocks_render_on_both_sides_of_the_caret_mid_note() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         activate_heading(&mut dom, &clicks);
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
-            html.matches(r#"class="block-active""#).count(),
+            html.matches(r#"class="block-active"#).count(),
             1,
             "one active source pane: {html}"
         );
-        assert_eq!(
-            html.matches(r#"class="block""#).count(),
-            2,
-            "one region above, one below: {html}"
-        );
+        // preamble and the blank line above the heading; the link line and
+        // the note's own trailing blank line below it
+        assert_eq!(panes_around_active(&html), (2, 2), "{html}");
     }
 
     /// With the caret on the note's first block, there is nothing above it
-    /// to render: two panes, not three
-    /// (adr/2026-08-cursor-split-rendering.md).
+    /// to render — every other block renders below instead
+    /// (adr/2026-08-css-draws-the-markup.md).
     #[test]
-    fn two_panes_render_with_the_caret_on_the_first_line() {
+    fn no_block_renders_above_the_caret_on_the_first_line() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         activate_preamble(&mut dom, &clicks);
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
-            html.matches(r#"class="block-active""#).count(),
+            html.matches(r#"class="block-active"#).count(),
             1,
             "{html}"
         );
         assert_eq!(
-            html.matches(r#"class="block""#).count(),
-            1,
-            "no region above the first block: {html}"
+            panes_around_active(&html),
+            (0, 4),
+            "nothing above the first block; the rest render below: {html}"
         );
     }
 
     /// With the caret on the note's last block — its default position on
     /// open (adr/2026-08-cursor-always-in-the-note.md) — there is nothing
-    /// below it to render: two panes, not three.
+    /// below it to render.
     #[test]
-    fn two_panes_render_with_the_caret_on_the_last_line() {
+    fn no_block_renders_below_the_caret_on_the_last_line() {
         let vault = temp_vault();
         let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
-            html.matches(r#"class="block-active""#).count(),
+            html.matches(r#"class="block-active"#).count(),
             1,
             "{html}"
         );
         assert_eq!(
-            html.matches(r#"class="block""#).count(),
-            1,
-            "no region below the last block: {html}"
+            panes_around_active(&html),
+            (4, 0),
+            "everything renders above the last block; nothing below: {html}"
         );
     }
 
@@ -7285,6 +7495,43 @@ mod tests {
         );
     }
 
+    /// `markup::tint` never emits these three for the `Piece::Text` input
+    /// `markup_lines` feeds it, but the match stays exhaustive rather than
+    /// trusting that blind — proven dead here instead of trusted never to
+    /// arrive, the same guard `piece_span` carries for `Pane::Selected`.
+    #[test]
+    fn css_piece_span_reduces_every_piece_kind() {
+        assert_eq!(
+            css_piece_span(caret::Piece::Text {
+                start: 3,
+                text: "hi".to_string()
+            }),
+            (3, "hi".to_string())
+        );
+        assert_eq!(
+            css_piece_span(caret::Piece::Selected {
+                start: 5,
+                text: "lo".to_string()
+            }),
+            (5, "lo".to_string())
+        );
+        assert_eq!(
+            css_piece_span(caret::Piece::Preview {
+                start: 7,
+                text: "up".to_string()
+            }),
+            (7, "up".to_string())
+        );
+        assert_eq!(
+            css_piece_span(caret::Piece::CaretBox {
+                start: 2,
+                cluster: "x".to_string()
+            }),
+            (2, "x".to_string())
+        );
+        assert_eq!(css_piece_span(caret::Piece::Caret), (0, String::new()));
+    }
+
     /// One block fully inside the selection: its whole content comes back
     /// as one `Selected` line, start included.
     #[test]
@@ -7293,7 +7540,7 @@ mod tests {
         let blocks = blocks::segment(text);
         // blocks[0] is "= heading", covered end to end
         let selection = 0..text.len();
-        let Pane::Selected { start, lines } =
+        let Pane::Selected { start, lines, .. } =
             selected_pane(text, &blocks[0], &selection)
         else {
             panic!("selected_pane always answers Selected");
@@ -7352,7 +7599,7 @@ mod tests {
         // selection sits entirely inside blocks[2] ("after"), well past it
         let after_start = blocks[2].range.start;
         let selection = after_start..text.len();
-        let Pane::Selected { start, lines } =
+        let Pane::Selected { start, lines, .. } =
             selected_pane(text, &blocks[1], &selection)
         else {
             panic!("selected_pane always answers Selected");
@@ -7476,7 +7723,7 @@ mod tests {
             false,
         )
         .expect("an open note always answers panes");
-        let Some(Pane::Selected { start, lines }) = ragged.first() else {
+        let Some(Pane::Selected { start, lines, .. }) = ragged.first() else {
             panic!("the boundary block always answers Selected");
         };
         assert_eq!(*start, 0);
@@ -7504,7 +7751,7 @@ mod tests {
             true,
         )
         .expect("an open note always answers panes");
-        let Some(Pane::Selected { start, lines }) = widened.first() else {
+        let Some(Pane::Selected { start, lines, .. }) = widened.first() else {
             panic!("the boundary block always answers Selected");
         };
         assert_eq!(*start, 0);
@@ -7515,6 +7762,51 @@ mod tests {
                 text: "= heading".to_string(),
             }],
             "linewise widens the boundary block to the whole line: {lines:?}"
+        );
+    }
+
+    /// A note whose every block — a heading, two plain lines, the blank
+    /// lines between them — draws from the markup model: moving the caret
+    /// changes only which block is `Pane::Source`, never which pane needs
+    /// the compiled-Typst fallback, so the fragment cache the compiled
+    /// panes would have touched stays exactly as `block_panes` found it
+    /// (adr/2026-08-css-draws-the-markup.md).
+    #[test]
+    fn moving_the_caret_across_css_only_blocks_compiles_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let text = "= a\n\nb\n\nc\n";
+        let file = dir.path().join("note.typ");
+        std::fs::write(&file, text).expect("the fixture note is writable");
+        let mut editor = Editor::open(file);
+        let mut cache = FragmentCache::default();
+
+        block_panes(
+            &editor,
+            dir.path(),
+            RenderTheme::Paper(DEFAULT_SIZE),
+            &mut cache,
+            false,
+            false,
+        )
+        .expect("an open note always answers panes");
+
+        let blocks = blocks::segment(text);
+        editor.activate(blocks[2].content().start);
+        block_panes(
+            &editor,
+            dir.path(),
+            RenderTheme::Paper(DEFAULT_SIZE),
+            &mut cache,
+            false,
+            false,
+        )
+        .expect("an open note always answers panes");
+
+        assert_eq!(
+            format!("{cache:?}"),
+            format!("{:?}", FragmentCache::default()),
+            "every block drew from the markup model; nothing ever touched \
+             the compiled-fallback cache"
         );
     }
 
@@ -7551,9 +7843,9 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
 
         lock_dir(&vault.path().join("time"), true);
-        // activating the region above flushes the born-active trailing
+        // activating any other block flushes the born-active trailing
         // line first, and the failure is the notice
-        click(&mut dom, clicks[BLOCK_ABOVE]);
+        click(&mut dom, clicks[BLOCK_LINK]);
         block_on(settle(&mut dom));
         lock_dir(&vault.path().join("time"), false);
         let html = dioxus_ssr::render(&dom);
@@ -7598,18 +7890,35 @@ mod tests {
     }
 
     /// The blank line between the fixture day note's meta and its heading
-    /// no longer stands as its own clickable pane
-    /// (adr/2026-08-cursor-split-rendering.md — retiring `Pane::Blank`): it
-    /// merges into the region above the active line, contributing a real
-    /// Typst spacer (`blocks::region_source`'s own unit tests cover the
-    /// spacer itself) rather than a `block-blank` div, so the region never
-    /// vanishes and the class is gone from the render entirely.
+    /// renders as its own CSS block now, styled through the markup model
+    /// rather than merged into a compiled Typst region
+    /// (adr/2026-08-css-draws-the-markup.md).
     #[test]
-    fn a_blank_line_is_no_longer_its_own_pane() {
+    fn a_blank_line_renders_as_its_own_css_pane() {
         let vault = temp_vault();
         let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("block-blank"), "{html}");
+        assert!(html.contains("mk-blank"), "{html}");
+        // the two classes adjacent in one attribute, not merely both
+        // present somewhere in the document: `block-blank` supplies the
+        // blank line box and only means anything on the element that also
+        // carries `mk-blank`, so an assertion that cannot tell those apart
+        // still passes with the emitting condition inverted
+        assert!(
+            html.contains(r#"class="block block-css mk-blank block-blank""#),
+            "the blank block keeps the same shape class an active blank \
+             line sits inside, on its own element: {html}"
+        );
+        // every `block-blank` sits in that pair and nowhere else, so an
+        // inverted condition that moved the box onto `mk-h1`/`mk-line`
+        // blocks fails here. Not `mk-blank`'s own count: the *active*
+        // blank block wears `mk-blank` without `block-blank` on purpose,
+        // taking its box from `.block-active` instead.
+        assert_eq!(
+            html.matches("block-blank").count(),
+            html.matches("mk-blank block-blank").count(),
+            "no non-blank block wears the blank line box: {html}"
+        );
     }
 
     #[test]
@@ -7617,29 +7926,14 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let bounced = click_for_mutations(&mut dom, clicks[BLOCK_ABOVE]);
-        let above = listeners(&bounced, "click")[0];
-        let woken = click_for_mutations(&mut dom, above);
-        let sink = listeners(&woken, "keydown")[0];
-        // activating the heading splits the merge again: the blank line
-        // and preamble above it, the link line and trailing line below —
-        // the blank line's own fresh click listener is captured here,
-        // still live after the retype below since nothing resegments
-        // until the next activation
-        // (adr/2026-08-cursor-split-rendering.md)
-        let region_blank = listeners(&woken, "click")[1];
-        // the retyped text embeds its own newline, which ArrowUp would
-        // read as a second line still inside this same block rather than
-        // sliding out of it — a click does not care, so the switch below
-        // goes through the region's click, not a slide
+        let (_, sink) = activate_heading(&mut dom, &clicks);
         retype(&mut dom, sink, "= renamed\n");
 
         // switching to a different block flushes the edit before the new
-        // source mounts; one more slide from the blank line reaches the
-        // preamble
-        let landed = click_for_mutations(&mut dom, region_blank);
-        let (_, preamble_keys) =
-            slide_up(&mut dom, listeners(&landed, "keydown")[0]);
+        // source mounts — every block wakes on its own click now, the
+        // preamble's directly (adr/2026-08-css-draws-the-markup.md)
+        let landed = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
+        let preamble_keys = listeners(&landed, "keydown")[0];
         assert_ne!(preamble_keys, sink, "the source moved to a fresh widget");
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "the preamble source: {html}");
@@ -7752,7 +8046,9 @@ mod tests {
     }
 
     #[test]
-    fn insert_mode_enter_completes_a_quote_line() {
+    fn insert_mode_enter_on_a_quote_line_leaves_it_literal() {
+        // the `>` quote form is read by the template's `show par:` rule,
+        // not expanded by the editor: Enter is an ordinary newline here.
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -7762,8 +8058,7 @@ mod tests {
 
         assert_eq!(
             source_of(&dom),
-            "#quote(block: true, attribution: [Simone Weil])\
-             [Une idée _importante_.]\n"
+            "> Une idée _importante_. _Simone Weil_\n"
         );
     }
 
@@ -8122,8 +8417,11 @@ mod tests {
             Key::Character("e".into()),
             Modifiers::empty(),
         );
+        // the preamble is the Typst verdict — no markup role to merge in,
+        // so the merged `class` attribute keeps a trailing space where the
+        // role would otherwise sit (adr/2026-08-css-draws-the-markup.md)
         assert!(
-            dioxus_ssr::render(&dom).contains(r#"class="sel""#),
+            dioxus_ssr::render(&dom).contains(r#"class="sel ""#),
             "the span shows before the verb: {}",
             dioxus_ssr::render(&dom)
         );
@@ -8141,7 +8439,7 @@ mod tests {
             Key::Character("o".into()),
             Modifiers::empty(),
         );
-        assert!(dioxus_ssr::render(&dom).contains(r#"class="sel""#));
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="sel ""#));
 
         press(
             &mut dom,
@@ -8155,7 +8453,7 @@ mod tests {
             source_of(&dom)
         );
         assert!(
-            !dioxus_ssr::render(&dom).contains(r#"class="sel""#),
+            !dioxus_ssr::render(&dom).contains(r#"class="sel ""#),
             "and the selection collapsed"
         );
     }
@@ -8367,7 +8665,7 @@ mod tests {
         compose(&mut dom, sink, "compositionstart", "");
         compose(&mut dom, sink, "compositionupdate", "^");
         assert!(
-            !dioxus_ssr::render(&dom).contains(r#"class="compose""#),
+            !dioxus_ssr::render(&dom).contains(r#"class="compose"#),
             "no preview outside insert"
         );
         compose(&mut dom, sink, "compositionend", "ê");
@@ -8417,7 +8715,7 @@ mod tests {
         compose(&mut dom, sink, "compositionupdate", "^");
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(r#"class="compose""#),
+            html.contains(r#"class="compose"#),
             "the dead key previews at the caret: {html}"
         );
         assert_eq!(
@@ -8441,7 +8739,7 @@ mod tests {
             "one ê at the caret — never a stray e or ^"
         );
         assert!(
-            !dioxus_ssr::render(&dom).contains(r#"class="compose""#),
+            !dioxus_ssr::render(&dom).contains(r#"class="compose"#),
             "the preview is gone"
         );
     }
@@ -8544,17 +8842,16 @@ mod tests {
             Modifiers::empty(),
         );
         // the caret's own checkpoint here never dirtied the text either,
-        // so undo again falls back to the file-open checkpoint and its
-        // own last block, the note's own trailing empty line
-        // (adr/2026-08-cursor-always-in-the-note.md), which remounts the
-        // region above under a fresh key — `clicks` is stale by now, so
-        // the undo's own mutations are where the fresh click target lives;
-        // one slide up from its adjacent block (the link line) reaches the
-        // heading directly and confirms its own text is back
-        // (adr/2026-08-cursor-split-rendering.md)
-        let above = listeners(&undone, "click")[0];
-        let (_, link_keys) = activate_block(&mut dom, above);
-        slide_up(&mut dom, link_keys);
+        // so undo falls back to the file-open checkpoint and its own last
+        // block, the note's own trailing empty line
+        // (adr/2026-08-cursor-always-in-the-note.md) — `clicks` is stale
+        // by now, so the undo's own mutations are where the fresh click
+        // target lives; the heading and the link block after it are the
+        // only blocks whose byte range shifted back with the edit, so
+        // they are the only ones remounted with a fresh listener, the
+        // heading first (adr/2026-08-css-draws-the-markup.md)
+        let heading = listeners(&undone, "click")[0];
+        activate_block(&mut dom, heading);
         assert_eq!(source_of(&dom), before, "u puts the heading back");
     }
 
@@ -8606,8 +8903,10 @@ mod tests {
         // whole line instead of sliding
         press(&mut dom, sink, Key::ArrowUp, Modifiers::SHIFT);
         let html = dioxus_ssr::render(&dom);
+        // the heading is the CSS verdict, so its `sel` spans each carry a
+        // markup role too (adr/2026-08-css-draws-the-markup.md)
         assert!(
-            html.contains(r#"class="sel""#),
+            html.contains(r#"class="sel mk-"#),
             "the selection is drawn: {html}"
         );
 
@@ -8623,7 +8922,7 @@ mod tests {
             "the keystroke replaced the selection"
         );
         assert!(
-            !dioxus_ssr::render(&dom).contains(r#"class="sel""#),
+            !dioxus_ssr::render(&dom).contains(r#"class="sel mk-"#),
             "and collapsed it"
         );
 
@@ -8644,6 +8943,203 @@ mod tests {
         assert_eq!(source_of(&dom), "", "the word went");
         press(&mut dom, sink, Key::Backspace, Modifiers::empty());
         assert_eq!(source_of(&dom), "", "nothing left to take");
+    }
+
+    // -- the active block wears the same markup roles as an inactive one
+    //    (adr/2026-08-css-draws-the-markup.md) ---------------------------
+
+    /// The active block draws its own structural role on `.block-active`
+    /// and its own `HeadingMarker` as a `mk-marker` span, exactly what an
+    /// inactive `Pane::Css` heading would draw — entering the block never
+    /// drops its markup.
+    #[test]
+    fn an_active_heading_carries_its_block_class_and_a_marker_span() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            linking(time_note("2026-07-23", "daily"), "2026-07-22")
+                .replace("= 2026-07-23", "= Titre"),
+        )
+        .expect("the day note is overwritten with a plain heading");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        activate_heading(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="block-active mk-h1""#),
+            "the heading's own structural role rides the active container: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"<span class="mk-marker" data-start="0">=</span>"#
+            ),
+            "the heading marker keeps its role while active: {html}"
+        );
+    }
+
+    /// A `Strong` run's own two delimiter bytes and its interior text stay
+    /// tagged `mk-strong` (the delimiters additionally `mk-delim`) while the
+    /// block is the active widget, and the caret drawn over it is still
+    /// exactly one span — the markup split never doubles the caret up.
+    #[test]
+    fn an_active_strong_run_carries_its_role_over_both_delimiters_with_one_caret()
+     {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            linking(time_note("2026-07-23", "daily"), "2026-07-22")
+                .replace("= 2026-07-23", "*gras*"),
+        )
+        .expect("the day note is overwritten with a strong run");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // clicking activates the block at its own end, past the closing
+        // delimiter, so the caret never lands on a byte a markup boundary
+        // also claims
+        activate_heading(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(
+            html.matches(r#"class="mk-strong mk-delim""#).count(),
+            2,
+            "both delimiter bytes keep the strong role, flagged: {html}"
+        );
+        assert_eq!(
+            html.matches(r#"class="mk-strong""#).count(),
+            1,
+            "the interior run keeps the strong role, unflagged: {html}"
+        );
+        assert_eq!(
+            html.matches("class=\"caret").count(),
+            1,
+            "the markup split still draws exactly one caret: {html}"
+        );
+    }
+
+    /// A block under a visual selection wears the same roles as an inactive
+    /// one: a covered checklist item still carries its `Checkbox` role
+    /// alongside the `sel` highlight.
+    #[test]
+    fn a_selected_checklist_item_carries_its_checkbox_role_and_sel() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            format!(
+                "{}- [x] fait\nafter\n",
+                linking(time_note("2026-07-23", "daily"), "2026-07-22")
+            ),
+        )
+        .expect("the day note is overwritten with a checklist line");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("0".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("V".into()),
+            Modifiers::empty(),
+        );
+        let mut sink = sink;
+        // three j's: past the link line and onto the checklist item, then
+        // off it again onto "after" — the checklist line is covered but
+        // never the active widget
+        for _ in 0..3 {
+            let woken = press_for_mutations(
+                &mut dom,
+                sink,
+                Key::Character("j".into()),
+                Modifiers::empty(),
+            );
+            sink = listeners(&woken, "keydown")
+                .first()
+                .copied()
+                .unwrap_or(sink);
+        }
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="sel mk-checkbox mk-checkbox-done""#),
+            "the covered checkbox keeps its done role alongside sel: {html}"
+        );
+        // the container itself carries the item's block role too, the same
+        // way .block-active and an inactive .block-css do, so a covered
+        // list item keeps its left padding/indent under selection
+        // (adr/2026-08-css-draws-the-markup.md)
+        assert!(
+            html.contains(r#"class="block-selected mk-item""#),
+            "the covered block keeps its list-item role class: {html}"
+        );
+    }
+
+    /// A standalone block whose own top-level list item is itself indented
+    /// (no continuing parent in the same block — `blocks::segment` cut a
+    /// fresh block at the blank line before it) steps its indent out
+    /// through `--mk-indent`, instead of `block_class` flattening every
+    /// depth to the same `mk-item` class
+    /// (adr/2026-08-css-draws-the-markup.md). A contiguous parent/child
+    /// pair sharing one block instead relies on the child's own preserved
+    /// leading whitespace, which an SSR string cannot distinguish from the
+    /// collapsed-whitespace bug it fixes — that half is judged in the
+    /// running app, per the acceptance criteria.
+    #[test]
+    fn an_inactive_standalone_item_steps_its_indent_out() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            format!(
+                "{}top\n\n  - deep\nafter\n",
+                linking(time_note("2026-07-23", "daily"), "2026-07-22")
+            ),
+        )
+        .expect("the day note is overwritten with a standalone deep item");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // moves the active widget onto the heading, so the list line
+        // renders inactive (Pane::Css), not the active or selected path
+        activate_heading(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(
+                r#"class="block block-css mk-item " style="--mk-indent: 1">"#
+            ),
+            "the standalone deep item steps its indent out: {html}"
+        );
+    }
+
+    /// A block CSS cannot draw (an equation) stays unstyled even as the
+    /// active widget: no markup class anywhere, and the caret drawn over it
+    /// is untouched by the fallback.
+    #[test]
+    fn an_active_equation_falls_back_to_unstyled_pieces_with_the_caret_intact()
+    {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            linking(time_note("2026-07-23", "daily"), "2026-07-22")
+                .replace("= 2026-07-23", "$x^2$"),
+        )
+        .expect("the day note is overwritten with an equation heading");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        activate_heading(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="block-active ""#),
+            "the Typst verdict adds no second class: {html}"
+        );
+        assert!(
+            html.contains(r#"<span data-start="0">$x^2$</span>"#),
+            "the equation's own bytes reach the DOM with no markup role: {html}"
+        );
+        assert_eq!(
+            html.matches("class=\"caret").count(),
+            1,
+            "the fallback still draws exactly one caret: {html}"
+        );
     }
 
     #[test]
@@ -8683,14 +9179,19 @@ mod tests {
             Modifiers::empty(),
         );
         let html = dioxus_ssr::render(&dom);
+        // the preamble (import + show + meta merged into one block,
+        // adr/2026-08-per-line-block-segmentation.md) is the Typst
+        // verdict — no markup role to add, so the merged `class` attribute
+        // carries a trailing space where the role would otherwise sit
+        // (adr/2026-08-css-draws-the-markup.md)
         assert!(
             html.contains(
-                r#"<span class="sel" data-start="37">#show: note</span>"#
+                r#"<span class="sel " data-start="37">#show: note</span>"#
             ),
             "the show line paints whole, from before the anchor: {html}"
         );
         assert!(
-            html.contains(r#"class="sel" data-start="52""#),
+            html.contains(r#"class="sel " data-start="52""#),
             "the meta line paints past the caret's own cluster: {html}"
         );
 
@@ -8718,7 +9219,7 @@ mod tests {
         );
         let charwise_html = dioxus_ssr::render(&dom);
         assert!(
-            !charwise_html.contains(r#"class="sel" data-start="52""#),
+            !charwise_html.contains(r#"class="sel " data-start="52""#),
             "v paints nothing past the head: {charwise_html}"
         );
     }
@@ -8760,13 +9261,21 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
 
         assert!(
-            html.contains(r#"class="block-selected""#)
+            html.contains(r#"class="block-selected mk-h1""#)
                 && html.contains(r#"class="selected-source""#),
-            "the heading split out of its compiled region: {html}"
+            "the heading split out of its compiled region, its block role \
+             class intact under selection just as it is active or inactive \
+             (adr/2026-08-css-draws-the-markup.md): {html}"
         );
+        // the covered heading's own markup roles tile it the same way the
+        // active-pane test above does (adr/2026-08-css-draws-the-markup.md)
         assert!(
             html.contains(
-                r#"<span class="sel" data-start="0">= 2026-07-23</span>"#
+                r#"<span class="sel mk-marker" data-start="0">=</span>"#
+            ) && html.contains(
+                r#"<span class="sel mk-text" data-start="1"> </span>"#
+            ) && html.contains(
+                r#"<span class="sel mk-text" data-start="2">2026-07-23</span>"#
             ),
             "the heading paints whole, as a covered but inactive line: {html}"
         );
@@ -8775,12 +9284,65 @@ mod tests {
         // (adr/2026-08-v-highlight-covers-whole-lines.md) — proof the
         // active pane itself carries a second, distinct sel line
         let active = html
-            .split(r#"class="block-active""#)
+            .split(r#"class="block-active"#)
             .nth(1)
             .unwrap_or_default();
         assert!(
-            active.contains(r#"class="sel""#),
+            active.contains(r#"class="sel mk-link""#),
             "the line entered also carries a highlight: {html}"
+        );
+    }
+
+    /// A covered block CSS cannot draw falls back the same way an inactive
+    /// one would: the `Selected` pane's own Typst arm runs, so its pieces
+    /// carry no markup class at all — only the `sel` highlight, drawn
+    /// exactly as the merged-class Typst case above draws it.
+    #[test]
+    fn a_selected_block_that_falls_back_to_typst_carries_no_markup_role() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            format!(
+                "{}\n$x^2$\nafter\n",
+                linking(time_note("2026-07-23", "daily"), "2026-07-22")
+            ),
+        )
+        .expect("the day note is overwritten with an equation line");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("0".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("V".into()),
+            Modifiers::empty(),
+        );
+        let mut sink = sink;
+        // four j's: past the link line and the blank line, over the
+        // equation, and onto "after" — the equation is now fully covered
+        // but never the active widget
+        for _ in 0..4 {
+            let woken = press_for_mutations(
+                &mut dom,
+                sink,
+                Key::Character("j".into()),
+                Modifiers::empty(),
+            );
+            sink = listeners(&woken, "keydown")
+                .first()
+                .copied()
+                .unwrap_or(sink);
+        }
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"class="sel " data-start="0">$x^2$</span>"#),
+            "the covered equation keeps its highlight with no markup role: {html}"
         );
     }
 
@@ -8822,7 +9384,7 @@ mod tests {
             "the pane is no longer drawn as covered source: {html}"
         );
         assert!(
-            html.split(r#"class="block-active""#)
+            html.split(r#"class="block-active"#)
                 .nth(1)
                 .unwrap_or_default()
                 .contains("2026-07-23"),
@@ -8882,21 +9444,32 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
 
         assert!(
-            html.contains(r#"class="block-selected""#),
-            "the link line split out of its compiled region: {html}"
+            html.contains(r#"class="block-selected mk-line""#),
+            "the link line split out of its compiled region, its Plain \
+             block role class intact under selection \
+             (adr/2026-08-css-draws-the-markup.md): {html}"
         );
         assert!(
-            html.split(r#"class="block-active""#)
+            html.split(r#"class="block-active"#)
                 .nth(1)
                 .unwrap_or_default()
                 .contains("2026-07-23"),
             "the heading is now the widget: {html}"
         );
         // the trailing empty line, past the anchor, is never covered — it
-        // still compiles rather than joining the `Selected` run
+        // renders through the markup model rather than joining the
+        // `Selected` run: exactly one covered block (the link line), the
+        // blank line past it drawn as CSS, never as compiled Typst — a
+        // blank block never needs the fallback whatever the selection
+        // (adr/2026-08-css-draws-the-markup.md)
+        assert_eq!(
+            html.matches(r#"class="block-selected mk-line""#).count(),
+            1,
+            "only the link line is covered: {html}"
+        );
         assert!(
-            html.matches(r#"class="block""#).count() >= 1,
-            "something still compiles below the far end: {html}"
+            html.contains("mk-blank"),
+            "the trailing blank line past the anchor still renders: {html}"
         );
     }
 
@@ -8937,10 +9510,12 @@ mod tests {
         let heading = html
             .split(r#"class="selected-source""#)
             .nth(1)
-            .and_then(|rest| rest.split(r#"class="block-active""#).next())
+            .and_then(|rest| rest.split(r#"class="block-active"#).next())
             .unwrap_or_default();
+        // the heading is the CSS verdict, so its covered slice carries a
+        // markup role alongside `sel` (adr/2026-08-css-draws-the-markup.md)
         assert!(
-            heading.contains(r#"class="sel""#),
+            heading.contains(r#"class="sel mk-"#),
             "the heading carries a highlight: {html}"
         );
         assert!(
@@ -8954,11 +9529,11 @@ mod tests {
              a line it only partly covers: {heading}"
         );
         let active = html
-            .split(r#"class="block-active""#)
+            .split(r#"class="block-active"#)
             .nth(1)
             .unwrap_or_default();
         assert!(
-            active.contains(r#"class="sel""#),
+            active.contains(r#"class="sel mk-link""#),
             "the line entered carries a highlight too: {html}"
         );
     }
@@ -9047,7 +9622,7 @@ mod tests {
             Modifiers::empty(),
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"class="block-selected""#), "{html}");
+        assert!(html.contains(r#"class="block-selected mk-h1""#), "{html}");
 
         // the crossing mounted a fresh widget for the link line; its own
         // keydown listener is what Escape must land on now
@@ -9066,7 +9641,7 @@ mod tests {
             "no highlight survives: {html}"
         );
         assert!(
-            html.contains(r#"class="block-active""#),
+            html.contains(r#"class="block-active"#),
             "one widget still stands: {html}"
         );
     }
@@ -9218,52 +9793,6 @@ mod tests {
             dioxus_ssr::render(&dom_absent),
             dioxus_ssr::render(&dom_miss),
             "a reported miss and an absent seam degrade identically"
-        );
-    }
-
-    /// A `WalkVisual` run that crosses into the neighbouring block — the
-    /// logical fallback's own doing, same as any other landing — leaves a
-    /// stale fragment behind exactly as every other crossing does, and the
-    /// spawned task sweeps it once the caret settles
-    /// (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md). What the
-    /// sweep does is evict, so the proof is a compile: a block whose
-    /// fragment was swept has to be built again instead of answering from
-    /// the cache.
-    #[test]
-    fn a_walkvisual_run_that_crosses_a_block_sweeps_the_stale_fragment() {
-        let vault = temp_vault();
-        let (mut dom, clicks, held, _sender) =
-            scripted_app(Some(vault.path().to_path_buf()));
-        // the preamble awake, the heading asleep with its SVG cached: the
-        // state a crossing back down makes the preamble's own cached SVG
-        // stale in
-        let woken = click_for_mutations(&mut dom, clicks[clicks.len() - 4]);
-        let sink = listeners(&woken, "keydown")[0];
-        held.work(&mut dom);
-        assert!(
-            dioxus_ssr::render(&dom).contains(RENDERED_NOTE),
-            "the heading's fragment is cached and drawn"
-        );
-        assert!(held.take().is_empty(), "nothing is queued to start with");
-
-        // j: off the preamble's last line, into the heading block below
-        press(
-            &mut dom,
-            sink,
-            Key::Character("j".into()),
-            Modifiers::empty(),
-        );
-        block_on(settle(&mut dom));
-        assert!(
-            !source_of(&dom).contains("#import"),
-            "the heading block woke: {}",
-            source_of(&dom)
-        );
-        assert!(
-            held.take()
-                .iter()
-                .any(|job| matches!(job, Job::Fragment(_))),
-            "the preamble's swept fragment is compiled again, not cached"
         );
     }
 
@@ -9555,20 +10084,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, drawn, asked, hit) =
             line_and_hit_app(Some(vault.path().to_path_buf()));
-        // `activate_heading`'s bounce, opened out: the second click's
-        // mutations carry the above-region's own fresh click target, which
-        // the helper discards (adr/2026-08-cursor-split-rendering.md)
-        let bounced = click_for_mutations(&mut dom, clicks[BLOCK_ABOVE]);
-        let above = listeners(&bounced, "click")[0];
-        let woken = click_for_mutations(&mut dom, above);
-        let block = listeners(&woken, "mousedown")[0];
-        let sink = listeners(&woken, "keydown")[0];
-        // activating the heading splits the merge again: the blank line
-        // and the preamble above it, the link line and the trailing empty
-        // line below (adr/2026-08-cursor-split-rendering.md) — both fresh
-        // click listeners are in `woken`, and active never leaves the
-        // heading through the loop below, so they stay live to the end
-        let region_blank = listeners(&woken, "click")[1];
+        let (block, sink) = activate_heading(&mut dom, &clicks);
         *drawn.lock().expect("the line cell never poisons") =
             vec![(0, 0, 88.0)];
         *hit.lock().expect("the hit cell never poisons") = Some((0, 1));
@@ -9603,8 +10119,8 @@ mod tests {
         }
 
         // and the click that activates another block, which moves the
-        // caret without any probe at all: the blank line directly, one
-        // slide short of the preamble (adr/2026-08-cursor-split-rendering.md)
+        // caret without any probe at all: the blank line directly
+        // (adr/2026-08-css-draws-the-markup.md)
         mouse(&mut dom, "mouseup", block, (0.0, 0.0));
         press(
             &mut dom,
@@ -9613,7 +10129,7 @@ mod tests {
             Modifiers::empty(),
         );
         block_on(settle(&mut dom));
-        let landed = click_for_mutations(&mut dom, region_blank);
+        let landed = click_for_mutations(&mut dom, clicks[BLOCK_BLANK]);
         let blank_keys = listeners(&landed, "keydown")[0];
         let activated = press_for_mutations(
             &mut dom,
@@ -9779,7 +10295,7 @@ mod tests {
             "the head moved to the scripted landing: {html}"
         );
         assert!(
-            html.contains(r#"class="sel""#),
+            html.contains(r#"class="sel mk-"#),
             "the anchor held instead of collapsing onto the head: {html}"
         );
     }
@@ -9928,9 +10444,22 @@ mod tests {
         mouse(&mut dom, "mousemove", block, (40.0, 0.0));
         mouse(&mut dom, "mousemove", block, (41.0, 0.0));
         block_on(settle(&mut dom));
+        // "= 202" tiles across the heading's own markup roles — the marker
+        // byte, the space after it and the digits each keep their own span
+        // even while every one of them is selected
+        // (adr/2026-08-css-draws-the-markup.md)
+        fn drags_across_the_prefix(html: &str) -> bool {
+            html.contains(
+                r#"<span class="sel mk-marker" data-start="0">=</span>"#,
+            ) && html.contains(
+                r#"<span class="sel mk-text" data-start="1"> </span>"#,
+            ) && html.contains(
+                r#"<span class="sel mk-text" data-start="2">202</span>"#,
+            )
+        }
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(r#"<span class="sel" data-start="0">= 202</span>"#),
+            drags_across_the_prefix(&html),
             "the drag drew the selection: {html}"
         );
 
@@ -9938,10 +10467,10 @@ mod tests {
         *hit.lock().expect("the hit cell never poisons") = None;
         mouse(&mut dom, "mousemove", block, (60.0, 0.0));
         block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
         assert!(
-            dioxus_ssr::render(&dom)
-                .contains(r#"<span class="sel" data-start="0">= 202</span>"#),
-            "the miss changed nothing"
+            drags_across_the_prefix(&html),
+            "the miss changed nothing: {html}"
         );
 
         // after the release, moves stop extending
@@ -9949,10 +10478,10 @@ mod tests {
         *hit.lock().expect("the hit cell never poisons") = Some((0, 9));
         mouse(&mut dom, "mousemove", block, (80.0, 0.0));
         block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
         assert!(
-            dioxus_ssr::render(&dom)
-                .contains(r#"<span class="sel" data-start="0">= 202</span>"#),
-            "the selection held where the button went up"
+            drags_across_the_prefix(&html),
+            "the selection held where the button went up: {html}"
         );
 
         // one probe in flight: while one hangs, the next move is skipped
@@ -9963,10 +10492,10 @@ mod tests {
         *hit.lock().expect("the hit cell never poisons") = Some((0, 9));
         mouse(&mut dom, "mousemove", block, (91.0, 0.0));
         block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
         assert!(
-            !dioxus_ssr::render(&dom)
-                .contains(r#"<span class="sel" data-start="0">= 2026-07"#),
-            "the second move was skipped while the first probe was out"
+            !html.contains(r#"<span class="sel mk-text" data-start="6">"#),
+            "the second move was skipped while the first probe was out: {html}"
         );
     }
 
@@ -10653,11 +11182,13 @@ mod tests {
         assert!(!html.contains("captured today"), "{html}");
         // the template's own source stands in the pane, placeholders and
         // all — the note's own trailing empty line opens active
-        // (adr/2026-08-cursor-always-in-the-note.md), and the preamble
-        // plus heading above it merge into one region whose adjacent
-        // block is the heading itself, so one click on it lands there
-        // directly (adr/2026-08-cursor-split-rendering.md)
-        activate_block(&mut dom, listeners(&opened, "click")[0]);
+        // (adr/2026-08-cursor-always-in-the-note.md); every block wakes on
+        // its own click now (adr/2026-08-css-draws-the-markup.md) — the
+        // preamble's own key survives from the note that was showing
+        // before, so it needs no fresh listener here, leaving the blank
+        // line above the heading as the first click and the heading the
+        // second
+        activate_block(&mut dom, listeners(&opened, "click")[1]);
         assert!(source_of(&dom).contains("{{title}}"), "{}", source_of(&dom));
 
         // escape hands the pane back to the selected note
@@ -10752,10 +11283,12 @@ mod tests {
             open_template_picker(&mut dom, keys[LOGS_KEYS]);
         type_into(&mut dom, input, "daily");
         // the chosen template opens with its own trailing empty line
-        // awake (adr/2026-08-cursor-always-in-the-note.md); the preamble
-        // and heading above it merge into one region whose adjacent block
-        // is the heading, so one click lands there directly
-        // (adr/2026-08-cursor-split-rendering.md)
+        // awake (adr/2026-08-cursor-always-in-the-note.md); every block
+        // above it wakes on its own click now
+        // (adr/2026-08-css-draws-the-markup.md) — the preamble's own
+        // key survives from the note that was showing before, so the
+        // blank line above the heading is the first click, the heading
+        // itself the second
         let woken = press_for_mutations(
             &mut dom,
             picker_keys,
@@ -10763,7 +11296,7 @@ mod tests {
             Modifiers::empty(),
         );
         let (_, sink) =
-            activate_block(&mut dom, listeners(&woken, "click")[0]);
+            activate_block(&mut dom, listeners(&woken, "click")[1]);
         retype(&mut dom, sink, "= le modèle refait");
         block_on(settle(&mut dom));
         let text =
@@ -11089,51 +11622,30 @@ mod tests {
         block_on(settle(&mut dom));
     }
 
-    /// A cursor move recomputes both regions under a fresh content-addressed
-    /// key, but a region that already compiled once keeps showing that
-    /// render — undimmed — instead of dropping to raw source while its
-    /// replacement is out (adr/2026-08-region-recompile-keeps-the-stale-svg.md).
+    /// A click landing on the pending block itself, not one of the note's
+    /// CSS-drawn blocks beside it, activates that block by its own start —
+    /// the same click wiring `Pane::Fragment` and `Pane::Css` carry, proven
+    /// here for `Pane::Pending` directly rather than only exercised through
+    /// a neighbour (adr/2026-08-css-draws-the-markup.md).
     #[test]
-    fn a_recompiling_region_shows_its_stale_svg_not_dimmed_source() {
+    fn clicking_a_pending_block_activates_it_by_its_own_start() {
         let vault = temp_vault();
         let (mut dom, clicks, held, _sender) =
             scripted_app(Some(vault.path().to_path_buf()));
-        // wake the region's boundary block (the link line) while the pane —
-        // and its click id — is still the first paint's pending one (the
-        // queued adapter registers the region at len-4, after the grid),
-        // then let the tier land every queued compile
-        let (_, keys) = activate_block(&mut dom, clicks[clicks.len() - 4]);
-        held.work(&mut dom);
-        let ready = dioxus_ssr::render(&dom);
-        assert!(ready.contains(RENDERED_NOTE), "{ready}");
-        assert!(!ready.contains("block-pending"), "{ready}");
+        let before = dioxus_ssr::render(&dom);
+        assert!(before.contains("block-pending"), "{before}");
 
-        // the first slide moves the boundary up to the heading: the above
-        // region recompiles with its shelf filled, while the below region
-        // exists for the first time — nothing stale to show there yet
-        let (_, keys) = slide_up(&mut dom, keys);
-        let first = dioxus_ssr::render(&dom);
-        assert!(first.contains("block-pending"), "{first}");
+        // the preamble (import/show/meta) is the note's only Typst
+        // fallback block, so it is the one pending pane on the page
+        click(&mut dom, clicks[clicks.len() - 7]);
         assert!(
-            first.contains("pending-source"),
-            "a region's first-ever compile has nothing to stand in: {first}"
+            source_of(&dom).contains("#import"),
+            "the pending block is the active one now: {}",
+            source_of(&dom)
         );
-        held.work(&mut dom);
 
-        // the second slide recompiles both regions with both shelves
-        // filled: the previous compiles stand in, undimmed, no raw source
-        slide_up(&mut dom, keys);
-        let moved = dioxus_ssr::render(&dom);
-        assert!(moved.contains("block-pending"), "{moved}");
-        assert!(
-            !moved.contains("pending-source"),
-            "the previous compile stands in instead of raw source: {moved}"
-        );
-        assert!(moved.contains(RENDERED_NOTE), "{moved}");
-
-        held.work(&mut dom);
-        let settled = dioxus_ssr::render(&dom);
-        assert!(!settled.contains("block-pending"), "{settled}");
+        drop(held);
+        block_on(settle(&mut dom));
     }
 
     #[test]
@@ -11537,8 +12049,12 @@ mod tests {
         press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "escape closes it: {html}");
+        // the heading's own markup roles tile its text across several
+        // spans (adr/2026-08-css-draws-the-markup.md), so the source is
+        // read back through `source_of` rather than as one contiguous
+        // literal
         assert!(
-            html.contains("= 2026-07-23"),
+            source_of(&dom).contains("= 2026-07-23"),
             "the source is intact: {html}"
         );
     }
@@ -14181,9 +14697,11 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("block-active"), "{html}");
         // the caret is app state the overlay never touched: still after
-        // the fourth character of the heading's first line
+        // the fourth character of the heading's first line — markup roles
+        // split "= " and "20" into their own spans, so the caret-box still
+        // follows the "20" span rather than a merged "= 20" one
         assert!(
-            html.contains(r#">= 20</span><span class="caret-box""#),
+            html.contains(r#">20</span><span class="caret-box""#),
             "{html}"
         );
     }
@@ -15369,17 +15887,32 @@ mod tests {
     /// The active block's drawn text, reassembled from its source lines and
     /// unescaped — the widget renders the source as spans, so the page is
     /// read the way a reader would: line by line, tags stripped. The
-    /// zero-width caret span contributes nothing.
+    /// zero-width caret span contributes nothing. Scoped to the one
+    /// `.block-active` div: every other block now renders its own
+    /// `.source-line` divs too (`Pane::Css`,
+    /// adr/2026-08-css-draws-the-markup.md), so reading every
+    /// `.source-line` in the page would run the whole note's rendered text
+    /// together instead of just the active block's.
     fn source_of(dom: &VirtualDom) -> String {
         let html = dioxus_ssr::render(dom);
-        let lines: Vec<String> = html
+        // a prefix, not the whole `class` value: the active block now
+        // carries its markup block role too
+        // (adr/2026-08-css-draws-the-markup.md), so the div's class
+        // attribute is no longer exactly `"block-active"`
+        let active = html
+            .split(r#"<div class="block-active"#)
+            .nth(1)
+            .and_then(|rest| rest.split(r#"<input class="ime-sink""#).next())
+            .unwrap_or("");
+        let lines: Vec<String> = active
             .split(r#"<div class="source-line">"#)
             .skip(1)
             .filter_map(|rest| rest.split("</div>").next())
             .map(|line| {
-                // the composition preview is drawn but not buffer content
+                // the composition preview is drawn but not buffer content —
+                // a prefix, since the span now also carries its markup role
                 let line: String = line
-                    .split(r#"<span class="compose""#)
+                    .split(r#"<span class="compose"#)
                     .enumerate()
                     .map(|(index, part)| {
                         if index == 0 {
@@ -15395,7 +15928,7 @@ mod tests {
                 // the box caret's end-of-line stand-in space is drawn but
                 // not buffer content; a real cluster under the box is
                 let line: String = line
-                    .split(r#"<span class="caret-box""#)
+                    .split(r#"<span class="caret-box"#)
                     .enumerate()
                     .map(|(index, part)| {
                         if index == 0 {
@@ -15429,6 +15962,7 @@ mod tests {
             .replace("&#34;", "\"")
             .replace("&lt;", "<")
             .replace("&gt;", ">")
+            .replace("&#62;", ">")
             .replace("&amp;", "&")
     }
 
@@ -15702,70 +16236,33 @@ mod tests {
         (downs[0], keys[0])
     }
 
-    /// The heading widget's targets. A note opens with its last block —
-    /// the trailing empty line — already active
-    /// (adr/2026-08-cursor-always-in-the-note.md); everything above it now
-    /// compiles as one merged region whose click always wakes its own
-    /// adjacent block, the link line just below the heading
-    /// (adr/2026-08-cursor-split-rendering.md), so reaching the heading
-    /// itself takes one ArrowUp — a synchronous slide between two
-    /// single-line blocks, same as a click would give directly before this
-    /// change (`boundary_arrows_slide_the_source_between_blocks` exercises
-    /// the same slide).
+    /// The heading widget's targets: the fixture day note's own heading
+    /// block click, direct — every block above the active trailing line
+    /// wakes on its own click now, no merged region to navigate out of
+    /// (adr/2026-08-css-draws-the-markup.md).
     fn activate_heading(
         dom: &mut VirtualDom,
         clicks: &[ElementId],
     ) -> (ElementId, ElementId) {
-        let (_, keys) = activate_link(dom, clicks);
-        slide_up(dom, keys)
+        activate_block(dom, clicks[BLOCK_HEADING])
     }
 
-    /// The link line's targets: the fixture day note's above-region click
-    /// target directly, since the link line is that region's own adjacent
-    /// block — no navigation needed
-    /// (adr/2026-08-cursor-split-rendering.md).
+    /// The link line's targets: the fixture day note's own link-block
+    /// click, direct.
     fn activate_link(
         dom: &mut VirtualDom,
         clicks: &[ElementId],
     ) -> (ElementId, ElementId) {
-        activate_block(dom, clicks[BLOCK_ABOVE])
+        activate_block(dom, clicks[BLOCK_LINK])
     }
 
-    /// One block above `activate_heading`'s landing: the blank line between
-    /// the fixture day note's preamble and its heading.
-    fn activate_blank(
-        dom: &mut VirtualDom,
-        clicks: &[ElementId],
-    ) -> (ElementId, ElementId) {
-        let (_, keys) = activate_heading(dom, clicks);
-        slide_up(dom, keys)
-    }
-
-    /// One block above `activate_blank`'s landing: the fixture day note's
-    /// preamble.
+    /// The preamble's targets: the fixture day note's own preamble-block
+    /// click, direct.
     fn activate_preamble(
         dom: &mut VirtualDom,
         clicks: &[ElementId],
     ) -> (ElementId, ElementId) {
-        let (_, keys) = activate_blank(dom, clicks);
-        slide_up(dom, keys)
-    }
-
-    /// ArrowUp on a single-line block always slides synchronously into the
-    /// block above (`caret::vertical` finds no row above *within* a
-    /// one-line block, whatever the caret's column —
-    /// `boundary_arrows_slide_the_source_between_blocks` exercises the same
-    /// slide) and hands back the newly woken widget's own targets.
-    fn slide_up(
-        dom: &mut VirtualDom,
-        keys: ElementId,
-    ) -> (ElementId, ElementId) {
-        let slid =
-            press_for_mutations(dom, keys, Key::ArrowUp, Modifiers::empty());
-        (
-            listeners(&slid, "mousedown")[0],
-            listeners(&slid, "keydown")[0],
-        )
+        activate_block(dom, clicks[BLOCK_PREAMBLE])
     }
 
     /// The sheet's active widget targets: the sheet opens with the note's
@@ -15781,27 +16278,25 @@ mod tests {
 
     /// Wakes the sheet's heading directly. Opening the sheet leaves the
     /// note's own trailing empty line active
-    /// (adr/2026-08-cursor-always-in-the-note.md); everything above it —
-    /// the preamble and the heading, alpha's whole fixture — merges into
-    /// the sheet's one region click listener, and the heading is that
-    /// region's own adjacent block (its last, right before the active
-    /// trailing line), so one click lands on it directly
-    /// (adr/2026-08-cursor-split-rendering.md).
+    /// (adr/2026-08-cursor-always-in-the-note.md); every block above it
+    /// gets its own click listener, in document order — alpha's fixture is
+    /// preamble, blank, heading, so the heading is the third
+    /// (adr/2026-08-css-draws-the-markup.md).
     fn sheet_heading_targets(
         dom: &mut VirtualDom,
         opened: &Mutations,
     ) -> (ElementId, ElementId) {
-        activate_block(dom, listeners(opened, "click")[0])
+        activate_block(dom, listeners(opened, "click")[2])
     }
 
     /// Like `sheet_heading_targets`, but for a note whose heading is
-    /// followed by a link line: the link line is then the region's
-    /// adjacent block, so the same one click lands there instead.
+    /// followed by a link line: preamble, blank, heading, link — the link
+    /// is the fourth click.
     fn sheet_link_targets(
         dom: &mut VirtualDom,
         opened: &Mutations,
     ) -> (ElementId, ElementId) {
-        activate_block(dom, listeners(opened, "click")[0])
+        activate_block(dom, listeners(opened, "click")[3])
     }
 
     /// Fires a wheel event with the given vertical pixel delta.
@@ -16028,6 +16523,141 @@ mod tests {
              #meta(id: \"{id}\", type: \"concept\", created: \"2026-07-01\")\n\
              \n= {id}\n"
         )
+    }
+
+    /// The note body `the_logs_and_the_sheet_render_one_note_the_same_way`
+    /// opens through both hosts, identical byte for byte in both
+    /// categories: a heading, a bold/italic run and a checklist item, so
+    /// the comparison below exercises more than the preamble's own
+    /// fallback SVG agreeing with itself (`mk-h1`, `mk-strong`, `mk-emph`,
+    /// `mk-item`, `mk-checkbox`).
+    fn twin_body() -> String {
+        format!(
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"{TODAY}\", type: \"concept\", created: \"2026-07-01\")\n\
+             \n= {TODAY}\n\
+             \n*bold* and _emph_ text\n\
+             \n- [ ] a todo\n"
+        )
+    }
+
+    /// A vault holding `twin_body()` at both `time/{TODAY}.typ` — the file
+    /// `Shell`'s daily-note hook opens by a bare filesystem stat, no index
+    /// lookup needed — and `permanent/{TODAY}.typ` — the file the table
+    /// cards from its index scan. Same id, same content, two categories:
+    /// the only way to open literally the same note through both the logs
+    /// screen and the sheet, since neither host can open the other's
+    /// category (the logs pane is date-scoped; the table only cards
+    /// non-time notes, `table.rs`'s `label`).
+    fn twin_vault() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let template = concat!(
+            "#let meta(id: none, type: none, created: none, ",
+            "tags: (), origin: none) = []\n",
+            "#let l(id) = [#id]\n",
+            "#let note(doc) = doc\n",
+        );
+        let body = twin_body();
+        for (path, text) in [
+            ("templates/template.typ".to_string(), template.to_string()),
+            (format!("time/{TODAY}.typ"), body.clone()),
+            (format!("permanent/{TODAY}.typ"), body),
+        ] {
+            let full = dir.path().join(&path);
+            std::fs::create_dir_all(
+                full.parent().expect("vault files sit in a category"),
+            )
+            .expect("the category directory is created");
+            std::fs::write(full, text).expect("the note is written");
+        }
+        dir
+    }
+
+    /// The `<div class="note-blocks">…</div>` subtree of one whole page's
+    /// SSR output, matched by scanning `<div`/`</div>` tags in order and
+    /// tracking nesting depth — bounded by the page's own length, since the
+    /// house bans `while` and a rendered page has no other honest bound to
+    /// give a `for` loop.
+    fn note_blocks_subtree(html: &str) -> &str {
+        let start = html
+            .find(r#"<div class="note-blocks""#)
+            .expect("blocks_view always mounts note-blocks once opened");
+        let mut depth = 0usize;
+        let mut cursor = start;
+        for _ in 0..html.len() {
+            let next_open = html[cursor..].find("<div").map(|at| cursor + at);
+            let next_close =
+                html[cursor..].find("</div>").map(|at| cursor + at);
+            match (next_open, next_close) {
+                (Some(open), Some(close)) if open < close => {
+                    depth += 1;
+                    cursor = open + "<div".len();
+                }
+                (_, Some(close)) => {
+                    depth -= 1;
+                    cursor = close + "</div>".len();
+                    if depth == 0 {
+                        return &html[start..cursor];
+                    }
+                }
+                _ => break,
+            }
+        }
+        panic!("note-blocks never closes: {html}");
+    }
+
+    /// The two editor hosts share one `blocks_view` closure over the one
+    /// editor signal (adr/2026-08-sheet-reuses-the-one-editor.md) and are
+    /// reconciled onto one fluid reading-column width rule in
+    /// `assets/theme.css` (`.centre-column, .sheet-column { width:
+    /// min(529px, 100%); … }`) — this opens the identical note body
+    /// through both (`twin_vault`, the only way to reach the same content
+    /// from both hosts, since the logs pane is date-scoped and the table
+    /// only cards non-time notes) and checks the architecture actually
+    /// holds: the `note-blocks` subtree comes out byte for byte the same,
+    /// and each host wraps it in its own reading-column class exactly
+    /// once, so a regression that special-cases one host, or that drops
+    /// the shared width rule from either wrapper, fails loud.
+    #[test]
+    fn the_logs_and_the_sheet_render_one_note_the_same_way() {
+        let vault = twin_vault();
+        let (mut dom, clicks, ..) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let logs_html = dioxus_ssr::render(&dom);
+        let logs_blocks = note_blocks_subtree(&logs_html);
+        assert_eq!(
+            logs_html.matches(r#"class="centre-column""#).count(),
+            1,
+            "{logs_html}"
+        );
+        assert!(
+            logs_html.find(r#"class="centre-column""#)
+                < logs_html.find(r#"class="note-blocks""#),
+            "the reading column wraps note-blocks, not the reverse"
+        );
+
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        assert_eq!(cards.len(), 1, "one twin note, one card");
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let sheet_html = dioxus_ssr::render(&dom);
+        let sheet_blocks = note_blocks_subtree(&sheet_html);
+        assert_eq!(
+            sheet_html.matches(r#"class="sheet-column""#).count(),
+            1,
+            "{sheet_html}"
+        );
+        assert!(
+            sheet_html.find(r#"class="sheet-column""#)
+                < sheet_html.find(r#"class="note-blocks""#),
+            "the reading column wraps note-blocks, not the reverse"
+        );
+
+        assert_eq!(
+            logs_blocks, sheet_blocks,
+            "same note, same spans, same classes, same data-start, same order"
+        );
     }
 
     /// A permanent note carrying one tag, for the filter tests.

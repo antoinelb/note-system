@@ -37,6 +37,12 @@ next redesign re-litigates six turns of iteration.
     the one thing left undimmed.
   - *The app never restyles note bodies* — close zoom is rendered typst,
     the template's own output.
+    *(Amended by `adr/2026-08-css-draws-the-markup.md`: narrowed to what
+    ships as output — `typst compile`'s export path and the table's card
+    bodies, which still never touch a CSS renderer. The editor's own live
+    view now draws most blocks as CSS spans read off the same parse tree
+    the compiler reads, which restyles note bodies in the sense this
+    principle names; the amendment ADR argues why that carve-out holds.)*
   - *Words, not buttons* — no borders, chips, or keyboard hints anywhere.
 - **Still open from the deck**, never drawn or built: the open-loops screen
   in this visual language, and the table at titles zoom with a dense

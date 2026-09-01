@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use note_system::render::{
-    BodyCache, DEFAULT_SIZE, FragmentCache, RenderError, RenderTheme, Side,
+    BodyCache, DEFAULT_SIZE, FragmentCache, RenderError, RenderTheme,
     VaultWorld, render_svg,
 };
 use typst::World;
@@ -277,6 +277,61 @@ fn block_quotes_render_with_the_themes_muted_vertical_rule() {
 }
 
 #[test]
+fn a_greater_than_line_renders_the_same_muted_rule_as_an_explicit_quote() {
+    // `> ` is now the stored quote syntax, taught to vanilla Typst by a
+    // `show par:` rule in the template rather than expanded at Enter-time
+    // in the editor (adr/2026-08-greater-than-expands-to-quote.md
+    // superseded).
+    let note = vault().join("permanent/zettelkasten.typ");
+    let text = "#import \"/templates/template.typ\": *\n\
+                #show: note\n\
+                > Une idée.\n";
+
+    let dark =
+        render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the > quote renders");
+    assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
+
+    let paper =
+        render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
+            .expect("the > quote renders");
+    assert!(paper.contains("#8b87a0"), "the paper muted rule: {paper}");
+}
+
+#[test]
+fn a_greater_than_line_with_a_trailing_attribution_renders_it() {
+    let note = vault().join("permanent/zettelkasten.typ");
+    let bare = "#import \"/templates/template.typ\": *\n\
+                #show: note\n\
+                > Une idée simple.\n";
+    let attributed = "#import \"/templates/template.typ\": *\n\
+                       #show: note\n\
+                       > Une idée simple. _Simone Weil_\n";
+
+    let without =
+        render_svg(&vault(), &note, bare, RenderTheme::Dark(DEFAULT_SIZE))
+            .expect("the bare > quote renders");
+    assert!(without.contains("#6f6a8c"), "the muted rule: {without}");
+
+    let with = render_svg(
+        &vault(),
+        &note,
+        attributed,
+        RenderTheme::Dark(DEFAULT_SIZE),
+    )
+    .expect("the attributed > quote renders");
+    assert!(with.contains("#6f6a8c"), "the muted rule: {with}");
+    // the attribution is emphasised text after the body: its glyphs are
+    // extra `<use>` references the bare quote never draws, the only
+    // signal available since typst's SVG glyphs are opaque path/`<use>`
+    // refs rather than searchable text
+    assert!(
+        with.matches("<use").count() > without.matches("<use").count(),
+        "the attribution's glyphs should render on top of the body"
+    );
+}
+
+#[test]
 fn inline_quotes_are_promoted_to_full_width_block_quotes() {
     let note = vault().join("permanent/zettelkasten.typ");
     let text = "#import \"/templates/template.typ\": *\n\
@@ -309,7 +364,6 @@ fn a_fragment_hit_serves_the_svg_without_recompiling() {
             &note,
             NOTE_A,
             RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
         )
         .expect("the first render compiles");
     assert!(
@@ -324,7 +378,6 @@ fn a_fragment_hit_serves_the_svg_without_recompiling() {
             &note,
             NOTE_A,
             RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
         )
         .expect("a hit must not recompile");
     assert_eq!(first, second);
@@ -343,7 +396,6 @@ fn a_fragment_error_is_cached_until_swept() {
             &note,
             NOTE_A,
             RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
         )
         .expect_err("the template is gone");
     assert!(error.contains("file not found"), "{error}");
@@ -357,8 +409,7 @@ fn a_fragment_error_is_cached_until_swept() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Paper(DEFAULT_SIZE)
             )
             .is_err()
     );
@@ -369,8 +420,7 @@ fn a_fragment_error_is_cached_until_swept() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Paper(DEFAULT_SIZE)
             )
             .is_err()
     );
@@ -385,8 +435,7 @@ fn a_fragment_error_is_cached_until_swept() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Paper(DEFAULT_SIZE)
             )
             .is_ok()
     );
@@ -404,7 +453,6 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
             &note,
             NOTE_A,
             RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
         )
         .expect("A compiles");
     cache.sweep();
@@ -414,7 +462,6 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
             &note,
             NOTE_B,
             RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
         )
         .expect("B compiles");
     cache.sweep();
@@ -427,8 +474,7 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
                 vault.path(),
                 &note,
                 NOTE_B,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Paper(DEFAULT_SIZE)
             )
             .is_ok()
     );
@@ -438,8 +484,7 @@ fn sweep_drops_what_the_last_generation_never_rendered() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Paper(DEFAULT_SIZE)
             )
             .is_err()
     );
@@ -453,37 +498,19 @@ fn fragments_are_keyed_by_note_path_as_well_as_source() {
     let mut cache = FragmentCache::default();
 
     cache
-        .render(
-            vault.path(),
-            &a,
-            NOTE_A,
-            RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
-        )
+        .render(vault.path(), &a, NOTE_A, RenderTheme::Paper(DEFAULT_SIZE))
         .expect("a compiles");
     remove_template(&vault);
 
     // same source under another path is a distinct fragment, not a hit
     assert!(
         cache
-            .render(
-                vault.path(),
-                &a,
-                NOTE_A,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
-            )
+            .render(vault.path(), &a, NOTE_A, RenderTheme::Paper(DEFAULT_SIZE))
             .is_ok()
     );
     assert!(
         cache
-            .render(
-                vault.path(),
-                &b,
-                NOTE_A,
-                RenderTheme::Paper(DEFAULT_SIZE),
-                Side::Above
-            )
+            .render(vault.path(), &b, NOTE_A, RenderTheme::Paper(DEFAULT_SIZE))
             .is_err()
     );
 }
@@ -495,13 +522,7 @@ fn fragments_are_keyed_by_theme_too() {
     let mut cache = FragmentCache::default();
 
     cache
-        .render(
-            vault.path(),
-            &note,
-            NOTE_A,
-            RenderTheme::Dark(DEFAULT_SIZE),
-            Side::Above,
-        )
+        .render(vault.path(), &note, NOTE_A, RenderTheme::Dark(DEFAULT_SIZE))
         .expect("the dark render compiles");
     remove_template(&vault);
 
@@ -512,8 +533,7 @@ fn fragments_are_keyed_by_theme_too() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Dark(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Dark(DEFAULT_SIZE)
             )
             .is_ok()
     );
@@ -523,8 +543,7 @@ fn fragments_are_keyed_by_theme_too() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Light(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Light(DEFAULT_SIZE)
             )
             .is_err()
     );
@@ -540,13 +559,7 @@ fn fragments_are_keyed_by_size_too() {
     let mut cache = FragmentCache::default();
 
     cache
-        .render(
-            vault.path(),
-            &note,
-            NOTE_A,
-            RenderTheme::Dark(DEFAULT_SIZE),
-            Side::Above,
-        )
+        .render(vault.path(), &note, NOTE_A, RenderTheme::Dark(DEFAULT_SIZE))
         .expect("the default-size render compiles");
     remove_template(&vault);
 
@@ -557,20 +570,13 @@ fn fragments_are_keyed_by_size_too() {
                 vault.path(),
                 &note,
                 NOTE_A,
-                RenderTheme::Dark(DEFAULT_SIZE),
-                Side::Above
+                RenderTheme::Dark(DEFAULT_SIZE)
             )
             .is_ok()
     );
     assert!(
         cache
-            .render(
-                vault.path(),
-                &note,
-                NOTE_A,
-                RenderTheme::Dark(30),
-                Side::Above
-            )
+            .render(vault.path(), &note, NOTE_A, RenderTheme::Dark(30))
             .is_err()
     );
 }
@@ -586,7 +592,6 @@ fn a_fragment_outside_the_vault_reports_the_path_error() {
             Path::new("/etc/passwd"),
             NOTE_A,
             RenderTheme::Paper(DEFAULT_SIZE),
-            Side::Above,
         )
         .expect_err("a note outside the vault cannot virtualize");
     assert!(!error.is_empty());

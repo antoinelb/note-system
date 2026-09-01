@@ -1,5 +1,7 @@
 # Greater-than lines expand to native Typst quotes
 
+**Superseded by `adr/2026-08-greater-than-is-the-stored-quote.md`**: `>` is now what the file stores at rest — the Enter-time expansion below is deleted, and a `show par:` rule in `templates/template.typ` teaches vanilla Typst to read `>` directly, so there is no longer a preprocessing step for the app and the compiler to disagree about.
+
 ## Context
 
 Quotes are common in time notes, but Typst's `#quote(block: true)[…]` is expensive to type repeatedly.

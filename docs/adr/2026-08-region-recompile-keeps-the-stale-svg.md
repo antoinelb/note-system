@@ -1,5 +1,7 @@
 # A region recompile keeps showing its last good SVG instead of dimmed source
 
+**Superseded by `adr/2026-08-css-draws-the-markup.md`**: the two-region model this ADR's `Side`-keyed shelf exists to paper over is retired — the `Typst` fallback is now one widget per block, cached by that block's own content, so there is no region boundary that moves with the cursor and nothing left for a stale shelf to shelve.
+
 ## Context
 
 `adr/2026-08-cursor-split-rendering` merges everything above (and below) the active line into one compiled fragment per side, keyed by `hash_fragment(note, source, theme)` in `FragmentCache`. That key is content-addressed, so it changes on *every* cursor line move — the boundary between "above" and "below" shifts with it. `FragmentCache::probe` had no path back to a previous result once the key changed: a miss always answered `Pending` with nothing to show but the region's raw source, dimmed, while the recompile rode the tier. Two regions recompile on every `j`/`k`, so this dimmed-and-back flash showed on every single line move, including moving back onto a line the app had already rendered a moment before — the exact "jenky" feeling todo 29 named.

@@ -60,6 +60,23 @@
      hue, translucent so the source stays readable under it
      (adr/2026-08-caret-on-editor-note-bytes.md) */
   --select-fill: rgba(92, 83, 138, 0.35);
+  /* markup roles rendered as CSS spans (src/markup.rs's Role/BlockRole,
+     read through `class`/`block_class` — those class names are the
+     contract, this file only supplies the colours): --markup-link,
+     --markup-checkbox-done and --markup-quote-rule are pinned to
+     templates/template.typ's palette.link/done/muted for this theme, so a
+     CSS-drawn block and its compiled-SVG neighbour do not look like two
+     different documents; the rest alias this file's own ink scale, which
+     already carries the "hue kept, value inverted" light derivation. */
+  --markup-heading: var(--ink-bright);
+  --markup-marker: var(--ink-muted);
+  --markup-delim: var(--ink-faint);
+  --markup-link: #8f84c9;
+  --markup-meta: var(--ink-muted);
+  --markup-raw: var(--ink);
+  --markup-checkbox: var(--ink-muted);
+  --markup-checkbox-done: #6fb08c;
+  --markup-quote-rule: var(--ink-muted);
   /* multiplies var(--bg), which already swaps per theme */
   --dim-opacity: 0.4;
 }
@@ -103,6 +120,19 @@
   --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.25);
   --selection: #6f64ab;
   --select-fill: rgba(111, 100, 171, 0.25);
+  /* the light siblings of the markup-role group above, same derivation:
+     --markup-link and --markup-checkbox-done pinned to
+     templates/template.typ's light palette.link/done, the rest aliasing
+     this theme's own ink scale */
+  --markup-heading: var(--ink-bright);
+  --markup-marker: var(--ink-muted);
+  --markup-delim: var(--ink-faint);
+  --markup-link: #6b5fa8;
+  --markup-meta: var(--ink-muted);
+  --markup-raw: var(--ink);
+  --markup-checkbox: var(--ink-muted);
+  --markup-checkbox-done: #4a8a6a;
+  --markup-quote-rule: var(--ink-muted);
   --dim-opacity: 0.4;
 }
 
@@ -247,19 +277,35 @@ body {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  /* the type no longer shrinks to fit a narrow pane (below); a window
-     narrower than the reading column scrolls sideways instead
-     (adr/2026-08-one-font-size-for-source-and-render.md) */
+  /* the type no longer shrinks to fit a narrow pane (below); the reading
+     column itself now shrinks with the window instead (.centre-column,
+     below), so nothing here scrolls sideways in practice — overflow-x
+     stays only as a fallback in case content ever exceeds this box */
   overflow-x: auto;
   padding: 24px 32px;
 }
 
 /* the reading column: the compiled page's own width (14cm ≈ 529px,
-   template.typ § note()), centred in whatever room `.centre` has — the
-   source line and the rendered SVG agree at every window width instead of
-   the render shrinking to fit (adr/2026-08-one-font-size-for-source-and-render.md) */
-.centre-column {
-  max-width: 529px;
+   template.typ § note()) as a cap, fluid below it, centred in whatever room
+   the host gives — the logs' `.centre` and the sheet's content box share
+   this exact rule so a note wraps at the same measure on both screens
+   wherever the window can afford the full 529px, and below that the column
+   shrinks with its host instead of scrolling sideways. The two hosts carry
+   different chrome — the logs spend 209px on the rail and 281px on the
+   jump, the sheet 440px of left offset — so once a window is too narrow to
+   give both of them 529px the two measures part company: measured in
+   headless Chromium, 529/529 at a 1920px viewport but 406 (logs) against
+   432 (sheet) at 960px. Equalising them below that point would mean capping
+   both to whichever host is narrower, which is a magic number that also
+   wastes ~100px on the sheet at full width; being fully visible wins over
+   being identical when the window is cramped. Going fluid is what CSS
+   rendering makes free:
+   rewrapping prose costs nothing once no SVG has to agree with it, and this
+   does not reopen adr/2026-08-one-font-size-for-source-and-render.md — that
+   ADR rejected shrinking the *type* to fit a narrow pane, not the column. */
+.centre-column,
+.sheet-column {
+  width: min(529px, 100%);
   margin: 0 auto;
 }
 
@@ -301,6 +347,13 @@ body {
 
 .block {
   cursor: text;
+}
+
+/* a compiled fallback widget keeps its own compiled width and scrolls
+   inside itself rather than forcing the reading column wider (task 5 puts
+   this class on the per-block SVG widgets) */
+.block-svg {
+  overflow-x: auto;
 }
 
 .block-active {
@@ -352,7 +405,7 @@ body {
    .block-pending .pending-source so a line entering or leaving the
    selection never shifts anything below it
    (adr/2026-08-visual-selection-drawn-across-lines.md) */
-.block-selected .selected-source {
+.block-selected {
   margin: 4px 0;
   padding: 8px;
   color: var(--ink-bright);
@@ -362,6 +415,33 @@ body {
   overflow-wrap: break-word;
 }
 
+/* an inactive block CSS draws: raw markup laid out as styled spans, same
+   shared block box as .block-active, .block-pending .pending-source and
+   .block-selected above, so a line entering or leaving CSS rendering (or
+   gaining/losing the caret) never shifts anything below it
+   (adr/2026-08-css-draws-the-markup.md) */
+.block-css {
+  margin: 4px 0;
+  padding: 8px;
+  color: var(--ink);
+  font: var(--prose-size) "Cormorant Garamond", serif;
+  line-height: var(--prose-leading);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* The box above belongs on the *same* element that carries the block-role
+   class (.mk-h1..6, .mk-item, .mk-quote, .mk-blank), never on the inner
+   .block-source / .selected-source wrapper, and this is load-bearing
+   rather than tidiness: `font` and `padding` set on the inner div are
+   direct declarations, and a direct declaration beats a value inherited
+   from an ancestor whatever that ancestor's specificity — so a heading's
+   own font-size, sitting on the outer div, silently lost to the wrapper's
+   `font` shorthand and every inactive heading laid out at body size while
+   the active one laid out at 24/13.5. .block-active carries box and role
+   on one div and always did; these two now match it. The same trap is
+   documented again for colour at [class*="mk-h"] .mk-text below. */
+
 /* an empty line still occupies its line box, so the caret can rest on it */
 .source-line {
   min-height: calc(var(--prose-size) * var(--prose-leading));
@@ -370,11 +450,162 @@ body {
 /* an inactive blank block: the same line box as .source-line, inside the
    same padding as .block-active, so a blank line is exactly as tall active
    or not — the caret entering or leaving it must not shift every line
-   below */
+   below. The margin and padding come from .block-css above, which this
+   class only ever accompanies (src/ui.rs emits `block-blank` beside
+   `block block-css`); repeating them here once stacked a second box inside
+   the first and made an inactive blank line 24px taller than the same line
+   active. */
 .block-blank {
   min-height: calc(var(--prose-size) * var(--prose-leading));
-  margin: 4px 0;
-  padding: 8px;
+}
+
+/* markup roles rendered as CSS spans (src/markup.rs's Role/BlockRole,
+   reached through its own `class`/`block_class` — those class names are
+   the contract, this file only supplies colour, weight, style, family and
+   left-padding). The block-role classes below (.mk-line, .mk-h1..6,
+   .mk-item, .mk-quote) sit on the same shared block box named in the
+   comment above .block-active — margin: 4px 0; padding: 8px; the prose
+   font; line-height: var(--prose-leading) — so none of them may touch
+   those four, or a line entering/leaving CSS rendering would shift
+   everything below it; .mk-blank only sets colour for the same reason —
+   its line box stays whatever .block-blank (just above) already gives
+   it. */
+
+/* -- inline roles ------------------------------------------------------ */
+
+.mk-text {
+  color: var(--ink);
+}
+
+.mk-strong {
+  font-weight: 600;
+}
+
+.mk-emph {
+  font-style: italic;
+}
+
+.mk-raw {
+  font-family: "DejaVu Sans Mono", monospace;
+  color: var(--markup-raw);
+}
+
+.mk-link {
+  color: var(--markup-link);
+}
+
+.mk-meta {
+  color: var(--markup-meta);
+}
+
+.mk-marker {
+  color: var(--markup-marker);
+}
+
+.mk-checkbox {
+  color: var(--markup-checkbox);
+}
+
+.mk-checkbox-done {
+  color: var(--markup-checkbox-done);
+}
+
+/* a delimiter byte only re-tints: it also carries its run's own role class
+   (.mk-strong, .mk-emph or .mk-raw) ahead of this one, so the delimiter
+   keeps that run's rendered weight, style and family — .mk-delim only
+   dims the colour, never the run's own weight or style */
+.mk-delim {
+  color: var(--markup-delim);
+}
+
+/* -- block roles --------------------------------------------------------- */
+
+.mk-line {
+  color: var(--ink);
+}
+
+.mk-blank {
+  color: var(--ink);
+}
+
+/* .block-active inherits `color: var(--ink-bright)` (the alert hue, comment
+   above .block-active) but `.mk-text`'s own `color: var(--ink)` is a direct
+   declaration on the span, and a direct declaration always beats an
+   inherited colour regardless of the ancestor's specificity — the same
+   reason `[class*="mk-h"] .mk-text` below has to override `.mk-text` itself
+   rather than the block container. Declared before that heading override,
+   not after: both selectors tie on specificity (two classes each), so a
+   heading block that is also active still resolves to the heading colour
+   on source order. */
+.block-active .mk-text {
+  color: var(--ink-bright);
+}
+
+/* an attribute selector, not the six-class list this used to be: a
+   heading's own leaf text carries `.mk-text` too (src/markup.rs's
+   `leaf_role` only ever hands out Role::Text for plain heading prose,
+   never a heading-specific role), and `.mk-text`'s own `color: var(--ink)`
+   below is a direct declaration on that span — it always beats an
+   inherited colour from an ancestor's rule regardless of that ancestor's
+   specificity, so a plain `.mk-h1 { color: … }` never actually reached the
+   text. Overriding `.mk-text` itself when it sits inside any heading block
+   is the only way to make the ink-bright colour show. The same selector
+   also has to reach `BlockRole::Heading`'s unbounded depth
+   (`u8::try_from(heading.depth().get()).unwrap_or(u8::MAX)`,
+   src/markup.rs) — a source with 7+ `=` emits `mk-h7`..`mk-h255`, classes
+   no enumerated list could cover, so `[class*="mk-h"]` matches the block
+   container by substring instead of naming every level; `mk-line`,
+   `mk-blank`, `mk-item` and `mk-quote` are the only other block classes
+   `block_class` emits and none of them contain that substring. */
+[class*="mk-h"] {
+  color: var(--markup-heading);
+  font-weight: 600;
+}
+
+[class*="mk-h"] .mk-text {
+  color: var(--markup-heading);
+}
+
+/* sized to the template's own ratio (templates/template.typ's
+   `show heading.where(level: 1)`, base-size * 24 / 13.5); deeper levels
+   step down toward the body size, which vanilla Typst has no matching
+   ratio for since only level 1 gets a show rule there. Heading levels the
+   list below does not name (7 and up, see the comment above) fall through
+   to the block box's own font, already `var(--prose-size)` — the same
+   value `.mk-h5`/`.mk-h6` set explicitly here, so an unlisted deep level
+   still lands on the right size without a rule of its own. */
+.mk-h1 {
+  font-size: calc(var(--prose-size) * 24 / 13.5);
+}
+
+.mk-h2 {
+  font-size: calc(var(--prose-size) * 20 / 13.5);
+}
+
+.mk-h3 {
+  font-size: calc(var(--prose-size) * 17 / 13.5);
+}
+
+.mk-h4 {
+  font-size: calc(var(--prose-size) * 15 / 13.5);
+}
+
+.mk-h5,
+.mk-h6 {
+  font-size: var(--prose-size);
+}
+
+/* the base indent, stepped out per nesting level by the `--mk-indent`
+   custom property src/ui.rs sets inline from `markup::item_indent_style`
+   (unbounded depth, so a class per level is not an option — see the
+   `[class*="mk-h"]` comment above) */
+.mk-item {
+  padding-left: calc(16px + var(--mk-indent, 0) * 16px);
+}
+
+.mk-quote {
+  border-left: 1px solid var(--markup-quote-rule);
+  padding-left: 8px;
 }
 
 /* the one warm element is the ember and the caret (adr/2026-08-shipped-ui-is-the-spec.md): a

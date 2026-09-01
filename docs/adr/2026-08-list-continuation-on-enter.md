@@ -23,6 +23,8 @@ Enter already rewrites the line it ends: `> quote` expands to a native `#quote` 
 - **The quote shorthand is tried first.** `> ` is neither marker, so the two cannot both match; the order is fixed anyway so a future shorthand cannot silently reorder them.
 - **Every rewrite goes through `Editor::splice`**, so the whole continuation belongs to the current insert intent and one `u` reverses it with the surrounding typing.
 
+**Amended 2026-09-01, after `adr/2026-08-greater-than-is-the-stored-quote.md`:** the Enter-time quote expansion the gate and the ordering above were defined against is deleted — `>` is now stored literally and read by a `show par:` rule in the template, not rewritten on Enter. The list-marker gate (a collapsed caret at a physical line's end) stands on its own and needs no borrowed justification from a mechanism that no longer runs; "the quote shorthand is tried first" no longer describes live code, because there is nothing left at Enter time for list continuation to be ordered against.
+
 ## Rejected
 
 - **Continuing from mid-item** (Obsidian's behaviour: Enter splits and carries the marker to the tail) — a second gate to reason about, where the quote expansion's line-end rule already reads clearly and covers the way lists are actually written.

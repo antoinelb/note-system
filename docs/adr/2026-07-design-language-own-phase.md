@@ -13,6 +13,7 @@ Two design requirements had no home at all:
   Neither `plan.md` nor the roadmap contained the word "light".
 - `wireframes-v0.md` § Typography: the note prose spec (serif body, title scale) is explicitly **not** an app concern — *"the app never restyles them; the wireframes' serif prose stands in for the template's own output."*
   It belongs in `templates/template.typ`, which is still `set text(size: 11pt)` with the default font.
+  *(Amended by `adr/2026-08-css-draws-the-markup.md`, via `adr/2026-08-shipped-ui-is-the-spec.md` where this principle is restated: the editor's live view now draws most blocks as CSS spans instead of compiled Typst, narrowing "the app never restyles them" to the export path and the table's card bodies. This Context paragraph is left as written — it quotes the deleted `wireframes-v0.md` verbatim and is the historical record of what that doc said.)*
 
 ## Decision
 

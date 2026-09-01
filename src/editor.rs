@@ -241,10 +241,13 @@ impl Editor {
         self.splice(at..at, &format!("{open}{close}"), at + open.len());
     }
 
-    /// Enter completes the Markdown-shaped quote shorthand at a physical
-    /// line's end; every other press remains an ordinary newline. The
-    /// expansion is valid Typst on disk, so rendering and the vanilla CLI
-    /// read the same note (adr/2026-08-greater-than-expands-to-quote.md).
+    /// Enter continues a `-`/`+` list line at its own indent (a fresh
+    /// marker for a non-empty item, the line rewritten one level out for
+    /// an empty one); every other press remains an ordinary newline. `> `
+    /// is no longer expanded here — it is the stored quote syntax the
+    /// template itself reads, so Enter on such a line falls through to
+    /// this same list check and, finding no marker, inserts a plain
+    /// newline.
     pub fn insert_newline(&mut self) {
         let Some((content, source)) = self.active_slice() else {
             self.insert_at_caret("\n");
@@ -261,12 +264,6 @@ impl Editor {
         let line_start = source[..head].rfind('\n').map_or(0, |at| at + 1);
         let line = &source[line_start..head];
         let span = content.start + line_start..content.start + head;
-        if let Some(quote) = quote_completion(line) {
-            let replacement = format!("{quote}\n");
-            let caret = span.start + replacement.len();
-            self.splice(span, &replacement, caret);
-            return;
-        }
         match list_continuation(line) {
             Continuation::Item(next) => self.insert_at_caret(&next),
             Continuation::Close(rest) => {
@@ -972,30 +969,6 @@ fn marker_tail<'a>(rest: &'a str, marker: &str) -> Option<&'a str> {
     (tail.is_empty() || tail.starts_with(' ')).then_some(tail)
 }
 
-fn quote_completion(line: &str) -> Option<String> {
-    let body = line.strip_prefix("> ")?;
-    if body.trim().is_empty() {
-        return None;
-    }
-    match trailing_attribution(body) {
-        Some((body, attribution)) => Some(format!(
-            "#quote(block: true, attribution: [{attribution}])[{body}]"
-        )),
-        None => Some(format!("#quote(block: true)[{body}]")),
-    }
-}
-
-fn trailing_attribution(body: &str) -> Option<(&str, &str)> {
-    let without_close = body.strip_suffix('_')?;
-    let open = without_close.rfind(" _")?;
-    let quote = body[..open].trim_end();
-    let attribution = without_close[open + 2..].trim();
-    (!quote.is_empty()
-        && !attribution.is_empty()
-        && !attribution.contains('_'))
-    .then_some((quote, attribution))
-}
-
 #[derive(Debug)]
 pub struct Buffer {
     file: PathBuf,
@@ -1452,110 +1425,18 @@ mod tests {
     }
 
     #[test]
-    fn enter_turns_a_greater_than_line_into_a_typst_quote() {
+    fn enter_on_a_greater_than_line_is_an_ordinary_newline() {
+        // `> ` is the stored quote syntax now, read by the template's
+        // `show par:` rule at compile time — Enter no longer rewrites it,
+        // so the literal `>` stays on disk (adr/2026-08-greater-than-
+        // expands-to-quote.md superseded).
         let (_dir, mut editor) = open_note("> La vie est belle");
 
         editor.insert_newline();
 
         let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(text, "#quote(block: true)[La vie est belle]\n");
-        assert_eq!(editor.caret_in_block(), (38, 38));
+        assert_eq!(text, "> La vie est belle\n");
         assert_eq!(editor.trouble(), None);
-    }
-
-    #[test]
-    fn enter_extracts_only_a_trailing_emphasized_attribution() {
-        let (_dir, mut editor) =
-            open_note("> Une idée _importante_, vraiment. _Simone Weil_");
-
-        editor.insert_newline();
-
-        let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(
-            text,
-            "#quote(block: true, attribution: [Simone Weil])\
-             [Une idée _importante_, vraiment.]\n"
-        );
-        assert_eq!(editor.trouble(), None);
-    }
-
-    #[test]
-    fn enter_leaves_incomplete_quote_shapes_as_ordinary_text() {
-        let cases = [
-            ("prose", "prose\n"),
-            (">", ">\n"),
-            ("> ", "> \n"),
-            ("  > indented", "  > indented\n"),
-            ("> _Simone Weil_", "#quote(block: true)[_Simone Weil_]\n"),
-            ("> texte _", "#quote(block: true)[texte _]\n"),
-            ("> texte __", "#quote(block: true)[texte __]\n"),
-            (
-                "> texte _Nom_Prénom_",
-                "#quote(block: true)[texte _Nom_Prénom_]\n",
-            ),
-        ];
-        for (source, expected) in cases {
-            let (_dir, mut editor) = open_note(source);
-            editor.insert_newline();
-            let (_, text) = editor.note().expect("the note stays open");
-            assert_eq!(text, expected, "for {source:?}");
-            assert_eq!(editor.trouble(), None, "for {source:?}");
-        }
-    }
-
-    #[test]
-    fn quote_completion_requires_a_collapsed_caret_at_the_line_end() {
-        let (_dir, mut editor) = open_note("> quote");
-        editor.move_caret(caret::Move::Left, false);
-        editor.move_caret(caret::Move::Left, false);
-        editor.insert_newline();
-        let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(text, "> quo\nte");
-
-        let (_dir, mut editor) = open_note("> quote");
-        editor.move_caret(caret::Move::Left, true);
-        editor.insert_newline();
-        let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(text, "> quot\n");
-    }
-
-    #[test]
-    fn each_completed_greater_than_line_becomes_its_own_quote() {
-        let (_dir, mut editor) = open_note("> une");
-        editor.insert_newline();
-        editor.insert_at_caret("> deux _Deux_");
-        editor.insert_newline();
-
-        let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(
-            text,
-            "#quote(block: true)[une]\n\
-             #quote(block: true, attribution: [Deux])[deux]\n"
-        );
-    }
-
-    #[test]
-    fn quote_completion_is_one_reversible_insert_intent() {
-        let (_dir, mut editor) = open_note("");
-        editor.checkpoint();
-        editor.insert_at_caret("> une _Une_");
-        editor.insert_newline();
-
-        editor.undo();
-
-        let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(text, "");
-    }
-
-    #[test]
-    fn completing_before_an_existing_newline_preserves_enters_blank_line() {
-        let (_dir, mut editor) = open_note("> une\nsuite");
-        editor.place_at(5);
-
-        editor.insert_newline();
-
-        let (_, text) = editor.note().expect("the note stays open");
-        assert_eq!(text, "#quote(block: true)[une]\n\nsuite");
     }
 
     // -- the todo toggle: Ctrl+T flips the caret's line's checkbox ---------
@@ -1861,15 +1742,6 @@ mod tests {
             text, "- une\n idée",
             "away from the end, an ordinary split"
         );
-    }
-
-    #[test]
-    fn the_quote_shorthand_still_wins_over_the_list_reading() {
-        // `> ` is neither marker, but the ordering is worth pinning
-        let (_dir, mut editor) = open_note("> une");
-        editor.insert_newline();
-        let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "#quote(block: true)[une]\n");
     }
 
     #[test]

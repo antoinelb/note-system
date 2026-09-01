@@ -16,7 +16,7 @@ use note_system::time;
 #[test]
 fn scan_finds_every_note_sorted_and_skips_templates_and_non_typ_files() {
     let notes = scan_fixture();
-    assert_eq!(notes.len(), 18);
+    assert_eq!(notes.len(), 19);
     let all: Vec<&Path> = notes.iter().map(|n| n.path.as_path()).collect();
     assert!(all.contains(&Path::new("permanent/zettelkasten.typ")));
     assert!(!all.iter().any(|p| p.starts_with("templates")));
@@ -37,7 +37,7 @@ fn scan_assigns_category_from_top_level_directory() {
     };
     assert_eq!(count(NoteCategory::Capture), 2);
     assert_eq!(count(NoteCategory::Generated), 1);
-    assert_eq!(count(NoteCategory::Permanent), 10);
+    assert_eq!(count(NoteCategory::Permanent), 11);
     assert_eq!(count(NoteCategory::Time), 5);
 }
 

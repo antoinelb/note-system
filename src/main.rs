@@ -105,7 +105,7 @@ fn main() {
                      const el = node.nodeType === Node.TEXT_NODE \
                          ? node.parentElement : node; \
                      const span = el && el.closest('[data-start]'); \
-                     if (!span) return null; \
+                     if (!span || !span.closest('.block-active')) return null; \
                      return [parseInt(span.dataset.start), offset];",
                 );
                 let _ = eval.send((x, y));

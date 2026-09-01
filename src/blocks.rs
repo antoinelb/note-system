@@ -193,50 +193,22 @@ pub fn resize(blocks: &mut [Block], active: usize, new_len: usize) {
 const FRAGMENT_PREAMBLE: &str =
     "#import \"/templates/template.typ\": *\n#show: note\n";
 
-/// The vertical space one blank block contributes to a region's compiled
-/// source, in place of its empty slice: a run of blank lines collapses to
-/// one Typst parbreak, which would lose every blank line's own height, so
-/// each blank block gets its own explicit spacer instead
-/// (adr/2026-08-cursor-split-rendering.md).
-const BLANK_SPACER: &str = "#v(1.5em)\n";
-
-/// The source a region compiles from: every block whose range falls
-/// entirely inside `span`, concatenated in order, prefixed with
-/// `FRAGMENT_PREAMBLE` exactly once — unless the run's first block is
-/// `standalone` (the note's own preamble, which already carries the
-/// import). A blank block contributes `BLANK_SPACER` instead of its empty
-/// slice; every other block keeps its full range (content plus separator)
-/// verbatim, so a multi-line list run stays one list
-/// (adr/2026-08-cursor-split-rendering.md). A span with no block inside it
-/// (the caller never mounts a pane for it) compiles to nothing.
-pub fn region_source(
-    text: &str,
-    blocks: &[Block],
-    span: Range<usize>,
-) -> String {
-    let run: Vec<&Block> = blocks
-        .iter()
-        .filter(|block| {
-            block.range.start >= span.start && block.range.end <= span.end
-        })
-        .collect();
-    let Some(first) = run.first() else {
-        return String::new();
-    };
-    let mut source = if first.standalone {
+/// The source one block compiles from when its markup needs the Typst
+/// fallback: `FRAGMENT_PREAMBLE` (unless the block is `standalone`, the
+/// note's own preamble, which already carries the import) plus the block's
+/// own `range` slice verbatim — content plus its trailing separator, so a
+/// multi-line construct compiles exactly as it sits in the note. A block
+/// whose range no longer resolves against `text` (a stale caller,
+/// mirroring `resize_with_a_stale_index_is_dropped`) contributes no
+/// content, only the preamble.
+pub fn block_source(text: &str, block: &Block) -> String {
+    let mut source = if block.standalone {
         String::new()
     } else {
         FRAGMENT_PREAMBLE.to_string()
     };
-    for block in run {
-        let blank = text
-            .get(block.content())
-            .is_some_and(|slice| slice.trim().is_empty());
-        if blank {
-            source.push_str(BLANK_SPACER);
-        } else if let Some(slice) = text.get(block.range.clone()) {
-            source.push_str(slice);
-        }
+    if let Some(slice) = text.get(block.range.clone()) {
+        source.push_str(slice);
     }
     source
 }
@@ -477,106 +449,60 @@ mod tests {
     }
 
     #[test]
-    fn a_region_starting_on_the_standalone_preamble_gets_no_synthesized_one() {
+    fn a_standalone_block_gets_no_synthesized_preamble() {
         let blocks = segment(NOTE);
-        // the whole note as one region: the preamble is the run's first
-        // block and already carries the import, so nothing is prepended
-        let region = region_source(NOTE, &blocks, 0..NOTE.len());
-        assert!(region.starts_with("#import"), "{region}");
+        // blocks[0] is the note's own preamble: it already carries the
+        // import, so nothing is prepended
+        let source = block_source(NOTE, &blocks[0]);
+        assert!(source.starts_with("#import"), "{source}");
         assert_eq!(
-            region.matches("#import").count(),
+            source.matches("#import").count(),
             1,
-            "the synthesized preamble never doubles the real one: {region}"
+            "the synthesized preamble never doubles the real one: {source}"
         );
     }
 
     #[test]
-    fn a_region_without_the_preamble_gets_one_synthesized_preamble() {
+    fn a_non_standalone_block_gets_one_synthesized_preamble() {
         let blocks = segment(NOTE);
-        // blocks[2..] is the heading onward: no standalone block leads it
-        let span = blocks[2].range.start..NOTE.len();
-        let region = region_source(NOTE, &blocks, span);
-        assert!(region.starts_with(FRAGMENT_PREAMBLE), "{region}");
+        // blocks[2] is the heading, which carries no import of its own
+        let source = block_source(NOTE, &blocks[2]);
+        assert!(source.starts_with(FRAGMENT_PREAMBLE), "{source}");
         assert_eq!(
-            region.matches(FRAGMENT_PREAMBLE).count(),
+            source.matches(FRAGMENT_PREAMBLE).count(),
             1,
-            "exactly one synthesized preamble: {region}"
+            "exactly one synthesized preamble: {source}"
         );
         assert!(
             !FRAGMENT_PREAMBLE.contains("meta("),
             "a second #meta would repeat the visible meta line"
         );
-        assert!(region.contains("= 2026-07-21"));
-        assert!(region.contains("Read about"));
+        assert!(source.contains("= 2026-07-21"));
     }
 
     #[test]
-    fn blank_blocks_in_a_region_become_spacers() {
+    fn a_blocks_own_range_carries_content_and_separator_verbatim() {
         let blocks = segment(NOTE);
-        let region = region_source(NOTE, &blocks, 0..NOTE.len());
-        // three blank blocks in NOTE (blocks[1] and blocks[3], plus the
-        // trailing empty line the note's final newline opens
-        // — adr/2026-08-cursor-always-in-the-note.md); each becomes its
-        // own spacer rather than an empty slice a run would collapse
-        assert_eq!(
-            region.matches("#v(1.5em)").count(),
-            3,
-            "one spacer per blank block: {region}"
-        );
-    }
-
-    #[test]
-    fn a_multi_line_list_run_inside_a_region_stays_verbatim() {
-        let text = "- one\n- two\n- three\n";
-        let blocks = segment(text);
-        let region = region_source(text, &blocks, 0..text.len());
+        let source = block_source(NOTE, &blocks[4]);
         assert!(
-            region.contains("- one\n- two\n- three\n"),
-            "the list's own lines and newlines are untouched: {region}"
+            source.ends_with("Read about the #l(\"zettelkasten\").\n"),
+            "{source}"
         );
     }
 
     #[test]
-    fn a_lone_blank_region_is_still_a_real_spacer() {
-        let text = "= heading\n\nafter\n";
-        let blocks = segment(text);
-        // blocks[1] is the lone blank line between the two paragraphs
-        let span = blocks[1].range.clone();
-        let region = region_source(text, &blocks, span);
-        assert!(region.ends_with("#v(1.5em)\n"), "{region}");
-    }
-
-    #[test]
-    fn an_empty_span_yields_no_source() {
-        let blocks = segment(NOTE);
-        let region = region_source(NOTE, &blocks, 0..0);
-        assert_eq!(region, "", "no block falls inside an empty span");
-    }
-
-    #[test]
-    fn a_stale_block_in_a_region_contributes_nothing() {
+    fn a_stale_block_contributes_no_content_only_the_preamble() {
         // a block whose range no longer resolves against `text` (a stale
         // caller, mirroring `resize_with_a_stale_index_is_dropped`) is
-        // skipped rather than panicking or corrupting the region
+        // skipped rather than panicking or corrupting the source
         let text = "= heading\n";
-        let blocks = vec![
-            Block {
-                range: 0..text.len(),
-                content_end: text.len(),
-                standalone: false,
-            },
-            Block {
-                range: text.len() + 5..text.len() + 9,
-                content_end: text.len() + 9,
-                standalone: false,
-            },
-        ];
-        let region = region_source(text, &blocks, 0..text.len() + 9);
-        assert_eq!(
-            region,
-            format!("{FRAGMENT_PREAMBLE}{text}"),
-            "the stale second block contributes nothing: {region}"
-        );
+        let stale = Block {
+            range: text.len() + 5..text.len() + 9,
+            content_end: text.len() + 9,
+            standalone: false,
+        };
+        let source = block_source(text, &stale);
+        assert_eq!(source, FRAGMENT_PREAMBLE, "{source}");
     }
 
     #[test]

@@ -966,7 +966,12 @@ mod tests {
         // "method" appears on two notes and once in the vocabulary
         assert_eq!(
             index.tag_names().expect("query"),
-            vec!["book".to_string(), "method".to_string(), "rust".to_string()]
+            vec![
+                "book".to_string(),
+                "method".to_string(),
+                "rendering".to_string(),
+                "rust".to_string()
+            ]
         );
     }
 
@@ -1122,7 +1127,7 @@ mod tests {
         index.rebuild(&notes).expect("rebuild");
 
         let rows = index.table_notes().expect("query");
-        // the fixture's 13 non-time notes minus missing-meta.typ, whose
+        // the fixture's 14 non-time notes minus missing-meta.typ, whose
         // absent id keeps it off the table and in the loops list
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
         assert_eq!(
@@ -1138,6 +1143,7 @@ mod tests {
                 "missing-type",
                 "note-system",
                 "plain-files",
+                "quotes",
                 "smart-notes",
                 "zettelkasten",
             ]

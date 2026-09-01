@@ -14,6 +14,7 @@ pub mod keymap;
 pub mod links;
 pub mod logs;
 pub mod loops;
+pub mod markup;
 pub mod motions;
 pub mod palette;
 pub mod parse;
