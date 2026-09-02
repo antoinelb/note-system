@@ -2880,24 +2880,25 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         }
                                     }
                                 },
-                                Pane::Pending { start, text, job } => {
+                                Pane::Pending { start, text, job, shelved } => {
                                     // the compile rides the tier (at most
                                     // once — the probe dedups) while the
-                                    // block's own raw source shows dimmed
-                                    // until the fresh SVG lands — a block's
-                                    // cache key is its own content only, so
-                                    // there is no previous compile of a
-                                    // *different* content to hold in its
-                                    // place meanwhile
-                                    // (adr/2026-08-async-caches-pending-stale.md,
-                                    // adr/2026-08-css-draws-the-markup.md).
+                                    // slot shows what it last showed: the
+                                    // previous SVG of a block whose content
+                                    // changed, dimmed as stale, or the raw
+                                    // source dimmed when the slot never
+                                    // showed one
+                                    // (adr/2026-09-fragments-shelve-their-last-svg-per-block.md,
+                                    // adr/2026-08-async-caches-pending-stale.md).
                                     if let Some(job) = job {
                                         (feed.submit)(Job::Fragment(job));
                                     }
+                                    let stale = shelved.is_some();
                                     rsx! {
                                         div {
                                             key: "{start}",
                                             class: "block block-svg block-pending",
+                                            class: if stale { "block-stale" },
                                             onclick: {
                                                 let fragments = fragments.clone();
                                                 let goal = goal.clone();
@@ -2907,7 +2908,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     fragments.borrow_mut().sweep();
                                                 }
                                             },
-                                            div { class: "pending-source", "{text}" }
+                                            {
+                                                match shelved {
+                                                    Some(svg) => rsx! {
+                                                        div { class: "note", dangerous_inner_html: "{svg}" }
+                                                    },
+                                                    None => rsx! {
+                                                        div { class: "pending-source", "{text}" }
+                                                    },
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -5426,6 +5436,9 @@ enum Pane {
         start: usize,
         text: String,
         job: Option<crate::render::FragmentJob>,
+        /// The slot's last SVG, standing in while the new compile is out
+        /// (adr/2026-09-fragments-shelve-their-last-svg-per-block.md).
+        shelved: Option<String>,
     },
 }
 
@@ -5508,9 +5521,9 @@ fn block_panes(
                     spans: markup.spans,
                     text: text.get(block.content()).unwrap_or("").to_string(),
                 },
-                markup::Draw::Typst => {
-                    block_pane(text, block, file, root, theme, cache, queued)
-                }
+                markup::Draw::Typst => block_pane(
+                    text, block, index, file, root, theme, cache, queued,
+                ),
             },
         );
     }
@@ -5612,9 +5625,11 @@ fn css_piece_span(piece: caret::Piece) -> (usize, String) {
 /// the block that was actually clicked
 /// (adr/2026-08-css-draws-the-markup.md, superseding the cursor split's
 /// boundary-block click compromise).
+#[allow(clippy::too_many_arguments)]
 fn block_pane(
     text: &str,
     block: &blocks::Block,
+    slot: usize,
     file: &Path,
     root: &Path,
     theme: RenderTheme,
@@ -5626,15 +5641,18 @@ fn block_pane(
     if queued {
         // the threaded adapter: never compile in the frame — probe, and
         // hand a miss's job up for the tier
-        // (adr/2026-08-compute-tier-worker-seam.md)
-        match cache.probe(root, file, &source, theme) {
+        // (adr/2026-08-compute-tier-worker-seam.md); the slot is what a
+        // changed block's last image is shelved under
+        // (adr/2026-09-fragments-shelve-their-last-svg-per-block.md)
+        match cache.probe(root, file, slot, &source, theme) {
             FragmentView::Ready(rendered) => {
                 Pane::Fragment { start, rendered }
             }
-            FragmentView::Pending { job } => Pane::Pending {
+            FragmentView::Pending { job, shelved } => Pane::Pending {
                 start,
                 text: text.get(block.content()).unwrap_or("").to_string(),
                 job,
+                shelved,
             },
         }
     } else {
@@ -12964,6 +12982,21 @@ mod tests {
         HeldCompute,
         tokio::sync::mpsc::UnboundedSender<Vec<watch::VaultChange>>,
     ) {
+        let (dom, clicks, _, held, sender) = scripted_app_with_keys(root);
+        (dom, clicks, held, sender)
+    }
+
+    /// `scripted_app`, with the mount's keydown targets too — the last of
+    /// them is the open note's own sink.
+    fn scripted_app_with_keys(
+        root: Option<PathBuf>,
+    ) -> (
+        VirtualDom,
+        Vec<ElementId>,
+        Vec<ElementId>,
+        HeldCompute,
+        tokio::sync::mpsc::UnboundedSender<Vec<watch::VaultChange>>,
+    ) {
         set_event_converter(Box::new(TestEvents));
         let jobs = Arc::new(Mutex::new(Vec::new()));
         let queued = jobs.clone();
@@ -12988,9 +13021,11 @@ mod tests {
         }));
         let mutations = with_reactor(|| dom.rebuild_to_vec());
         let clicks = listeners(&mutations, "click");
+        let keys = listeners(&mutations, "keydown");
         (
             dom,
             clicks,
+            keys,
             HeldCompute {
                 jobs,
                 outcomes: outcome_sender,
@@ -13102,6 +13137,73 @@ mod tests {
             "the pending block is the active one now: {}",
             source_of(&dom)
         );
+
+        drop(held);
+        block_on(settle(&mut dom));
+    }
+
+    #[test]
+    fn a_changed_fallback_block_keeps_its_last_image_until_the_fresh_one_lands()
+     {
+        let vault = temp_vault();
+        let (mut dom, _, keys, held, _sender) =
+            scripted_app_with_keys(Some(vault.path().to_path_buf()));
+        held.work(&mut dom);
+        let ready = dioxus_ssr::render(&dom);
+        assert!(ready.contains(RENDERED_NOTE), "{ready}");
+        assert!(!ready.contains("block-stale"), "{ready}");
+
+        // the preamble is the note's one fallback block: gg lands on its
+        // first line from the trailing line the note opens on (a pure
+        // grammar motion, no geometry seam to await); add a character and
+        // put the block away — its content changed, so its key did
+        let sink = keys[keys.len() - 1];
+        press(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        // the woken block mounts its own sink: its keydown target is in
+        // the motion's mutations
+        let woken = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("g".into()),
+            Modifiers::empty(),
+        );
+        let sink = listeners(&woken, "keydown")[0];
+        assert!(source_of(&dom).contains("#import"), "{}", source_of(&dom));
+        for key in [Key::Character("A".into()), Key::Character(" ".into())] {
+            press(&mut dom, sink, key, Modifiers::empty());
+        }
+        // back to normal, then G wakes the last line: the preamble renders
+        // again as a fallback block whose content is new
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        press(
+            &mut dom,
+            sink,
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
+        let stale = dioxus_ssr::render(&dom);
+        assert!(
+            stale.contains("block-stale"),
+            "the last image stands in: {stale}"
+        );
+        assert!(stale.contains("block-pending"), "{stale}");
+        assert!(
+            stale.contains(RENDERED_NOTE),
+            "an image, not source: {stale}"
+        );
+        assert!(!stale.contains("pending-source"), "{stale}");
+
+        // the fresh compile lands and the stale one leaves with it
+        held.work(&mut dom);
+        let fresh = dioxus_ssr::render(&dom);
+        assert!(!fresh.contains("block-stale"), "{fresh}");
+        assert!(!fresh.contains("block-pending"), "{fresh}");
+        assert!(fresh.contains(RENDERED_NOTE), "{fresh}");
 
         drop(held);
         block_on(settle(&mut dom));

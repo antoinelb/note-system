@@ -210,13 +210,18 @@ impl FragmentJob {
 /// What a fragment probe answers: the cached result, or "not yet" with the
 /// job to submit — present only the first time, the in-flight set dedups
 /// the repaints in between (adr/2026-08-async-caches-pending-stale.md). A
-/// block's key is its own content, so a cursor move changes no key and
-/// there is no previous compile to keep showing in the meantime, unlike
-/// `BodyView`'s stale-while-revalidate shelf.
+/// block's key is its own content, so a cursor move changes no key; a
+/// content change does, and while the new compile is out `shelved` is the
+/// last SVG the same block slot showed — a changed formula keeps its last
+/// image rather than dropping to dimmed source
+/// (adr/2026-09-fragments-shelve-their-last-svg-per-block.md).
 #[derive(Debug)]
 pub enum FragmentView {
     Ready(Result<String, String>),
-    Pending { job: Option<FragmentJob> },
+    Pending {
+        job: Option<FragmentJob>,
+        shelved: Option<String>,
+    },
 }
 
 /// Per-block SVG fragments for the hybrid editor — the successor
@@ -241,6 +246,16 @@ pub struct FragmentCache {
     entries: HashMap<u64, Result<String, String>>,
     touched: HashSet<u64>,
     inflight: HashSet<u64>,
+    /// Per (note, block slot): the key of the last SVG that slot showed,
+    /// whose entry `sweep` keeps even while the block is active and probes
+    /// nothing — the stale-while-revalidate shelf, indexed by position
+    /// because the content key is exactly what changes under an edit.
+    /// Errors are never shelved, and a sweep drops the shelves of every
+    /// note but the one last probed, so the memory bound is the open
+    /// note's block count.
+    shelves: HashMap<(PathBuf, usize), u64>,
+    /// The note the last probe was for: whose shelves a sweep keeps.
+    current: Option<PathBuf>,
     /// Bumped by `clear` when the template changes: the template is the one
     /// compile input outside the content-addressed key, so across its edits
     /// every cached and in-flight result is wrong for its key
@@ -272,14 +287,28 @@ impl FragmentCache {
         &mut self,
         root: &Path,
         note: &Path,
+        slot: usize,
         source: &str,
         theme: RenderTheme,
     ) -> FragmentView {
         let key = hash_fragment(note, source, theme);
         self.touched.insert(key);
+        self.current = Some(note.to_path_buf());
+        let shelf = (note.to_path_buf(), slot);
         if let Some(hit) = self.entries.get(&key) {
+            if hit.is_ok() {
+                self.shelves.insert(shelf, key);
+            }
             return FragmentView::Ready(hit.clone());
         }
+        // the slot's last good SVG stands in while the compile is out; a
+        // shelf whose entry is gone (a template clear) stands in nothing
+        let shelved = self
+            .shelves
+            .get(&shelf)
+            .and_then(|old| self.entries.get(old))
+            .and_then(|hit| hit.as_ref().ok())
+            .cloned();
         let job = self.inflight.insert(key).then(|| FragmentJob {
             key,
             epoch: self.epoch,
@@ -288,7 +317,7 @@ impl FragmentCache {
             source: source.to_string(),
             theme,
         });
-        FragmentView::Pending { job }
+        FragmentView::Pending { job, shelved }
     }
 
     /// A worker outcome landing. A key swept while its compile was out is
@@ -309,8 +338,17 @@ impl FragmentCache {
         self.entries.insert(key, result);
     }
 
+    /// Drops what the generation never rendered — except the open note's
+    /// shelves, which outlive the sweeps an active block's edits cause;
+    /// every other note's shelves go with the generation.
     pub fn sweep(&mut self) {
-        self.entries.retain(|key, _| self.touched.contains(key));
+        let current = self.current.clone();
+        self.shelves
+            .retain(|(note, _), _| Some(note) == current.as_ref());
+        let shelved: HashSet<u64> = self.shelves.values().copied().collect();
+        self.entries.retain(|key, _| {
+            self.touched.contains(key) || shelved.contains(key)
+        });
         self.touched.clear();
     }
 
@@ -322,6 +360,8 @@ impl FragmentCache {
         self.entries.clear();
         self.touched.clear();
         self.inflight.clear();
+        self.shelves.clear();
+        self.current = None;
     }
 }
 
@@ -719,17 +759,19 @@ mod tests {
     fn a_fragment_probe_queues_once_then_serves_what_lands() {
         let mut cache = FragmentCache::default();
         let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
-        let FragmentView::Pending { job: Some(job) } = cache.probe(
+        let FragmentView::Pending { job: Some(job), .. } = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
         ) else {
             panic!("the first probe hands the job over");
         };
-        let FragmentView::Pending { job: None } = cache.probe(
+        let FragmentView::Pending { job: None, .. } = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
         ) else {
@@ -739,6 +781,7 @@ mod tests {
         let FragmentView::Ready(Ok(svg)) = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
         ) else {
@@ -747,28 +790,181 @@ mod tests {
         assert_eq!(svg, "<svg/>");
     }
 
+    /// Probes slot 0 of one note with `source`, in the dark theme.
+    fn probe_slot(cache: &mut FragmentCache, source: &str) -> FragmentView {
+        cache.probe(
+            Path::new("/vault"),
+            Path::new("permanent/a.typ"),
+            0,
+            source,
+            RenderTheme::Dark(DEFAULT_SIZE),
+        )
+    }
+
+    /// Lands `svg` for the job `view` carries.
+    fn land(cache: &mut FragmentCache, view: FragmentView, svg: &str) {
+        let FragmentView::Pending { job: Some(job), .. } = view else {
+            panic!("a fresh key hands its job over");
+        };
+        cache.absorb(job.key, job.epoch, Ok(svg.to_string()));
+    }
+
+    #[test]
+    fn a_changed_block_keeps_its_last_svg_while_the_new_compile_is_out() {
+        let mut cache = FragmentCache::default();
+        let first = probe_slot(&mut cache, "$ a $");
+        land(&mut cache, first, "<a/>");
+        assert!(matches!(
+            probe_slot(&mut cache, "$ a $"),
+            FragmentView::Ready(Ok(_))
+        ));
+
+        // the formula changed: its new key is out, its old image stands in
+        let FragmentView::Pending {
+            job: Some(job),
+            shelved: Some(shelved),
+        } = probe_slot(&mut cache, "$ a + b $")
+        else {
+            panic!("a changed slot pends with its last svg shelved");
+        };
+        assert_eq!(shelved, "<a/>");
+        // a sweep between the change and the landing keeps the shelf
+        cache.sweep();
+        let FragmentView::Pending {
+            job: None,
+            shelved: Some(kept),
+        } = probe_slot(&mut cache, "$ a + b $")
+        else {
+            panic!("mid-flight, the shelf survives the sweep");
+        };
+        assert_eq!(kept, "<a/>");
+
+        // the fresh compile lands and is the next shelf
+        cache.absorb(job.key, job.epoch, Ok("<ab/>".to_string()));
+        assert!(matches!(
+            probe_slot(&mut cache, "$ a + b $"),
+            FragmentView::Ready(Ok(_))
+        ));
+        cache.sweep();
+        let FragmentView::Pending {
+            shelved: Some(next),
+            ..
+        } = probe_slot(&mut cache, "$ a + b + c $")
+        else {
+            panic!("the landed svg is what the slot shelves now");
+        };
+        assert_eq!(next, "<ab/>");
+    }
+
+    #[test]
+    fn a_shelf_outlives_the_sweeps_of_an_edit_and_dies_with_the_note() {
+        let mut cache = FragmentCache::default();
+        let first = probe_slot(&mut cache, "$ a $");
+        land(&mut cache, first, "<a/>");
+        probe_slot(&mut cache, "$ a $");
+        // the block is active: generations pass in which it probes nothing
+        cache.sweep();
+        cache.sweep();
+        let FragmentView::Pending {
+            shelved: Some(kept),
+            ..
+        } = probe_slot(&mut cache, "$ a + b $")
+        else {
+            panic!("the shelf survived the edit's sweeps");
+        };
+        assert_eq!(kept, "<a/>");
+
+        // another note takes the screen: the first note's shelf goes with
+        // the next sweep, so a return to it shelves nothing
+        let other = cache.probe(
+            Path::new("/vault"),
+            Path::new("permanent/b.typ"),
+            0,
+            "= b",
+            RenderTheme::Dark(DEFAULT_SIZE),
+        );
+        land(&mut cache, other, "<b/>");
+        cache.sweep();
+        let FragmentView::Pending { shelved: None, .. } =
+            probe_slot(&mut cache, "$ a + b + c $")
+        else {
+            panic!("a shelf never outlives its note's visit");
+        };
+    }
+
+    #[test]
+    fn an_error_is_never_shelved_and_a_swept_shelf_stands_in_nothing() {
+        let mut cache = FragmentCache::default();
+        let first = probe_slot(&mut cache, "$ a $");
+        land(&mut cache, first, "<a/>");
+        probe_slot(&mut cache, "$ a $");
+
+        let FragmentView::Pending { job: Some(job), .. } =
+            probe_slot(&mut cache, "$ a + $")
+        else {
+            panic!("the broken formula pends");
+        };
+        cache.absorb(job.key, job.epoch, Err("unclosed".to_string()));
+        assert!(matches!(
+            probe_slot(&mut cache, "$ a + $"),
+            FragmentView::Ready(Err(_))
+        ));
+        // the error is drawn, and the good image before it is still the
+        // shelf: the next change shows the last thing that rendered
+        cache.sweep();
+        probe_slot(&mut cache, "$ a + $");
+        cache.sweep();
+        let FragmentView::Pending {
+            shelved: Some(last_good),
+            ..
+        } = probe_slot(&mut cache, "$ a + b $")
+        else {
+            panic!("an error is never a shelf; the image before it is");
+        };
+        assert_eq!(last_good, "<a/>");
+
+        // a template clear forgets every shelf too
+        let fresh = probe_slot(&mut cache, "$ b $");
+        land(&mut cache, fresh, "<b/>");
+        probe_slot(&mut cache, "$ b $");
+        cache.clear();
+        let FragmentView::Pending { shelved: None, .. } =
+            probe_slot(&mut cache, "$ b + c $")
+        else {
+            panic!("a cleared cache shelves nothing");
+        };
+    }
+
     #[test]
     fn a_cleared_fragment_cache_drops_the_outcomes_it_doomed() {
         // the template changed while the compile was out: same key, wrong
         // pixels — the epoch bump keeps the late landing out
         let mut cache = FragmentCache::default();
         let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
-        let FragmentView::Pending { job: Some(doomed) } = cache.probe(
+        let FragmentView::Pending {
+            job: Some(doomed), ..
+        } = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
-        ) else {
+        )
+        else {
             panic!("the first probe hands the job over");
         };
         cache.clear();
         cache.absorb(doomed.key, doomed.epoch, Ok("<old/>".to_string()));
-        let FragmentView::Pending { job: Some(fresh) } = cache.probe(
+        let FragmentView::Pending {
+            job: Some(fresh), ..
+        } = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
-        ) else {
+        )
+        else {
             panic!("nothing landed, so the cleared cache re-queues");
         };
         assert_eq!(fresh.key, doomed.key, "the key is content-addressed");
@@ -779,9 +975,10 @@ mod tests {
     fn a_cleared_fragment_cache_forgets_what_was_ready() {
         let mut cache = FragmentCache::default();
         let (root, note) = (Path::new("/vault"), Path::new("permanent/a.typ"));
-        let FragmentView::Pending { job: Some(job) } = cache.probe(
+        let FragmentView::Pending { job: Some(job), .. } = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
         ) else {
@@ -789,9 +986,10 @@ mod tests {
         };
         cache.absorb(job.key, job.epoch, Ok("<svg/>".to_string()));
         cache.clear();
-        let FragmentView::Pending { job: Some(_) } = cache.probe(
+        let FragmentView::Pending { job: Some(_), .. } = cache.probe(
             root,
             note,
+            0,
             "= titre",
             RenderTheme::Dark(DEFAULT_SIZE),
         ) else {
@@ -808,10 +1006,11 @@ mod tests {
         let vault =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
         let note = vault.join("permanent/zettelkasten.typ");
-        let FragmentView::Pending { job: Some(job) } =
+        let FragmentView::Pending { job: Some(job), .. } =
             FragmentCache::default().probe(
                 &vault,
                 &note,
+                0,
                 "= titre\n",
                 RenderTheme::Paper(DEFAULT_SIZE),
             )

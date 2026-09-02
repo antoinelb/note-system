@@ -1,5 +1,11 @@
 # Probing caches: pending shows dimmed source, stale bodies hold the slot
 
+> Amended by `adr/2026-09-fragments-shelve-their-last-svg-per-block.md`: the
+> "fragments need no staleness guard" bullet below still holds for validity —
+> a result is right for its content key forever — but a fragment slot now
+> keeps its last good SVG on screen, dimmed, while a changed block's new
+> compile is out, instead of dropping to dimmed source.
+
 ## Context
 
 With compiles on the compute tier (adr/2026-08-compute-tier-worker-seam.md),
