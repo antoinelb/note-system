@@ -55,6 +55,11 @@ fn main() {
         // the app's single clock read
         // (adr/2026-07-today-injected-root-context.md)
         .with_context(ui::Today(time::today()))
+        // what a `#link` destination is handed to: the desktop's opener,
+        // started and forgotten (adr/2026-09-link-is-for-resources.md)
+        .with_context(ui::Launcher(std::sync::Arc::new(|target| {
+            launch::open_with(launch::OPENER, target)
+        })))
         // read again only when a capture is stamped, which is the one thing
         // that needs the time of day (adr/2026-08-capture-timestamp-ids.md)
         .with_context(ui::Now(std::sync::Arc::new(jiff::Zoned::now)))

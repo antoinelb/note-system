@@ -175,19 +175,25 @@ fn kind_is_css_safe(kind: SyntaxKind) -> bool {
             | SyntaxKind::Str
             | SyntaxKind::Named
             | SyntaxKind::ContentBlock
+            // a content block's own delimiters, and nothing else's: the
+            // `[body]` of a `#link` (adr/2026-09-link-is-for-resources.md)
+            | SyntaxKind::LeftBracket
+            | SyntaxKind::RightBracket
             | SyntaxKind::End
     )
 }
 
 /// The role a recognised call's whole invocation renders with, or `None`
 /// for anything else — the callee-name half of the verdict, and (once the
-/// verdict is CSS) what `Role` a matched `#l`/`#meta`/`#quote` gets.
+/// verdict is CSS) what `Role` a matched `#l`/`#link`/`#meta`/`#quote`
+/// gets. Typst's own `#link` wears the same role as `#l`: it is the link
+/// form for what is not a note (adr/2026-09-link-is-for-resources.md).
 fn recognized_role(call: ast::FuncCall) -> Option<Role> {
     let ast::Expr::Ident(name) = call.callee() else {
         return None;
     };
     match name.as_str() {
-        "l" => Some(Role::Link),
+        "l" | "link" => Some(Role::Link),
         "meta" | "quote" => Some(Role::Meta),
         _ => None,
     }
@@ -685,6 +691,24 @@ mod tests {
             .expect("a span starting at the hash");
         assert_eq!(link_span.role, Role::Link);
         assert_eq!(&source[link_span.range.clone()], "#l(\"target\")");
+    }
+
+    #[test]
+    fn a_typst_link_to_a_resource_is_css_and_wears_the_link_role() {
+        let source = "the #link(\"/assets/a.pdf\")[slides] here";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
+        let hash = source.find('#').expect("a hash");
+        let link_span = markup
+            .spans
+            .iter()
+            .find(|s| s.range.start == hash)
+            .expect("a span starting at the hash");
+        assert_eq!(link_span.role, Role::Link);
+        assert_eq!(
+            &source[link_span.range.clone()],
+            "#link(\"/assets/a.pdf\")[slides]"
+        );
     }
 
     #[test]

@@ -302,6 +302,21 @@ mod tests {
     }
 
     #[test]
+    fn a_typst_link_is_not_a_note_link_and_never_dangles() {
+        // `#link` is for resources (adr/2026-09-link-is-for-resources.md):
+        // only `#l` calls reach the links table
+        let parsed = parse_note(
+            r#"#link("https://example.org/x.pdf")[slides] and #l("a")"#,
+        );
+        assert_eq!(
+            parsed.links,
+            vec![Link {
+                target: NoteId("a".to_string())
+            }]
+        );
+    }
+
+    #[test]
     fn due_reads_a_date_and_refuses_the_rest_field_by_field() {
         let meta = present(parse_note(r#"#meta(due: "2026-09-10")"#));
         assert_eq!(meta.due, Some(jiff::civil::date(2026, 9, 10)));

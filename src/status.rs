@@ -60,6 +60,10 @@ pub enum Source {
     Create,
     Index,
     Undo,
+    /// The desktop launcher a `#link` destination is handed to; a later
+    /// open that works resolves the earlier refusal
+    /// (adr/2026-09-link-is-for-resources.md).
+    Launcher,
     Clipboard,
 }
 
@@ -328,6 +332,17 @@ impl Notice {
         }
     }
 
+    /// A `#link` destination the desktop's launcher would not take: the
+    /// note is untouched and nothing opened
+    /// (adr/2026-09-link-is-for-resources.md).
+    pub fn open_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Launcher,
+            text: format!("open: {detail} — the link was not opened"),
+        }
+    }
+
     /// An index read that failed on the way to an overlay or a sheet — the
     /// caller's message arrives already naming its context ("links: …",
     /// "sheet: …"), the one family whose prose predates this module.
@@ -537,6 +552,11 @@ mod tests {
         );
         assert!(Notice::delete_failed("boom").text.contains("still on disk"));
         assert!(Notice::create_failed("boom").text.starts_with("create:"));
+        assert!(
+            Notice::open_failed("xdg-open: not found")
+                .text
+                .starts_with("open: xdg-open: not found")
+        );
         assert_eq!(
             Notice::index("links: boom".to_string()).text,
             "links: boom"

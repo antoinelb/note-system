@@ -13,3 +13,4 @@ Code: MAT 1400
 Term: autumn 2026
 
 Lectures link here; the assignments carry their own `due`.
+The #link("https://example.org/mat1400/slides.pdf")[slides] are not a note, so the link is not a loop.

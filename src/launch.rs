@@ -111,6 +111,31 @@ const span = el && el.closest('[data-start]'); \
 if (!span || !span.closest('.block-active')) return null; \
 return [parseInt(span.dataset.start), offset];";
 
+/// The desktop's own opener, for what a `#link` points at — a PDF under
+/// the vault, a URL. The name is a constant rather than a call so the gate
+/// can hold `open_with` to a launcher that exists and one that does not
+/// without ever starting the real one from a test.
+pub const OPENER: &str = "xdg-open";
+
+/// Hands `target` to `opener` and returns at once: the child is reaped on
+/// a thread of its own, so a launcher that lingers never holds the UI and
+/// one that exits leaves no zombie. A launcher that cannot start is the
+/// one failure this can see; whatever it does with the target afterwards
+/// is its own (adr/2026-09-link-is-for-resources.md).
+pub fn open_with(opener: &str, target: &str) -> Result<(), String> {
+    let mut child = std::process::Command::new(opener)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| format!("{opener}: {err}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// What `HIT_PROBE` answered, or `None` for a press outside the active
 /// block and for any shape the script never promised.
 pub fn hit(value: &serde_json::Value) -> Option<(usize, usize)> {
@@ -324,6 +349,14 @@ mod tests {
         // the first batch's failed send is the loop's exit; a pump that
         // ignored it would never return and this join would hang
         thread.join().expect("the pump returned");
+    }
+
+    #[test]
+    fn an_opener_that_starts_is_ok_and_one_that_cannot_names_itself() {
+        assert_eq!(open_with("true", "https://example.org"), Ok(()));
+        let refused = open_with("/nonexistent/launcher-for-this-test", "x")
+            .expect_err("a launcher that is not there cannot start");
+        assert!(refused.starts_with("/nonexistent/launcher-for-this-test: "));
     }
 
     #[test]

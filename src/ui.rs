@@ -223,6 +223,17 @@ pub struct SeedTrouble(pub Option<String>);
 #[derive(Clone)]
 pub struct Now(pub Arc<dyn Fn() -> jiff::Zoned + Send + Sync>);
 
+/// What a `#link` destination is handed to — the desktop's opener, given
+/// the resolved target and answering only whether it could be started.
+/// Absent in the headless tests that never follow one; the tests that do
+/// inject a recorder (adr/2026-09-link-is-for-resources.md).
+#[derive(Clone)]
+pub struct Launcher(pub Arc<Opener>);
+
+/// The launcher's one call: the resolved target in, whether the opener
+/// could be started out.
+pub type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+
 /// The quit chord lands on the `.app` root, but the open buffer lives in
 /// `Shell` — so `Shell` registers its flush here for `App` to call before
 /// closing (adr/2026-07-ctrl-q-flushes-then-closes.md, reinstated by
@@ -449,6 +460,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let clipboard = try_consume_context::<Clipboard>();
     let clipboard_write = try_consume_context::<ClipboardWrite>();
     let now = try_consume_context::<Now>();
+    let launcher = try_consume_context::<Launcher>();
     let window_size = try_consume_context::<Viewport>();
     // always provided by App above; the palette dispatches through it
     let root_commands = use_context::<RootCommands>();
@@ -1671,16 +1683,37 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // caret is app state now, so everyone reads the same one — no probe,
     // no frozen offsets (adr/2026-08-ctrl-enter-opens-time-links.md,
     // adr/2026-08-caret-on-editor-note-bytes.md)
-    let follow_at = use_callback(move |()| {
-        let target = {
-            let editor = editor.peek();
-            let (_, head) = editor.caret_in_block();
-            editor
-                .active_source()
-                .and_then(|slice| links::link_at(slice, head))
-        };
-        let Some(target) = target else { return };
-        open_id.call(target);
+    let follow_at = use_callback({
+        let root = root.clone();
+        let launcher = launcher.clone();
+        move |()| {
+            let target = {
+                let editor = editor.peek();
+                let (_, head) = editor.caret_in_block();
+                editor
+                    .active_source()
+                    .and_then(|slice| links::link_at(slice, head))
+            };
+            match target {
+                Some(links::LinkTarget::Note(id)) => open_id.call(id),
+                // a resource leaves the app: the launcher gets the
+                // destination resolved against the vault, and the one
+                // thing it can say back is that it would not start
+                // (adr/2026-09-link-is-for-resources.md)
+                Some(links::LinkTarget::Resource(destination)) => {
+                    let Some(launcher) = &launcher else { return };
+                    let resolved =
+                        links::resolve_resource(&root, &destination);
+                    match (launcher.0)(&resolved) {
+                        Ok(()) => status.write().resolve(Source::Launcher),
+                        Err(detail) => {
+                            status.write().report(Notice::open_failed(&detail))
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
     });
 
     // one accept path for Enter and for a click on a row: the link lands at
@@ -7646,6 +7679,91 @@ mod tests {
         );
         assert!(html.contains(r#"class="sheet""#), "{html}");
         assert!(html.contains("raised"), "{html}");
+    }
+
+    /// Today's day note with a `#link` to a file under the vault as its
+    /// last line — the resource a follow hands to the launcher.
+    fn day_linking_a_resource(vault: &Path) {
+        std::fs::write(
+            vault.join("time/2026-07-23.typ"),
+            format!(
+                "{}#link(\"/assets/slides.pdf\")[the slides]\n",
+                time_note("2026-07-23", "daily")
+            ),
+        )
+        .expect("the day is rewritten");
+    }
+
+    /// The resource line's targets. It sits where the fixture's `#l` line
+    /// sits, one click listener earlier: a `#link` is not a note link, so
+    /// the footer under the note lists no outgoing row for it.
+    fn activate_resource_link(
+        dom: &mut VirtualDom,
+        clicks: &[ElementId],
+    ) -> (ElementId, ElementId) {
+        activate_block(dom, clicks[BLOCK_LINK - 1])
+    }
+
+    #[test]
+    fn ctrl_enter_on_a_resource_link_hands_the_vault_path_to_the_launcher() {
+        let vault = temp_vault();
+        day_linking_a_resource(vault.path());
+        let (mut dom, clicks, hit, launched) =
+            launcher_app(Some(vault.path().to_path_buf()), vec![]);
+        let (block, keys) = activate_resource_link(&mut dom, &clicks);
+
+        place_caret(&mut dom, block, &hit, 3);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        assert_eq!(
+            *launched.lock().expect("the launch log never poisons"),
+            vec![vault.path().join("assets/slides.pdf").display().to_string()],
+            "the leading slash is the vault root"
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "nothing moved: {html}");
+        assert!(!html.contains("open:"), "nothing to say: {html}");
+    }
+
+    #[test]
+    fn a_launcher_that_will_not_start_is_a_notice_the_next_open_resolves() {
+        let vault = temp_vault();
+        day_linking_a_resource(vault.path());
+        let (mut dom, clicks, hit, launched) = launcher_app(
+            Some(vault.path().to_path_buf()),
+            vec![Err("xdg-open: not found".to_string()), Ok(())],
+        );
+        let (block, keys) = activate_resource_link(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, 3);
+
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("open: xdg-open: not found"),
+            "the refusal is on the line: {html}"
+        );
+
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("open:"), "the good open resolved it: {html}");
+        assert_eq!(
+            launched.lock().expect("the launch log never poisons").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn without_a_launcher_a_resource_link_is_inert() {
+        // the headless app of the other tests injects none: the follow
+        // does nothing rather than reaching for a process
+        let vault = temp_vault();
+        day_linking_a_resource(vault.path());
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_resource_link(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, 3);
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "{html}");
+        assert!(!html.contains("open:"), "{html}");
     }
 
     /// Beta's heading is `= beta\n#l("alpha")#l("2026-07-22")` — one link
@@ -16804,6 +16922,46 @@ mod tests {
             Box::pin(async move { landed })
         }));
         (hit, landing)
+    }
+
+    /// What the recording launcher was handed, in order.
+    type Launched = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Like `hit_app`, with a launcher injected that records every target
+    /// and answers as `verdicts` scripts it, in order — an empty script
+    /// answers `Ok` (adr/2026-09-link-is-for-resources.md).
+    fn launcher_app(
+        root: Option<PathBuf>,
+        verdicts: Vec<Result<(), String>>,
+    ) -> (VirtualDom, Vec<ElementId>, HitCell, Launched) {
+        let launched: Launched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let verdicts = Arc::new(std::sync::Mutex::new(verdicts));
+        let recorder = Launcher(Arc::new({
+            let launched = launched.clone();
+            move |target: &str| {
+                launched
+                    .lock()
+                    .expect("the launch log never poisons")
+                    .push(target.to_string());
+                let mut verdicts =
+                    verdicts.lock().expect("the script never poisons");
+                if verdicts.is_empty() {
+                    Ok(())
+                } else {
+                    verdicts.remove(0)
+                }
+            }
+        }));
+        let (hit, landing) = hit_probe_fake();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(test_today())));
+        dom.insert_any_root_context(Box::new(hit));
+        dom.insert_any_root_context(Box::new(recorder));
+        let mutations = dom.rebuild_to_vec();
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, landing, launched)
     }
 
     /// Like `rendered_app`, but with a scripted hit probe injected: each

@@ -119,12 +119,34 @@ pub fn backlinks(
         .collect()
 }
 
-/// The `#l("...")` target the caret is standing in, for Ctrl+Enter
-/// (`adr/2026-08-ctrl-enter-opens-time-links.md`). `caret` is a byte offset
-/// into `block_text` — the active block's own source, the same slice the
-/// caret probe measures. A link with no string target leads nowhere, exactly
-/// as the footer reads it.
-pub fn link_at(block_text: &str, caret: usize) -> Option<String> {
+/// What a link under the caret leads to: a note, by the id an `#l` call
+/// names, or a resource — a file under the vault, a URL — by the
+/// destination of Typst's own `#link`, which the desktop's launcher opens
+/// and the index never counts as debt
+/// (`adr/2026-09-link-is-for-resources.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Note(String),
+    Resource(String),
+}
+
+/// Where a `#link` destination points once the vault is known: a leading
+/// `/` is the vault root, as it is for Typst's own path resolution
+/// (`#import "/templates/…"`), and anything else — a URL, a relative
+/// path — is handed to the launcher as written.
+pub fn resolve_resource(root: &std::path::Path, destination: &str) -> String {
+    match destination.strip_prefix('/') {
+        Some(inside) => root.join(inside).display().to_string(),
+        None => destination.to_string(),
+    }
+}
+
+/// The `#l("...")` or `#link("...")` target the caret is standing in, for
+/// Ctrl+Enter (`adr/2026-08-ctrl-enter-opens-time-links.md`). `caret` is a
+/// byte offset into `block_text` — the active block's own source, the same
+/// slice the caret probe measures. A link with no string target leads
+/// nowhere, exactly as the footer reads it.
+pub fn link_at(block_text: &str, caret: usize) -> Option<LinkTarget> {
     let root = typst_syntax::parse(block_text);
     // typst tokenizes the `#` as the call's left sibling rather than part of
     // it, so the caret sitting on it is outside the span by a byte. Probing
@@ -135,7 +157,10 @@ pub fn link_at(block_text: &str, caret: usize) -> Option<String> {
 
 /// The link call whose span holds `caret`, walked from `root`. Both edges
 /// count as inside, so the caret just past a `)` still follows that link.
-fn target_at(root: &typst_syntax::SyntaxNode, caret: usize) -> Option<String> {
+fn target_at(
+    root: &typst_syntax::SyntaxNode,
+    caret: usize,
+) -> Option<LinkTarget> {
     // (start, node); only nodes whose span holds the caret are ever pushed
     // back, so the walk descends one root-to-link path rather than the tree
     let mut stack = vec![(0usize, root)];
@@ -149,9 +174,17 @@ fn target_at(root: &typst_syntax::SyntaxNode, caret: usize) -> Option<String> {
         }
         if let Some(call) = node.cast::<ast::FuncCall>()
             && let ast::Expr::Ident(name) = call.callee()
-            && name.as_str() == "l"
         {
-            return crate::parse::extract_link_target(call).map(|id| id.0);
+            let target = match name.as_str() {
+                "l" => LinkTarget::Note,
+                "link" => LinkTarget::Resource,
+                _ => {
+                    push_children(&mut stack, start, node);
+                    continue;
+                }
+            };
+            return crate::parse::extract_link_target(call)
+                .map(|id| target(id.0));
         }
         push_children(&mut stack, start, node);
     }
@@ -257,12 +290,12 @@ mod tests {
     fn the_caret_finds_the_link_it_stands_in() {
         // `#` at byte 5, the call itself spanning 6..18
         let text = r#"Voir #l("luhmann") demain"#;
-        assert_eq!(link_at(text, 12), Some("luhmann".to_string()));
+        assert_eq!(link_at(text, 12), Some(note("luhmann")));
         // from the '#' the link opens with, and from just past its ')'
-        assert_eq!(link_at(text, 5), Some("luhmann".to_string()));
-        assert_eq!(link_at(text, 18), Some("luhmann".to_string()));
+        assert_eq!(link_at(text, 5), Some(note("luhmann")));
+        assert_eq!(link_at(text, 18), Some(note("luhmann")));
         // a block that is nothing but a link, caret at its very start
-        assert_eq!(link_at(r#"#l("seul")"#, 0), Some("seul".to_string()));
+        assert_eq!(link_at(r#"#l("seul")"#, 0), Some(note("seul")));
     }
 
     #[test]
@@ -277,17 +310,55 @@ mod tests {
     #[test]
     fn the_caret_picks_the_link_it_is_in_not_its_neighbour() {
         let text = r#"#l("a") et #l("bb")"#;
-        assert_eq!(link_at(text, 4), Some("a".to_string()));
-        assert_eq!(link_at(text, 15), Some("bb".to_string()));
+        assert_eq!(link_at(text, 4), Some(note("a")));
+        assert_eq!(link_at(text, 15), Some(note("bb")));
         // touching links resolve left to right, the way reading does
-        assert_eq!(link_at(r#"#l("a")#l("bb")"#, 7), Some("a".to_string()));
+        assert_eq!(link_at(r#"#l("a")#l("bb")"#, 7), Some(note("a")));
+    }
+
+    fn note(id: &str) -> LinkTarget {
+        LinkTarget::Note(id.to_string())
+    }
+
+    #[test]
+    fn a_typst_link_is_a_resource_and_a_bare_call_between_is_walked_past() {
+        // the destination, not the body, is what the caret follows
+        let text = r#"see #link("https://example.org/x.pdf")[the slides]"#;
+        assert_eq!(
+            link_at(text, 12),
+            Some(LinkTarget::Resource(
+                "https://example.org/x.pdf".to_string()
+            ))
+        );
+        // a call that is neither `l` nor `link` is descended, not answered:
+        // the link nested inside it is still found
+        assert_eq!(
+            link_at(r#"#emph[#link("/assets/a.pdf")[a]]"#, 14),
+            Some(LinkTarget::Resource("/assets/a.pdf".to_string()))
+        );
+        // a label destination is no string: nowhere, like `#l()`
+        assert_eq!(link_at("#link(<intro>)[x]", 8), None);
+    }
+
+    #[test]
+    fn a_resource_under_the_vault_resolves_against_the_root() {
+        let root = std::path::Path::new("/vault");
+        assert_eq!(
+            resolve_resource(root, "/assets/slides.pdf"),
+            "/vault/assets/slides.pdf"
+        );
+        assert_eq!(
+            resolve_resource(root, "https://example.org"),
+            "https://example.org"
+        );
+        assert_eq!(resolve_resource(root, "beside.pdf"), "beside.pdf");
     }
 
     #[test]
     fn a_link_nested_in_markup_is_still_under_the_caret() {
         assert_eq!(
             link_at(r#"Voir #emph[#l("nested")] ici"#, 16),
-            Some("nested".to_string())
+            Some(note("nested"))
         );
     }
 
@@ -301,7 +372,7 @@ mod tests {
     fn a_caret_past_multibyte_text_still_lands_in_the_link() {
         // "été" is 5 bytes, so the byte offset is not the character count
         let text = r#"été #l("hiver")"#;
-        assert_eq!(link_at(text, 9), Some("hiver".to_string()));
+        assert_eq!(link_at(text, 9), Some(note("hiver")));
     }
 
     fn time_notes() -> Vec<(String, NoteType)> {
