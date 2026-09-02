@@ -212,6 +212,7 @@ fn touch(
         links: parsed_note.links,
         summarized: parsed_note.summarized,
         truncated: parsed_note.truncated,
+        source,
     };
     index.update_note(&note)
 }

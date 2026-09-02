@@ -510,6 +510,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut back = use_signal(|| None::<Back>);
     let mut back_query = use_signal(String::new);
     let mut back_highlighted = use_signal(|| 0usize);
+    // the Ctrl+Shift+F finder over the vault's text, the recent-notes
+    // picker's twin (adr/2026-09-full-text-search-lives-in-the-index.md)
+    let mut finder_open = use_signal(|| false);
+    let mut finder_query = use_signal(String::new);
+    let mut finder_highlighted = use_signal(|| 0usize);
+    let mut finder_hits = use_signal(Vec::<crate::index::SearchHit>::new);
     // the edit-template picker, palette-summoned and logs-only
     // (adr/2026-08-template-editing-in-the-one-editor.md)
     let mut template_picker = use_signal(|| None::<TemplatePicker>);
@@ -1542,6 +1548,33 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         back.set(Some(Back { entries }));
     });
     let close_back = use_callback(move |()| back.set(None));
+    // the finder: opens empty, searches on every keystroke — the index is
+    // local and the vault small, so the answer lands inside the keystroke
+    // — and lands a hit the way a loop line lands, by path
+    let open_finder = use_callback(move |()| {
+        finder_query.set(String::new());
+        finder_highlighted.set(0);
+        finder_hits.set(Vec::new());
+        finder_open.set(true);
+    });
+    let close_finder = use_callback(move |()| finder_open.set(false));
+    let finder_typed = use_callback({
+        let root = root.clone();
+        move |query: String| {
+            finder_highlighted.set(0);
+            match search_hits(&root, &query) {
+                Ok(hits) => {
+                    status.write().resolve(Source::Index);
+                    finder_hits.set(hits);
+                }
+                Err(msg) => {
+                    status.write().report(Notice::index(msg));
+                    finder_hits.set(Vec::new());
+                }
+            }
+            finder_query.set(query);
+        }
+    });
     // landing is a real visit, pushed like any other — no pop, no push
     // suppression: the log records where you came from, so the picker can
     // bounce. `select` reads the sheet for its push *before* closing it,
@@ -1596,6 +1629,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 || search_prompt()
                 || ex_prompt()
                 || back.read().is_some()
+                || finder_open()
                 || listing
                 // absent from this list, closing either overlay left the
                 // focus stranded on <body>: the effect never re-ran, the
@@ -1661,6 +1695,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             (search_prompt(), search_query),
             (ex_prompt(), ex_query),
             (back.read().is_some(), back_query),
+            (finder_open(), finder_query),
         ]
         .into_iter()
         .find_map(|(open, query)| open.then_some(query));
@@ -1853,6 +1888,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 }
                 palette::CommandId::Quit => root_commands.quit.call(()),
                 palette::CommandId::Back => open_back.call(()),
+                palette::CommandId::SearchText => open_finder.call(()),
                 // the caret commands run against the caret the palette
                 // opened over — app state nothing could have moved; the
                 // palette lists them only over an active block, which is
@@ -3410,10 +3446,29 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
                         && back.peek().is_none()
+                        && !finder_open()
                         && !settings_open() =>
                 {
                     event.prevent_default();
                     open_back.call(());
+                }
+                // Ctrl+Shift+F, the finder over the vault's text; the
+                // shifted key arrives upper-case
+                // (adr/2026-09-full-text-search-lives-in-the-index.md)
+                Key::Character(ref character)
+                    if character.eq_ignore_ascii_case("f")
+                        && event.modifiers().ctrl()
+                        && event.modifiers().shift()
+                        && palette.peek().is_none()
+                        && picker.peek().is_none()
+                        && creator.peek().is_none()
+                        && template_picker.peek().is_none()
+                        && back.peek().is_none()
+                        && !finder_open()
+                        && !settings_open() =>
+                {
+                    event.prevent_default();
+                    open_finder.call(());
                 }
                 // the screen chords (adr/2026-08-screen-switch-gesture.md);
                 // ordinals in chrome-icon order
@@ -3636,6 +3691,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
                     && back.peek().is_none()
+                    && !finder_open()
                     && !settings_open() =>
             {
                 event.prevent_default();
@@ -3677,9 +3733,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             Key::Character(ref character)
                 if character == "f"
                     && event.modifiers().ctrl()
+                    && !event.modifiers().shift()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
                     && back.peek().is_none()
+                    && !finder_open()
                     && palette.peek().is_none()
                     && creator.peek().is_none()
                     && picker.peek().is_none()
@@ -3688,6 +3746,24 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // the webview owns Ctrl+F as find-in-page
                 event.prevent_default();
                 open_filter.call(());
+            }
+            // Ctrl+Shift+F, the finder over the vault's text, the logs
+            // arm's twin (adr/2026-09-full-text-search-lives-in-the-index.md)
+            Key::Character(ref character)
+                if character.eq_ignore_ascii_case("f")
+                    && event.modifiers().ctrl()
+                    && event.modifiers().shift()
+                    && filter_picker.peek().is_none()
+                    && jump.peek().is_none()
+                    && back.peek().is_none()
+                    && !finder_open()
+                    && palette.peek().is_none()
+                    && creator.peek().is_none()
+                    && picker.peek().is_none()
+                    && !settings_open() =>
+            {
+                event.prevent_default();
+                open_finder.call(());
             }
             Key::Character(ref character)
                 if character == "o"
@@ -4133,6 +4209,75 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     }
                 }
                 None => rsx! {},
+            }
+        }
+        // the finder, the recent-notes picker's twin over the vault's
+        // text: query, hits with their snippet, arrows, Enter, Escape
+        // (adr/2026-09-full-text-search-lives-in-the-index.md)
+        if finder_open() {
+            {
+                let rows = finder_hits();
+                let keys_rows = rows.clone();
+                rsx! {
+                div { class: "command-palette",
+                    div { class: "palette-head type-label", "search text" }
+                    input {
+                        class: "picker-query",
+                        value: "{finder_query}",
+                        placeholder: "words…",
+                        onmounted: move |event| async move {
+                            let _ = event.set_focus(true).await;
+                        },
+                        oninput: move |event| finder_typed.call(event.value()),
+                        onkeydown: move |event: KeyboardEvent| {
+                            let key = event.key();
+                            let last = keys_rows.len().saturating_sub(1);
+                            match key {
+                                Key::Escape => close_finder.call(()),
+                                Key::Enter => {
+                                    if let Some(hit) = keys_rows.get(finder_highlighted()) {
+                                        close_finder.call(());
+                                        open_loop.call(hit.path.clone());
+                                    }
+                                }
+                                Key::ArrowDown => {
+                                    finder_highlighted.set((finder_highlighted() + 1).min(last));
+                                }
+                                Key::ArrowUp => {
+                                    finder_highlighted.set(finder_highlighted().saturating_sub(1));
+                                }
+                                _ => {}
+                            }
+                            if !event.modifiers().ctrl() {
+                                event.stop_propagation();
+                            }
+                        },
+                    }
+                    if rows.is_empty() {
+                        div { class: "picker-empty",
+                            if finder_query.read().trim().is_empty() { "type to search the vault" } else { "no matching note" }
+                        }
+                    }
+                    for (rank, hit) in rows.into_iter().enumerate() {
+                        div {
+                            key: "{hit.path.display()}",
+                            class: "picker-row",
+                            class: if rank == finder_highlighted() { "selected" },
+                            onclick: {
+                                let path = hit.path.clone();
+                                move |_| {
+                                    close_finder.call(());
+                                    open_loop.call(path.clone());
+                                }
+                            },
+                            span { class: "picker-id",
+                                {hit.title.clone().unwrap_or_else(|| crate::domain::stem_of(&hit.path))}
+                            }
+                            span { class: "picker-title", "{hit.snippet}" }
+                        }
+                    }
+                }
+                }
             }
         }
         if screen() == Screen::Logs {
@@ -5157,6 +5302,20 @@ fn dir_category(relative: &Path) -> NoteCategory {
         .and_then(|dir| dir.to_str())
         .and_then(NoteCategory::from_dir)
         .unwrap_or(NoteCategory::Permanent)
+}
+
+/// The finder's hits for a query, read from the index per keystroke — the
+/// `completions` pattern; a read that fails is the caller's to report
+/// (adr/2026-09-full-text-search-lives-in-the-index.md).
+fn search_hits(
+    root: &Path,
+    query: &str,
+) -> Result<Vec<crate::index::SearchHit>, String> {
+    let index = Index::open(&root.join(".index/index.db"))
+        .map_err(|err| format!("search: {err:?}"))?;
+    index
+        .search(query)
+        .map_err(|err| format!("search: {err:?}"))
 }
 
 /// The sheet's editor: the card knows its id, not its file, so the path is
@@ -13707,6 +13866,7 @@ mod tests {
                 "open weekly",
                 "quit",
                 "recent notes",
+                "search text",
                 "settings",
                 "toggle theme",
             ],
@@ -13731,7 +13891,7 @@ mod tests {
         let (_, keys) = activate_heading(&mut dom, &clicks);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 20, "{labels:?}");
+        assert_eq!(labels.len(), 21, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -13890,8 +14050,8 @@ mod tests {
             Modifiers::CONTROL,
         );
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        // alphabetized, `toggle theme` is the last of the 20 visible rows
-        click(&mut dom, listeners(&mutations, "click")[19]);
+        // alphabetized, `toggle theme` is the last of the 21 visible rows
+        click(&mut dom, listeners(&mutations, "click")[20]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"data-theme="light""#), "{html}");
         assert!(!html.contains("command-palette"), "{html}");
@@ -17725,6 +17885,203 @@ mod tests {
     /// (input, keydown) targets plus its rows' click targets in list order
     /// — `open_palette`'s shape over the visit log
     /// (adr/2026-08-ctrl-b-recent-notes-picker.md).
+    /// Opens the finder with Ctrl+Shift+F from `keys` and returns its
+    /// (input, keydown) targets; the rows come with the hits, after typing.
+    fn open_finder(
+        dom: &mut VirtualDom,
+        keys: ElementId,
+    ) -> (ElementId, ElementId) {
+        let mutations = press_for_mutations(
+            dom,
+            keys,
+            Key::Character("F".into()),
+            Modifiers::CONTROL | Modifiers::SHIFT,
+        );
+        let inputs = listeners(&mutations, "input");
+        let keydowns = listeners(&mutations, "keydown");
+        mount(dom, listeners(&mutations, "mounted")[0]);
+        (inputs[0], keydowns[0])
+    }
+
+    /// `type_into`, handing back the mutations the input caused — the
+    /// finder's rows mount on them.
+    fn type_for_mutations(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        text: &str,
+    ) -> Mutations {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedFormData::new(text.to_string(), Vec::new()),
+            )));
+            dom.runtime().handle_event(
+                "input",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            dom.render_immediate_to_vec()
+        })
+    }
+
+    #[test]
+    fn ctrl_shift_f_finds_a_word_past_the_preamble_and_enter_opens_the_sheet()
+    {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/beta.typ"),
+            format!("{}the quick brown fox\n", note("beta")),
+        )
+        .expect("beta is written");
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, finder_keys) = open_finder(&mut dom, keys[LOGS_KEYS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">search text<"), "the finder opened: {html}");
+        assert!(html.contains("type to search the vault"), "{html}");
+        // Enter over no hit does nothing, and a ctrl chord passes through
+        press(&mut dom, finder_keys, Key::Enter, Modifiers::empty());
+        press(&mut dom, finder_keys, ctrl_p(), Modifiers::CONTROL);
+        assert!(dioxus_ssr::render(&dom).contains(">search text<"));
+
+        type_into(&mut dom, input, "brown");
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(picker_ids(&dom), ["beta"], "{html}");
+        assert!(html.contains("quick brown fox"), "the snippet: {html}");
+        // a key the finder has no arm for is absorbed by the input
+        press(
+            &mut dom,
+            finder_keys,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(picker_ids(&dom), ["beta"]);
+        // a note with no heading is listed under its stem
+        std::fs::write(
+            vault.path().join("permanent/untitled.typ"),
+            "#import \"/templates/template.typ\": *\n#show: note\n\
+             #meta(id: \"untitled\", type: \"concept\")\n\nwallaby words\n",
+        )
+        .expect("the untitled note is written");
+        crate::compute::refresh(
+            vault.path(),
+            &[watch::VaultChange::Rescan],
+            test_today(),
+        )
+        .expect("the vault re-indexes");
+        type_into(&mut dom, input, "wallaby");
+        assert_eq!(picker_ids(&dom), ["untitled"]);
+        // the preamble is not searched: every note imports the template
+        type_into(&mut dom, input, "template");
+        assert!(dioxus_ssr::render(&dom).contains("no matching note"));
+
+        type_into(&mut dom, input, "brown");
+        press(&mut dom, finder_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(">search text<"), "the finder closed: {html}");
+        assert!(html.contains(r#"class="sheet""#), "beta's sheet: {html}");
+    }
+
+    #[test]
+    fn a_time_note_hit_lands_on_the_logs_and_a_row_click_lands_too() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-22.typ"),
+            format!("{}zebra crossing\n", time_note("2026-07-22", "daily")),
+        )
+        .expect("the day is rewritten");
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, finder_keys) = open_finder(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "zebra");
+        assert_eq!(picker_ids(&dom), ["2026-07-22"]);
+        // arrows clamp at both ends of the one row
+        press(&mut dom, finder_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, finder_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, finder_keys, Key::ArrowUp, Modifiers::empty());
+        press(&mut dom, finder_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("cal-day has-note selected\">22"),
+            "the day is selected: {html}"
+        );
+
+        // the same landing from a click on the row, and Escape closes
+        let (input, finder_keys) = open_finder(&mut dom, keys[LOGS_KEYS]);
+        let typed = type_for_mutations(&mut dom, input, "zebra");
+        let rows = listeners(&typed, "click");
+        click(&mut dom, rows[0]);
+        assert!(!dioxus_ssr::render(&dom).contains(">search text<"));
+        let (_input, finder_keys_again) =
+            open_finder(&mut dom, keys[LOGS_KEYS]);
+        let _ = finder_keys;
+        press(&mut dom, finder_keys_again, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">search text<"));
+    }
+
+    #[test]
+    fn a_search_the_index_cannot_answer_is_a_notice() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute_batch("DROP TABLE notes_fts")
+            .expect("the sabotage succeeds");
+        let (input, _) = open_finder(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "anything");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("search: "), "the read failed aloud: {html}");
+        assert!(html.contains("no matching note"), "{html}");
+
+        // an index that will not open at all says the same
+        replace_database_with_a_directory(vault.path());
+        type_into(&mut dom, input, "anything else");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("search: "), "{html}");
+    }
+
+    #[test]
+    fn the_finder_opens_from_the_table_and_from_the_palette() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, table_keys) = table_targets_with_keys(&mut dom, &clicks);
+        let (_input, finder_keys) = open_finder(&mut dom, table_keys);
+        assert!(dioxus_ssr::render(&dom).contains(">search text<"));
+        // a second chord over the open finder is inert: overlays never stack
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("F".into()),
+            Modifiers::CONTROL | Modifiers::SHIFT,
+        );
+        press(&mut dom, finder_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">search text<"));
+
+        // Ctrl+F alone is still the card filter, not the finder
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("f".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">filter<"), "{html}");
+        assert!(!html.contains(">search text<"), "{html}");
+
+        // and the palette row runs it from the logs
+        let _ = keys;
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "search text");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(">search text<"));
+    }
+
     fn open_back_picker(
         dom: &mut VirtualDom,
         keys: ElementId,

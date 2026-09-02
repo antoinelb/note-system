@@ -11,7 +11,7 @@ use crate::parse;
 use jiff::{ToSpan, civil::Date};
 use rusqlite::{Connection, Row, Transaction};
 
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 const FOREIGN_KEYS: &str = "PRAGMA foreign_keys = on;";
 const SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -39,7 +39,17 @@ CREATE TABLE anomalies (
     field     TEXT,
     raw       TEXT
 );
+CREATE VIRTUAL TABLE notes_fts USING fts5(
+    path UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
 "#;
+
+/// The finder never lists more than this many hits: past a screenful,
+/// one more word narrows better than scrolling does.
+pub const MAX_HITS: i64 = 12;
 
 #[derive(Debug)]
 pub enum IndexError {
@@ -63,6 +73,15 @@ impl From<rusqlite::Error> for IndexError {
 pub struct DanglingLink {
     pub source: PathBuf,
     pub target: NoteId,
+}
+
+/// One full-text hit: the note, its title when it has one, and the words
+/// around the match (adr/2026-09-full-text-search-lives-in-the-index.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub path: PathBuf,
+    pub title: Option<String>,
+    pub snippet: String,
 }
 
 /// A note whose `due` day has come within the week or gone by — the loops
@@ -127,6 +146,7 @@ impl Index {
             "DELETE FROM tags;",
             "DELETE FROM links;",
             "DELETE FROM notes;",
+            "DELETE FROM notes_fts;",
         ))?;
         for note in notes {
             insert_note(&transaction, note)?;
@@ -469,6 +489,36 @@ impl Index {
         )
     }
 
+    /// The notes whose text holds every word of `query`, best match
+    /// first, at most `MAX_HITS` of them. The query is taken literally —
+    /// each whitespace-separated word is one quoted FTS5 term, so a
+    /// student's `"` or `*` never becomes syntax — and diacritics fold, so
+    /// `idee` finds `idée`. An empty query finds nothing rather than
+    /// everything (adr/2026-09-full-text-search-lives-in-the-index.md).
+    pub fn search(&self, query: &str) -> Result<Vec<SearchHit>, IndexError> {
+        let Some(terms) = fts_terms(query) else {
+            return Ok(Vec::new());
+        };
+        query_rows(
+            &self.connection,
+            concat!(
+                "SELECT path, title, snippet(notes_fts, 2, '', '', '…', 10) ",
+                "FROM notes_fts WHERE notes_fts MATCH ?1 ",
+                "ORDER BY rank, path LIMIT ?2"
+            ),
+            rusqlite::params![terms, MAX_HITS],
+            |row| {
+                Ok(SearchHit {
+                    path: PathBuf::from(row.get::<_, String>(0)?),
+                    title: row.get::<_, Option<String>>(1)?,
+                    // snippet() builds text; there is no stored value it
+                    // could hand back unread
+                    snippet: row.get::<_, String>(2).unwrap_or_default(),
+                })
+            },
+        )
+    }
+
     /// Every note due on or before `today` plus seven days, soonest first:
     /// the overdue ones and the ones due this week, which the loops list
     /// tells apart against `today`. `due` is stored as `YYYY-MM-DD` text,
@@ -529,6 +579,32 @@ impl Index {
     }
 }
 
+/// A literal query as FTS5 wants it: every word its own quoted term, a
+/// quote inside a word doubled, and the terms joined by FTS5's implicit
+/// AND. `None` for a query with no word in it.
+fn fts_terms(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+/// What of a note's text is worth finding: everything past the preamble.
+/// Every template opens with `#import`, `#show` and `#meta`, and ends that
+/// run with a blank line before the title, so a note whose first line is
+/// an import loses everything up to its first blank line; a note that
+/// opens any other way is indexed whole. Words like `template` or `meta`
+/// therefore hit only the notes that actually say them.
+fn searchable(source: &str) -> &str {
+    if !source.starts_with("#import") {
+        return source;
+    }
+    // the two bytes found are the two bytes stepped over, so the slice
+    // cannot start past the end
+    source.find("\n\n").map_or("", |blank| &source[blank + 2..])
+}
+
 pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
     let mut notes = Vec::new();
     for entry in faults::vault_entries(std::fs::read_dir(root)?) {
@@ -543,8 +619,8 @@ pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
             let path = file?;
             let name = path.file_name();
             if Path::new(&name).extension() == Some(OsStr::new("typ")) {
-                let parsed_note =
-                    parse::parse_note(&std::fs::read_to_string(path.path())?);
+                let source = std::fs::read_to_string(path.path())?;
+                let parsed_note = parse::parse_note(&source);
 
                 notes.push(Note {
                     path: Path::new(category.as_dir()).join(&name),
@@ -554,6 +630,7 @@ pub fn scan_vault(root: &Path) -> Result<Vec<Note>, IndexError> {
                     links: parsed_note.links,
                     summarized: parsed_note.summarized,
                     truncated: parsed_note.truncated,
+                    source,
                 })
             }
         }
@@ -611,6 +688,11 @@ fn delete_note(
         "DELETE FROM notes WHERE path = ?1",
         rusqlite::params![path.to_string_lossy()],
     )?;
+    // a virtual table knows no foreign key: its row goes by hand
+    transaction.execute(
+        "DELETE FROM notes_fts WHERE path = ?1",
+        rusqlite::params![path.to_string_lossy()],
+    )?;
     Ok(())
 }
 
@@ -639,6 +721,17 @@ fn insert_note(
             meta.origin.as_deref(),
             note.title.as_deref(),
             note.summarized,
+        ],
+    )?;
+    transaction.execute(
+        concat!(
+            "INSERT INTO notes_fts (path, title, body)",
+            "VALUES (?1, ?2, ?3)"
+        ),
+        rusqlite::params![
+            note.path.to_string_lossy(),
+            note.title.as_deref(),
+            searchable(&note.source),
         ],
     )?;
     for tag in &meta.tags {
@@ -1494,6 +1587,7 @@ mod tests {
             links: vec![],
             summarized: true,
             truncated: false,
+            source: String::new(),
         };
         index
             .rebuild(&[
@@ -1545,6 +1639,120 @@ mod tests {
                 .expect_err("the row does not decode");
             assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
         }
+    }
+
+    #[test]
+    fn search_finds_words_past_the_preamble_folding_diacritics() {
+        let (_dir, mut index) = temp_index();
+        index.rebuild(&[rich_note()]).expect("seed the index");
+        let hits = index.search("quokka").expect("the search reads");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, PathBuf::from("permanent/rich.typ"));
+        assert_eq!(hits[0].title.as_deref(), Some("A rich note"));
+        assert!(hits[0].snippet.contains("quokka"), "{:?}", hits[0].snippet);
+
+        // `idee` finds `idée`; two words are both required
+        assert_eq!(index.search("idee").expect("reads").len(), 1);
+        assert_eq!(index.search("idee quokka").expect("reads").len(), 1);
+        assert_eq!(index.search("idee wombat").expect("reads").len(), 0);
+        // the preamble is not indexed: `template` and `meta` hit nothing
+        assert_eq!(index.search("template").expect("reads").len(), 0);
+        assert_eq!(index.search("meta").expect("reads").len(), 0);
+        // a query with no word in it finds nothing, not everything
+        assert_eq!(index.search("   ").expect("reads").len(), 0);
+        // FTS5 syntax in the query is text, never an operator: the
+        // tokenizer drops the punctuation and the words stay required
+        assert!(index.search("quokka* AND (x OR y) NOT").is_ok());
+        assert_eq!(index.search("quokka* (wombat)").expect("reads").len(), 0);
+        assert_eq!(index.search("\"quokka").expect("reads").len(), 1);
+    }
+
+    #[test]
+    fn search_follows_updates_and_deletes() {
+        let (_dir, mut index) = temp_index();
+        index.rebuild(&[rich_note()]).expect("seed the index");
+        let mut rewritten = rich_note();
+        rewritten.source = "no preamble here: wallaby\n".to_string();
+        index.update_note(&rewritten).expect("update");
+        assert_eq!(index.search("quokka").expect("reads").len(), 0);
+        assert_eq!(index.search("wallaby").expect("reads").len(), 1);
+        index
+            .remove_note(Path::new("permanent/rich.typ"))
+            .expect("remove");
+        assert_eq!(index.search("wallaby").expect("reads").len(), 0);
+    }
+
+    #[test]
+    fn a_search_row_that_will_not_decode_fails_the_search() {
+        // a blob where the path or the title should be: reported, not
+        // skipped, like every other query's undecodable row
+        for plant in [
+            "INSERT INTO notes_fts (path, title, body) \
+             VALUES (x'00', 'Titled', 'quokka');",
+            "INSERT INTO notes_fts (path, title, body) \
+             VALUES ('permanent/x.typ', x'00', 'quokka');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the undecodable row");
+            let error =
+                index.search("quokka").expect_err("the row does not decode");
+            assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_vanished_search_table_fails_the_search_and_both_writes() {
+        let (dir, mut index) = temp_index();
+        let raw = Connection::open(dir.path().join("index.sqlite"))
+            .expect("raw open");
+        raw.execute_batch("DROP TABLE notes_fts")
+            .expect("the sabotage succeeds");
+        assert!(matches!(index.search("x"), Err(IndexError::Sqlite(_))));
+        // the insert's FTS row is the write a rebuild trips on, the delete's
+        // is the one an update trips on first
+        assert!(matches!(
+            index.rebuild(&[rich_note()]),
+            Err(IndexError::Sqlite(_))
+        ));
+        assert!(matches!(
+            index.update_note(&rich_note()),
+            Err(IndexError::Sqlite(_))
+        ));
+        // a stand-in that takes the delete and refuses every insert: the
+        // one sabotage that reaches the insert's own error arm
+        raw.execute_batch(
+            "CREATE TABLE notes_fts (path TEXT CHECK (path IS NULL), \
+             title, body)",
+        )
+        .expect("the stand-in is created");
+        assert!(matches!(
+            index.rebuild(&[rich_note()]),
+            Err(IndexError::Sqlite(_))
+        ));
+    }
+
+    #[test]
+    fn query_terms_are_quoted_one_word_each() {
+        assert_eq!(fts_terms("un  deux"), Some("\"un\" \"deux\"".to_string()));
+        assert_eq!(
+            fts_terms("say \"hi\""),
+            Some("\"say\" \"\"\"hi\"\"\"".to_string())
+        );
+        assert_eq!(fts_terms(""), None);
+        assert_eq!(fts_terms(" \t"), None);
+    }
+
+    #[test]
+    fn the_searchable_text_starts_past_a_templates_preamble() {
+        assert_eq!(
+            searchable("#import x\n#show: note\n\n= T\nbody"),
+            "= T\nbody"
+        );
+        assert_eq!(searchable("plain\n\ntext"), "plain\n\ntext");
+        // an import with no blank line after it is all preamble
+        assert_eq!(searchable("#import x\n#show: note\n"), "");
     }
 
     #[test]
@@ -1764,6 +1972,14 @@ mod tests {
             }],
             summarized: true,
             truncated: true,
+            source: concat!(
+                "#import \"/templates/template.typ\": *\n",
+                "#show: note\n",
+                "#meta(id: \"rich\")\n",
+                "\n= A rich note\n",
+                "\nUne idée riche, and a word only this note says: quokka.\n",
+            )
+            .to_string(),
         }
     }
 }

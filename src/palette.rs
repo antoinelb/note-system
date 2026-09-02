@@ -13,6 +13,7 @@ pub enum CommandId {
     ToggleTheme,
     Quit,
     Back,
+    SearchText,
     InsertLink,
     FollowLink,
     OpenLoops,
@@ -56,7 +57,7 @@ pub struct Command {
 /// (`adr/2026-08-screen-switch-gesture.md`), alphabetized by label
 /// (`adr/2026-08-palette-order-and-overlay-placement.md`) — the order the
 /// palette shows it in.
-pub const COMMANDS: [Command; 30] = [
+pub const COMMANDS: [Command; 31] = [
     // chordless: layout is rare and deliberate — "at most a command"
     // (adr/2026-08-arrange-cluster-command.md)
     Command {
@@ -190,6 +191,13 @@ pub const COMMANDS: [Command; 30] = [
         id: CommandId::Back,
         label: "recent notes",
         chord: Some("ctrl+b"),
+    },
+    // the vault's text, not the table's cards: Ctrl+F stays the filter
+    // (adr/2026-09-full-text-search-lives-in-the-index.md)
+    Command {
+        id: CommandId::SearchText,
+        label: "search text",
+        chord: Some("ctrl+shift+f"),
     },
     // the theme toggle and font-size stepper, session-only
     // (adr/2026-08-settings-overlay.md)
@@ -563,6 +571,7 @@ mod tests {
                 "ctrl+d",
                 "ctrl+q",
                 "ctrl+b",
+                "ctrl+shift+f",
                 "ctrl+,",
                 "ctrl+=",
                 "ctrl+-",

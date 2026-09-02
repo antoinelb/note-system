@@ -159,6 +159,10 @@ pub struct Note {
     /// seen, indexed as an anomaly rather than silence
     /// (adr/2026-08-anomalies-join-the-loops.md).
     pub truncated: bool,
+    /// The file's text as the parser read it — what full-text search
+    /// indexes, past the preamble
+    /// (adr/2026-09-full-text-search-lives-in-the-index.md).
+    pub source: String,
 }
 
 /// A note's filename without its extension, which is its id for every note

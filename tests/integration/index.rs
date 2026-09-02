@@ -858,6 +858,7 @@ fn note(
             .collect(),
         summarized: false,
         truncated: false,
+        source: String::new(),
     }
 }
 
@@ -884,6 +885,7 @@ fn anomalous_note() -> Note {
         links: vec![],
         summarized: false,
         truncated: false,
+        source: String::new(),
     }
 }
 
