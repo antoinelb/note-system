@@ -1,5 +1,7 @@
 # Tier 3: the student workflow, and the temporal panes
 
+Done 2026-09-02: every item shipped in its own commit with its ADR and scenario; `make e2e` green at 20 scenarios.
+
 ## Goal
 The seven tier-3 items of `2026-09-02-repo-audit-next-steps.md` and the two items of `2026-09-02-temporal-panes.md` are shipped, each with its tests, its e2e scenario where the window is involved, and its ADR.
 

@@ -43,7 +43,7 @@ No naked `.unwrap()`, no while loops, colours only in `assets/theme.css`, all UI
 10. `todo.md`: the three temporal-pane items become a plan or are dropped; the foreign `data/cache/` line leaves `.gitignore`.
 11. Missing ADRs: versioning (what `0.2.0` means against v0–v3), the `generated/` category (its template and who may write there), error logging, the note-taker practice.
 
-### Tier 3 — student workflow, by weekly hit rate
+### Tier 3 — student workflow, by weekly hit rate (done 2026-09-02 with the old todo's pane items: `2026-09-02-tier-3-student-workflow.md`, eight ADRs, seven scenarios)
 12. `$` joins the autopair table (`src/editor.rs:832`), amending `adr/2026-08-autopairs-in-the-typing-path.md`.
 13. Full-text search: an FTS5 table beside `notes` in the index, a palette row to query it.
 14. Export: a palette row writing the open note to PDF beside it via `RenderTheme::Paper`.

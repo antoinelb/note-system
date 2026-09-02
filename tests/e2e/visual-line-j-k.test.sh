@@ -13,9 +13,9 @@ trap e2e_stop EXIT INT TERM
 e2e_start
 DAY="time/$E2E_TODAY.typ"
 
-e2e_key ctrl+d
+e2e_key_paced ctrl+d
 # the empty day offers "no note for <day> — press enter to start one"
-e2e_key Return
+e2e_key_paced Return
 e2e_file_appears "$DAY"
 
 # o opens a fresh physical line below the template's last one, so the
@@ -31,7 +31,7 @@ e2e_note_holds "$DAY" "w01 w02 w03"
 # the physical line; i inserts the marker where the walk landed
 e2e_key 0
 e2e_key_paced j
-e2e_key i
+e2e_key_paced i
 e2e_type "DOWN "
 e2e_key Escape
 e2e_note_holds "$DAY" "DOWN "
@@ -39,7 +39,7 @@ e2e_note_holds "$DAY" "DOWN "
 # k from the marker: one drawn row up, onto the first row, at the goal
 # column the walk held — after w01, never at the line's start
 e2e_key_paced k
-e2e_key i
+e2e_key_paced i
 e2e_type "UP "
 e2e_key Escape
 e2e_note_holds "$DAY" "UP "
