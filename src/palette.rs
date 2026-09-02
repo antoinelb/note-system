@@ -40,6 +40,7 @@ pub enum CommandId {
     ArrangeCluster,
     Undo,
     EditTemplate,
+    ExportPdf,
     OpenSettings,
 }
 
@@ -57,7 +58,7 @@ pub struct Command {
 /// (`adr/2026-08-screen-switch-gesture.md`), alphabetized by label
 /// (`adr/2026-08-palette-order-and-overlay-placement.md`) — the order the
 /// palette shows it in.
-pub const COMMANDS: [Command; 31] = [
+pub const COMMANDS: [Command; 32] = [
     // chordless: layout is rare and deliberate — "at most a command"
     // (adr/2026-08-arrange-cluster-command.md)
     Command {
@@ -78,6 +79,13 @@ pub const COMMANDS: [Command; 31] = [
     Command {
         id: CommandId::EditTemplate,
         label: "edit template",
+        chord: None,
+    },
+    // chordless: a pdf is asked for, not typed into
+    // (adr/2026-09-export-writes-the-pdf-beside-the-note.md)
+    Command {
+        id: CommandId::ExportPdf,
+        label: "export pdf",
         chord: None,
     },
     Command {
@@ -246,6 +254,10 @@ pub const COMMANDS: [Command; 31] = [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Context {
     pub block_active: bool,
+    /// Whether the editor holds a note at all: the export writes the
+    /// note's own pdf, and a closed editor names none
+    /// (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
+    pub note_open: bool,
     pub on_table: bool,
     /// Whether a sheet is open: delete acts on the note the sheet shows,
     /// so without one there is nothing to name
@@ -290,6 +302,12 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::InsertLink | CommandId::FollowLink => {
             context.block_active && (!context.on_table || context.sheet_open)
         }
+        // the note has to be on screen to be the one exported: the logs
+        // show it, the bare table hides it behind the screen, a sheet
+        // shows it again
+        CommandId::ExportPdf => {
+            context.note_open && (!context.on_table || context.sheet_open)
+        }
         // going where you stand is not a command
         CommandId::GoToTable => !context.on_table,
         CommandId::GoToLogs => context.on_table,
@@ -319,6 +337,7 @@ mod tests {
 
     const EDITING: Context = Context {
         block_active: true,
+        note_open: true,
         on_table: false,
         sheet_open: false,
         at_bodies: false,
@@ -327,6 +346,7 @@ mod tests {
     };
     const READING: Context = Context {
         block_active: false,
+        note_open: true,
         on_table: false,
         sheet_open: false,
         at_bodies: false,
@@ -335,6 +355,7 @@ mod tests {
     };
     const AT_TABLE: Context = Context {
         block_active: false,
+        note_open: true,
         on_table: true,
         sheet_open: false,
         at_bodies: false,
@@ -343,6 +364,7 @@ mod tests {
     };
     const AT_SHEET: Context = Context {
         block_active: false,
+        note_open: true,
         on_table: true,
         sheet_open: true,
         at_bodies: false,
@@ -351,6 +373,7 @@ mod tests {
     };
     const AT_BODIES: Context = Context {
         block_active: false,
+        note_open: true,
         on_table: true,
         sheet_open: false,
         at_bodies: true,
@@ -440,6 +463,7 @@ mod tests {
     fn the_caret_commands_need_their_block_visible() {
         const EDITING_AT_TABLE: Context = Context {
             block_active: true,
+            note_open: true,
             on_table: true,
             sheet_open: false,
             at_bodies: false,
@@ -448,6 +472,7 @@ mod tests {
         };
         const EDITING_AT_SHEET: Context = Context {
             block_active: true,
+            note_open: true,
             on_table: true,
             sheet_open: true,
             at_bodies: false,
@@ -513,6 +538,18 @@ mod tests {
             labels(&filter("arrange", AT_SHEET)),
             vec!["arrange cluster"]
         );
+    }
+
+    #[test]
+    fn export_pdf_needs_its_note_on_screen() {
+        const CLOSED: Context = Context {
+            note_open: false,
+            ..READING
+        };
+        assert_eq!(labels(&filter("export", READING)), vec!["export pdf"]);
+        assert_eq!(labels(&filter("export", CLOSED)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("export", AT_TABLE)), Vec::<&str>::new());
+        assert_eq!(labels(&filter("export", AT_SHEET)), vec!["export pdf"]);
     }
 
     #[test]
@@ -588,6 +625,7 @@ mod tests {
                 "arrange cluster",
                 "delete note",
                 "edit template",
+                "export pdf",
                 "keep mine",
                 "notices",
                 "open loops",

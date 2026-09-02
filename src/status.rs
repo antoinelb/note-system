@@ -64,6 +64,9 @@ pub enum Source {
     /// open that works resolves the earlier refusal
     /// (adr/2026-09-link-is-for-resources.md).
     Launcher,
+    /// The PDF export beside a note: a later export that lands resolves
+    /// an earlier refusal (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
+    Export,
     Clipboard,
 }
 
@@ -332,6 +335,25 @@ impl Notice {
         }
     }
 
+    /// A PDF that landed beside its note: the path is the receipt.
+    pub fn exported(pdf: &std::path::Path) -> Notice {
+        Notice {
+            severity: Severity::Info,
+            source: Source::Export,
+            text: format!("exported {}", pdf.display()),
+        }
+    }
+
+    /// An export refused at one of its stages — the read, the compile, the
+    /// PDF encoding, the write — with nothing written.
+    pub fn export_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Export,
+            text: format!("{detail} — no pdf was written"),
+        }
+    }
+
     /// A `#link` destination the desktop's launcher would not take: the
     /// note is untouched and nothing opened
     /// (adr/2026-09-link-is-for-resources.md).
@@ -556,6 +578,15 @@ mod tests {
             Notice::open_failed("xdg-open: not found")
                 .text
                 .starts_with("open: xdg-open: not found")
+        );
+        assert_eq!(
+            Notice::exported(std::path::Path::new("permanent/a.pdf")).text,
+            "exported permanent/a.pdf"
+        );
+        assert!(
+            Notice::export_failed("export: boom")
+                .text
+                .ends_with("no pdf was written")
         );
         assert_eq!(
             Notice::index("links: boom".to_string()).text,

@@ -352,6 +352,64 @@ impl BodyJob {
     }
 }
 
+/// One queued PDF export: the note compiled as the vanilla CLI would
+/// compile it — paper palette, default size — and written beside its
+/// source as `<stem>.pdf`, atomically. Runs on the compute tier like every
+/// other compile (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
+#[derive(Debug)]
+pub struct ExportJob {
+    /// Vault-relative, like a body's key.
+    pub note: PathBuf,
+    root: PathBuf,
+}
+
+impl ExportJob {
+    pub fn new(root: &Path, note: &Path) -> ExportJob {
+        ExportJob {
+            note: note.to_path_buf(),
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// Answers the PDF's vault-relative path. Every step reports through
+    /// one prefix so the status line names the stage that failed: the
+    /// read, the compile, the PDF encoding, or the write. The error
+    /// mappers are named functions rather than closures so a stage that
+    /// cannot be made to fail from a note (the encoding) leaves no dead
+    /// arm behind.
+    pub fn export(&self) -> Result<PathBuf, String> {
+        let file = self.root.join(&self.note);
+        let target = self.note.with_extension("pdf");
+        let bytes = std::fs::read_to_string(&file)
+            .map_err(export_io_error)
+            .and_then(|text| {
+                compile_document(
+                    &self.root,
+                    &file,
+                    &text,
+                    RenderTheme::Paper(DEFAULT_SIZE),
+                )
+                .map_err(export_render_error)
+            })
+            .and_then(|document| {
+                typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default())
+                    .map_err(diagnostics)
+                    .map_err(export_render_error)
+            })?;
+        crate::persist::write_atomic_bytes(&self.root.join(&target), &bytes)
+            .map_err(export_io_error)?;
+        Ok(target)
+    }
+}
+
+fn export_io_error(error: std::io::Error) -> String {
+    format!("export: {error}")
+}
+
+fn export_render_error(error: RenderError) -> String {
+    format!("export: {}", describe(error))
+}
+
 /// What a body probe answers: the cached result, or "not yet" with the
 /// last good SVG to keep showing (stale-while-revalidate) and the job to
 /// submit — present only the first time, like a fragment's.
@@ -497,18 +555,35 @@ pub fn render_svg(
     text: &str,
     theme: RenderTheme,
 ) -> Result<String, RenderError> {
-    let world = VaultWorld::new(root, note, text.to_string(), theme)?;
+    let doc = compile_document(root, note, text, theme)?;
+    Ok(typst_svg::svg_merged(
+        &doc,
+        &SvgOptions::default(),
+        Abs::pt(0.0),
+    ))
+}
 
-    match typst::compile::<PagedDocument>(&world).output {
-        Ok(doc) => Ok(typst_svg::svg_merged(
-            &doc,
-            &SvgOptions::default(),
-            Abs::pt(0.0),
-        )),
-        Err(errors) => Err(RenderError::Compile(
-            errors.into_iter().map(|e| e.message.to_string()).collect(),
-        )),
-    }
+/// The one compile every output shares — the SVG the app draws and the
+/// PDF an export writes come from the same document.
+fn compile_document(
+    root: &Path,
+    note: &Path,
+    text: &str,
+    theme: RenderTheme,
+) -> Result<PagedDocument, RenderError> {
+    let world = VaultWorld::new(root, note, text.to_string(), theme)?;
+    typst::compile::<PagedDocument>(&world)
+        .output
+        .map_err(diagnostics)
+}
+
+/// Typst's diagnostics as the plain messages the status line shows.
+fn diagnostics(
+    errors: impl IntoIterator<Item = typst::diag::SourceDiagnostic>,
+) -> RenderError {
+    RenderError::Compile(
+        errors.into_iter().map(|e| e.message.to_string()).collect(),
+    )
 }
 
 /// The path joins the hash because fragments compile under their note's

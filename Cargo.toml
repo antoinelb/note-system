@@ -20,6 +20,7 @@ typst-kit = { version = "0.15.1", features = ["embedded-fonts", "scan-fonts"] }
 typst-layout = "0.15.1"
 typst-svg = "0.15.1"
 typst-syntax = "0.15"
+typst-pdf = "0.15.1"
 
 [lints.rust]
 non_upper_case_globals = "allow"

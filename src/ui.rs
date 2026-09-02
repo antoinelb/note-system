@@ -711,6 +711,17 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     .absorb(note, theme, epoch, result);
                                 landed = true;
                             }
+                            Outcome::Export { result, .. } => {
+                                let mut status = status.write();
+                                match result {
+                                    Ok(pdf) => {
+                                        status.report(Notice::exported(&pdf))
+                                    }
+                                    Err(detail) => status.report(
+                                        Notice::export_failed(&detail),
+                                    ),
+                                }
+                            }
                             Outcome::Survey {
                                 result: Ok((time_notes, open, table, links)),
                                 ..
@@ -1837,6 +1848,30 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let close_picker = use_callback(move |()| picker.set(None));
     let close_palette = use_callback(move |()| palette.set(None));
 
+    // "export pdf": the open note, flushed first so the pdf says what the
+    // screen says, compiled and written beside itself on the compute tier;
+    // the landing is a notice either way
+    // (adr/2026-09-export-writes-the-pdf-beside-the-note.md)
+    let export_pdf = use_callback({
+        let root = root.clone();
+        let feed = feed.clone();
+        move |()| {
+            // the palette lists the command only over an open note; a
+            // flush the disk refuses already stands on the line as the
+            // save's own critical, so nothing is exported and nothing more
+            // is said
+            let note = editor
+                .peek()
+                .note()
+                .map(|(path, _)| vault_relative(&root, path));
+            if let Some(note) = note
+                && editor.write().flush()
+            {
+                (feed.submit)(compute::export(&root, note));
+            }
+        }
+    });
+
     // the palette's opening half, shared by both screens' Ctrl+P
     // (adr/2026-08-command-palette-overlay-shape.md)
     let summon_palette = use_callback(move |()| {
@@ -1844,6 +1879,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         palette_highlighted.set(0);
         palette.set(Some(Palette {
             block_active: editor.peek().active().is_some(),
+            note_open: editor.peek().note().is_some(),
             on_table: *screen.peek() == Screen::Table,
             sheet_open: sheet.peek().is_some(),
             at_bodies: *zoom.peek() == table::Zoom::Bodies,
@@ -1939,6 +1975,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 palette::CommandId::EditTemplate => {
                     open_templates.call(());
                 }
+                palette::CommandId::ExportPdf => export_pdf.call(()),
                 palette::CommandId::OpenSettings => open_settings.call(()),
             }
         });
@@ -3159,6 +3196,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             &palette_query.read(),
             palette::Context {
                 block_active: frozen.block_active,
+                note_open: frozen.note_open,
                 on_table: frozen.on_table,
                 sheet_open: frozen.sheet_open,
                 at_bodies: frozen.at_bodies,
@@ -5651,6 +5689,9 @@ struct Picker {
 #[derive(Clone, Copy, PartialEq)]
 struct Palette {
     block_active: bool,
+    /// Whether the editor held a note: the export names it
+    /// (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
+    note_open: bool,
     /// Which screen the palette opened over: the screen commands hide where
     /// they already stand (adr/2026-08-screen-switch-gesture.md).
     on_table: bool,
@@ -13849,6 +13890,7 @@ mod tests {
             palette_labels(&dom),
             vec![
                 "edit template",
+                "export pdf",
                 "follow link",
                 "go to table",
                 "insert link",
@@ -13891,7 +13933,7 @@ mod tests {
         let (_, keys) = activate_heading(&mut dom, &clicks);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 21, "{labels:?}");
+        assert_eq!(labels.len(), 22, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -14039,6 +14081,70 @@ mod tests {
     }
 
     #[test]
+    fn the_palette_exports_the_open_note_beside_itself() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "export pdf");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        let pdf = std::fs::read(vault.path().join("time/2026-07-23.pdf"))
+            .expect("the pdf is beside the note");
+        assert!(pdf.starts_with(b"%PDF-"), "a real pdf");
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("exported time/2026-07-23.pdf"),
+            "the receipt is on the line: {html}"
+        );
+        assert!(html.contains("notice-info"), "{html}");
+    }
+
+    #[test]
+    fn an_export_that_will_not_compile_or_save_says_so_and_writes_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // the 21st's note is `#let x = (` — a compile error
+        click(&mut dom, clicks[RAIL_DAY_21]);
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "export pdf");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("export: "), "the stage is named: {html}");
+        assert!(html.contains("no pdf was written"), "{html}");
+        assert!(!vault.path().join("time/2026-07-21.pdf").exists());
+
+        // a dirty note the disk refuses is not exported stale: the flush
+        // comes first and its refusal is the notice
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("x".into()),
+            Modifiers::empty(),
+        );
+        lock_dir(&vault.path().join("time"), true);
+        let (input, palette_keys) = open_palette(&mut dom, sink);
+        type_into(&mut dom, input, "export pdf");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        block_on(settle(&mut dom));
+        lock_dir(&vault.path().join("time"), false);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("notice-critical"), "the save refused: {html}");
+        assert!(html.contains("save: "), "{html}");
+        assert!(!html.contains("exported"), "nothing was exported: {html}");
+        assert!(!vault.path().join("time/2026-07-21.pdf").exists());
+    }
+
+    #[test]
     fn a_row_click_runs_the_command_too() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
@@ -14050,8 +14156,8 @@ mod tests {
             Modifiers::CONTROL,
         );
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        // alphabetized, `toggle theme` is the last of the 21 visible rows
-        click(&mut dom, listeners(&mutations, "click")[20]);
+        // alphabetized, `toggle theme` is the last of the 22 visible rows
+        click(&mut dom, listeners(&mutations, "click")[21]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"data-theme="light""#), "{html}");
         assert!(!html.contains("command-palette"), "{html}");

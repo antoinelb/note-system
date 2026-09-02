@@ -18,9 +18,18 @@ use std::time::SystemTime;
 /// rename, which preserves it, so no other writer can slip between the
 /// write and the stat.
 pub fn write_atomic(path: &Path, text: &str) -> io::Result<SystemTime> {
+    write_atomic_bytes(path, text.as_bytes())
+}
+
+/// `write_atomic` for bytes that are not text — the PDF an export writes
+/// beside its note (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
+pub fn write_atomic_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> io::Result<SystemTime> {
     let tmp = sibling(path);
     File::create(&tmp)
-        .and_then(|file| fill(file, text))
+        .and_then(|file| fill(file, bytes))
         .and_then(|stamp| fs::rename(&tmp, path).map(|()| stamp))
         .inspect_err(|_| {
             // best effort: an unrenamed temp is litter, never data
@@ -37,14 +46,14 @@ pub fn create_new(path: &Path, text: &str) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(path)
-        .and_then(|file| fill(file, text).map(|_| ()))
+        .and_then(|file| fill(file, text.as_bytes()).map(|_| ()))
 }
 
 /// The write every path shares: all the bytes, synced to the disk. Without
 /// the sync, a crash shortly after the rename can still surface an empty
 /// file — the very truncation this module exists to close.
-fn fill(mut file: File, text: &str) -> io::Result<SystemTime> {
-    file.write_all(text.as_bytes())
+fn fill(mut file: File, bytes: &[u8]) -> io::Result<SystemTime> {
+    file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .and_then(|()| file.metadata())
         .and_then(|meta| meta.modified())

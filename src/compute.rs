@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{
 use crate::domain::{NoteCategory, NoteType};
 use crate::index::{Index, IndexError, TableNote};
 use crate::loops::{self, LoopLine};
-use crate::render::{BodyJob, FragmentJob, RenderTheme};
+use crate::render::{BodyJob, ExportJob, FragmentJob, RenderTheme};
 use crate::watch::{self, VaultChange};
 use jiff::civil::Date;
 
@@ -37,6 +37,7 @@ pub type Survey = (
 pub enum Job {
     Fragment(FragmentJob),
     Body(BodyJob),
+    Export(ExportJob),
     Survey {
         root: PathBuf,
         batch: Vec<VaultChange>,
@@ -66,6 +67,12 @@ pub enum Outcome {
         result: Result<Survey, String>,
         escalated: bool,
     },
+    /// The PDF's vault-relative path, or the stage that refused
+    /// (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
+    Export {
+        note: PathBuf,
+        result: Result<PathBuf, String>,
+    },
 }
 
 /// The one executor both adapters share — the seam's whole depth: an
@@ -91,6 +98,10 @@ pub fn run(job: Job) -> Outcome {
         } => Outcome::Survey {
             result: refresh(&root, &batch, today),
             escalated,
+        },
+        Job::Export(job) => Outcome::Export {
+            note: job.note.clone(),
+            result: job.export(),
         },
     }
 }
@@ -137,7 +148,7 @@ pub fn threaded() -> ComputeFeed {
         submit: Arc::new(move |job| {
             let lane = match &job {
                 Job::Survey { .. } => &surveys,
-                Job::Fragment(_) | Job::Body(_) => &compiles,
+                Job::Fragment(_) | Job::Body(_) | Job::Export(_) => &compiles,
             };
             let _ = lane.send(job);
         }),
@@ -231,6 +242,12 @@ pub fn open_loops(
         &index.due_notes(today)?,
         today,
     ))
+}
+
+/// The palette's "export pdf": one note, compiled and written beside
+/// itself, off the UI thread like every compile.
+pub fn export(root: &Path, note: PathBuf) -> Job {
+    Job::Export(ExportJob::new(root, &note))
 }
 
 /// A rescan is what a vault entering through this seam always starts
@@ -329,9 +346,14 @@ mod tests {
         (feed.submit)(fragment_job(&fixture_vault()));
         (feed.submit)(body_job(&fixture_vault()));
         (feed.submit)(rescan(vault.path(), true, TODAY));
+        with_the_shared_template(vault.path());
+        (feed.submit)(export(
+            vault.path(),
+            PathBuf::from("time/2026-07-23.typ"),
+        ));
 
-        let mut kinds = (false, false, false);
-        for _ in 0..3 {
+        let mut kinds = (false, false, false, false);
+        for _ in 0..4 {
             match outcomes.blocking_recv().expect("a lane answers") {
                 Outcome::Fragment { result, .. } => {
                     assert!(
@@ -352,9 +374,78 @@ mod tests {
                     assert!(escalated, "the flag rides through");
                     kinds.2 = true;
                 }
+                Outcome::Export { note, result } => {
+                    assert_eq!(note, PathBuf::from("time/2026-07-23.typ"));
+                    assert_eq!(
+                        result.expect("the seeded day exports"),
+                        PathBuf::from("time/2026-07-23.pdf")
+                    );
+                    let pdf = std::fs::read(
+                        vault.path().join("time/2026-07-23.pdf"),
+                    )
+                    .expect("the pdf is beside the note");
+                    assert!(pdf.starts_with(b"%PDF-"), "a real pdf");
+                    kinds.3 = true;
+                }
             }
         }
-        assert_eq!(kinds, (true, true, true), "every lane answered");
+        assert_eq!(kinds, (true, true, true, true), "every lane answered");
+    }
+
+    /// The seeded vault compiles once it holds the fixtures' shared
+    /// template, which every note imports.
+    fn with_the_shared_template(root: &Path) {
+        std::fs::copy(
+            fixture_vault().join("templates/template.typ"),
+            root.join("templates/template.typ"),
+        )
+        .expect("the shared template is copied");
+    }
+
+    #[test]
+    fn an_export_names_the_stage_that_refused() {
+        let vault = tempfile::tempdir().expect("tempdir");
+        seed_vault(vault.path());
+        with_the_shared_template(vault.path());
+        // a note that is not there: the read refuses
+        let Outcome::Export {
+            result: Err(gone), ..
+        } = run(export(vault.path(), PathBuf::from("time/nope.typ")))
+        else {
+            panic!("an export answers an export");
+        };
+        assert!(gone.starts_with("export: "), "{gone}");
+        // a note that will not compile: the compile refuses, and no pdf
+        std::fs::write(vault.path().join("time/broken.typ"), "#let x = (\n")
+            .expect("the broken note is written");
+        let Outcome::Export {
+            result: Err(broken),
+            ..
+        } = run(export(vault.path(), PathBuf::from("time/broken.typ")))
+        else {
+            panic!("an export answers an export");
+        };
+        assert!(broken.starts_with("export: "), "{broken}");
+        assert!(!vault.path().join("time/broken.pdf").exists());
+        // a directory the pdf cannot land in: the write refuses
+        let time = vault.path().join("time");
+        let original =
+            std::fs::metadata(&time).expect("time exists").permissions();
+        let mut locked = original.clone();
+        locked.set_readonly(true);
+        std::fs::set_permissions(&time, locked).expect("lock");
+        let Outcome::Export {
+            result: unwritable, ..
+        } = run(export(vault.path(), PathBuf::from("time/2026-07-23.typ")))
+        else {
+            panic!("an export answers an export");
+        };
+        std::fs::set_permissions(&time, original).expect("unlock");
+        assert!(
+            unwritable
+                .expect_err("the write refuses")
+                .starts_with("export: ")
+        );
     }
 
     #[test]
