@@ -29,6 +29,7 @@ use crate::render::{
     BodyCache, BodyView, DEFAULT_SIZE, FragmentCache, FragmentView,
     RenderTheme,
 };
+use crate::shown::Shown;
 use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
@@ -514,6 +515,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut creator_query = use_signal(String::new);
     let mut creator_highlighted = use_signal(|| 0usize);
     let mut creator_notice = use_signal(|| None::<String>);
+    // what every query input may still be showing, one memory for the one
+    // overlay open at a time (adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md)
+    let mut shown = use_signal(Shown::default);
 
     // the active filter, and the Ctrl+F overlay that sets it — dims cards,
     // never drops them (adr/2026-08-filter-overlay-ctrl-f.md)
@@ -1111,6 +1115,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-08-ctrl-n-two-step-create-overlay.md)
     let open_creator = use_callback(move |()| {
         creator_query.set(String::new());
+        shown.set(Shown::opened(""));
         creator_highlighted.set(0);
         creator_notice.set(None);
         creator.set(Some(Creator { picked: None }));
@@ -1184,6 +1189,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     status.write().resolve(Source::Index);
                 }
                 filter_query.set(String::new());
+                shown.set(Shown::opened(""));
                 filter_highlighted.set(0);
                 filter_picker.set(Some(FilterPicker {
                     entries: table::filter_entries(&tags),
@@ -1211,6 +1217,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     status.write().resolve(Source::Index);
                 }
                 template_query.set(String::new());
+                shown.set(Shown::opened(""));
                 template_highlighted.set(0);
                 template_picker.set(Some(TemplatePicker { entries }));
             }
@@ -1257,6 +1264,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     })
                     .collect();
                 jump_query.set(String::new());
+                shown.set(Shown::opened(""));
                 jump_highlighted.set(0);
                 jump.set(Some(Jump { entries: carded }));
             }
@@ -1580,6 +1588,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             return;
         }
         back_query.set(String::new());
+        shown.set(Shown::opened(""));
         back_highlighted.set(0);
         back.set(Some(Back { entries }));
     });
@@ -1589,6 +1598,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // — and lands a hit the way a loop line lands, by path
     let open_finder = use_callback(move |()| {
         finder_query.set(String::new());
+        shown.set(Shown::opened(""));
         finder_highlighted.set(0);
         finder_hits.set(Vec::new());
         finder_open.set(true);
@@ -1745,10 +1755,23 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             Key::Backspace => {
                 open_query.write().pop();
             }
-            _ => {}
+            _ => return true,
         }
+        // the field learns of the letter by a patch it may not have seen
+        // when it next speaks
+        let written = open_query.peek().clone();
+        shown.write().wrote(&written);
         true
     });
+
+    // an `input` event names the field's whole value, and the field may be
+    // behind a write the relay or a step change just made: the value is
+    // read as a delta against what the field showed, never taken whole
+    // (adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md)
+    let typed =
+        use_callback(move |(query, reported): (Signal<String>, String)| {
+            shown.write().typed(&query.peek(), &reported)
+        });
 
     // one follow path for Ctrl+Enter, Ctrl+click and the palette: the
     // caret is app state now, so everyone reads the same one — no probe,
@@ -1860,6 +1883,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     status.write().resolve(Source::Index);
                 }
                 query.set(String::new());
+                shown.set(Shown::opened(""));
                 highlighted.set(0);
                 picker.set(Some(Picker { entries }));
             }
@@ -1901,6 +1925,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-08-command-palette-overlay-shape.md)
     let summon_palette = use_callback(move |()| {
         palette_query.set(String::new());
+        shown.set(Shown::opened(""));
         palette_highlighted.set(0);
         palette.set(Some(Palette {
             block_active: editor.peek().active().is_some(),
@@ -2204,6 +2229,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     vim::Act::Redo => editor.write().redo(),
                     vim::Act::OpenSearch => {
                         search_query.set(String::new());
+                        shown.set(Shown::opened(""));
                         search_prompt.set(true);
                     }
                     // the same one-line prompt in the same place, wearing
@@ -2211,6 +2237,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // already spelled
                     // (adr/2026-08-ex-line-is-literal-and-global.md)
                     vim::Act::OpenEx { prefill } => {
+                        shown.set(Shown::opened(&prefill));
                         ex_query.set(prefill);
                         ex_prompt.set(true);
                     }
@@ -3018,7 +3045,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             let _ = event.set_focus(true).await;
                         },
                         oninput: move |event| {
-                            query.set(event.value());
+                            query.set(typed.call((query, event.value())));
                             highlighted.set(0);
                         },
                         onkeydown: move |event: KeyboardEvent| {
@@ -3088,7 +3115,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     onmounted: move |event| async move {
                         let _ = event.set_focus(true).await;
                     },
-                    oninput: move |event| search_query.set(event.value()),
+                    oninput: move |event| search_query.set(typed.call((search_query, event.value()))),
                     onkeydown: move |event: KeyboardEvent| {
                         match event.key() {
                             Key::Escape => search_prompt.set(false),
@@ -3137,7 +3164,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     onmounted: move |event| async move {
                         let _ = event.set_focus(true).await;
                     },
-                    oninput: move |event| ex_query.set(event.value()),
+                    oninput: move |event| ex_query.set(typed.call((ex_query, event.value()))),
                     onkeydown: move |event: KeyboardEvent| {
                         match event.key() {
                             Key::Escape => ex_prompt.set(false),
@@ -3217,7 +3244,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             let _ = event.set_focus(true).await;
                         },
                         oninput: move |event| {
-                            template_query.set(event.value());
+                            template_query.set(typed.call((template_query, event.value())));
                             template_highlighted.set(0);
                         },
                         onkeydown: move |event: KeyboardEvent| {
@@ -3951,7 +3978,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 let _ = event.set_focus(true).await;
                             },
                             oninput: move |event| {
-                                palette_query.set(event.value());
+                                palette_query.set(typed.call((palette_query, event.value())));
                                 palette_highlighted.set(0);
                             },
                             onkeydown: move |event: KeyboardEvent| {
@@ -4033,7 +4060,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 let _ = event.set_focus(true).await;
                             },
                             oninput: move |event| {
-                                creator_query.set(event.value());
+                                creator_query.set(typed.call((creator_query, event.value())));
                                 creator_highlighted.set(0);
                                 creator_notice.set(None);
                             },
@@ -4046,6 +4073,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     Key::Escape => {
                                         if keydown_frozen.picked.is_some() {
                                             creator_query.set(String::new());
+                                            shown.write().wrote("");
                                             creator_highlighted.set(0);
                                             creator_notice.set(None);
                                             creator.set(Some(Creator {
@@ -4067,6 +4095,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         None => {
                                             if let Some(picked) = matches.get(creator_highlighted()) {
                                                 creator_query.set(String::new());
+                                                shown.write().wrote("");
                                                 creator_highlighted.set(0);
                                                 creator.set(Some(Creator {
                                                     picked: Some(picked.clone()),
@@ -4104,6 +4133,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     let picked = entry.clone();
                                     move |_| {
                                         creator_query.set(String::new());
+                                        shown.write().wrote("");
                                         creator_highlighted.set(0);
                                         creator.set(Some(Creator {
                                             picked: Some(picked.clone()),
@@ -4297,7 +4327,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 let _ = event.set_focus(true).await;
                             },
                             oninput: move |event| {
-                                back_query.set(event.value());
+                                back_query.set(typed.call((back_query, event.value())));
                                 back_highlighted.set(0);
                             },
                             onkeydown: move |event: KeyboardEvent| {
@@ -4361,7 +4391,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         onmounted: move |event| async move {
                             let _ = event.set_focus(true).await;
                         },
-                        oninput: move |event| finder_typed.call(event.value()),
+                        oninput: move |event| finder_typed.call(typed.call((finder_query, event.value()))),
                         onkeydown: move |event: KeyboardEvent| {
                             let key = event.key();
                             let last = keys_rows.len().saturating_sub(1);
@@ -4911,7 +4941,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         let _ = event.set_focus(true).await;
                                     },
                                     oninput: move |event| {
-                                        filter_query.set(event.value());
+                                        filter_query.set(typed.call((filter_query, event.value())));
                                         filter_highlighted.set(0);
                                     },
                                     onkeydown: move |event: KeyboardEvent| {
@@ -4992,7 +5022,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         let _ = event.set_focus(true).await;
                                     },
                                     oninput: move |event| {
-                                        jump_query.set(event.value());
+                                        jump_query.set(typed.call((jump_query, event.value())));
                                         jump_highlighted.set(0);
                                     },
                                     onkeydown: move |event: KeyboardEvent| {
@@ -16411,6 +16441,52 @@ mod tests {
         );
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before, "the note behind never moved");
+    }
+
+    /// The relay's letters reach the field by a patch, and a key typed at
+    /// the field before that patch lands is reported on a stale field: as
+    /// itself alone, or on top of a type name the step change already
+    /// cleared. Either way the report is a delta, never the query
+    /// (adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md)
+    #[test]
+    fn a_key_the_field_reports_on_a_stale_value_is_read_as_a_delta() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_link(&mut dom, &clicks);
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        for letter in ["c", "o", "n", "c"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(letter.into()),
+                Modifiers::empty(),
+            );
+        }
+        // the field never saw the four letters: it reports the fifth alone
+        type_into(&mut dom, input, "e");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"value="conce""#), "{html}");
+        // two patches landed before the next key, all of them before the last
+        type_into(&mut dom, input, "cop");
+        type_into(&mut dom, input, "concept");
+        assert_eq!(picker_ids(&dom), vec!["concept"]);
+
+        // the step change clears the query while the field still shows the
+        // type name under the title's first letter
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        type_into(&mut dom, input, "conceptt");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"value="t""#), "{html}");
+        type_into(&mut dom, input, "titled before focus");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        assert!(
+            vault
+                .path()
+                .join("permanent/titled-before-focus.typ")
+                .exists(),
+            "the title is what was typed after the step change"
+        );
     }
 
     #[test]

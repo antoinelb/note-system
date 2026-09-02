@@ -22,6 +22,7 @@ pub mod parse;
 pub mod persist;
 pub mod positions;
 pub mod render;
+pub mod shown;
 pub mod status;
 pub mod table;
 pub mod template;

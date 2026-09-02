@@ -45,6 +45,11 @@ that was the editor's textarea and its caret, not a one-line query.
 The overlay's own `oninput` and `onkeydown` are unchanged: once focus
 lands, the input owns the keys as it always did.
 
+*Amended 2026-09-02:* `oninput` is no longer unchanged. The patch that
+carries a relayed letter races the focus grab, so a report from the
+field is read as a delta against what it may still be showing
+(`adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md`).
+
 ## Known ceiling
 
 Enter, arrows and the rest are dropped, not forwarded — forwarding Enter

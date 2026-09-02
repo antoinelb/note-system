@@ -13,7 +13,9 @@ e2e_start
 # serving the selection until the display goes
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==' \
     | base64 -d > "$E2E_DIR/pixel.png"
-xclip -selection clipboard -t image/png -i "$E2E_DIR/pixel.png"
+# its stderr is closed: the fork outlives the display and would otherwise
+# print "X connection broken" into the suite's output when Xvfb goes
+xclip -selection clipboard -t image/png -i "$E2E_DIR/pixel.png" 2>/dev/null
 
 # today's empty day: enter creates it, and the note opens on its last line
 e2e_reach_todays_daily() {
