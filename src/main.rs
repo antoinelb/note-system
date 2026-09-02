@@ -66,9 +66,18 @@ fn main() {
         // Native reads bypass WebKitGTK's disabled JavaScript clipboard
         // permission and stay off the UI thread. The same seam serves
         // ordinary paste, vim's register and in-app capture.
-        .with_context(ui::Clipboard(std::sync::Arc::new(move || {
+        .with_context(ui::Clipboard(std::sync::Arc::new({
             let clipboard = clipboard.clone();
-            Box::pin(async move { clipboard.read_text().await })
+            move || {
+                let clipboard = clipboard.clone();
+                Box::pin(async move { clipboard.read_text().await })
+            }
+        })))
+        // the same worker's image read, for a paste with no text on the
+        // clipboard (adr/2026-09-an-image-pastes-into-assets.md)
+        .with_context(ui::ClipboardImage(std::sync::Arc::new(move || {
+            let clipboard = clipboard.clone();
+            Box::pin(async move { clipboard.read_image().await })
         })))
         // Ctrl+C's half of the clipboard: sent over the eval channel rather
         // than interpolated, so arbitrary note text cannot break the script

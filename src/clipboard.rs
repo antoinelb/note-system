@@ -13,6 +13,9 @@ use tokio::sync::oneshot;
 const REQUEST_CAPACITY: usize = 8;
 
 type Answer = Result<String, String>;
+/// PNG bytes when the clipboard holds an image, `None` when it holds
+/// none (adr/2026-09-an-image-pastes-into-assets.md).
+type ImageAnswer = Result<Option<Vec<u8>>, String>;
 type Open = Box<
     dyn FnMut() -> Result<Box<dyn TextClipboard>, String> + Send + 'static,
 >;
@@ -31,8 +34,9 @@ enum State {
     Failed(Arc<str>),
 }
 
-struct Request {
-    reply: oneshot::Sender<Answer>,
+enum Request {
+    Text(oneshot::Sender<Answer>),
+    Image(oneshot::Sender<ImageAnswer>),
 }
 
 /// Starts the production clipboard reader.
@@ -46,20 +50,30 @@ pub fn native() -> Reader {
 impl Reader {
     /// Reads UTF-8 text without blocking the UI thread.
     pub async fn read_text(&self) -> Answer {
-        let reply = self.request()?;
-        reply.await.map_err(|_| {
+        let (reply, answer) = oneshot::channel();
+        self.request(Request::Text(reply))?;
+        answer.await.map_err(|_| {
             "clipboard reader stopped before answering".to_string()
         })?
     }
 
-    fn request(&self) -> Result<oneshot::Receiver<Answer>, String> {
+    /// Reads the clipboard's image as PNG bytes, encoded on the worker so
+    /// the UI thread never sees the pixels; `Ok(None)` when it holds none.
+    pub async fn read_image(&self) -> ImageAnswer {
+        let (reply, answer) = oneshot::channel();
+        self.request(Request::Image(reply))?;
+        answer.await.map_err(|_| {
+            "clipboard reader stopped before answering".to_string()
+        })?
+    }
+
+    fn request(&self, request: Request) -> Result<(), String> {
         let requests = match &self.state {
             State::Running(requests) => requests,
             State::Failed(reason) => return Err(reason.to_string()),
         };
-        let (reply, answer) = oneshot::channel();
-        match requests.try_send(Request { reply }) {
-            Ok(()) => Ok(answer),
+        match requests.try_send(request) {
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 Err("clipboard reader is busy".to_string())
             }
@@ -94,21 +108,36 @@ fn spawn_thread(task: Task) -> std::io::Result<()> {
 
 fn serve(requests: Receiver<Request>, mut open: Open) {
     let mut clipboard = None;
-    for Request { reply } in requests {
-        let answer = read(&mut clipboard, &mut open);
-        let _ = reply.send(answer);
+    for request in requests {
+        match request {
+            Request::Text(reply) => {
+                let answer = read(&mut clipboard, &mut open, |active| {
+                    active.get_text()
+                });
+                let _ = reply.send(answer);
+            }
+            Request::Image(reply) => {
+                let answer = read(&mut clipboard, &mut open, |active| {
+                    active.get_image()
+                });
+                let _ = reply.send(answer);
+            }
+        }
     }
 }
 
-fn read(
+/// One read of either kind: the clipboard is opened on first use and
+/// dropped after a refusal, so the next request opens it afresh.
+fn read<T>(
     clipboard: &mut Option<Box<dyn TextClipboard>>,
     open: &mut Open,
-) -> Answer {
+    get: impl FnOnce(&mut dyn TextClipboard) -> Result<T, String>,
+) -> Result<T, String> {
     let active = match clipboard {
         Some(active) => active,
         None => clipboard.insert(open()?),
     };
-    let answer = active.get_text();
+    let answer = get(active.as_mut());
     if answer.is_err() {
         *clipboard = None;
     }
@@ -117,6 +146,7 @@ fn read(
 
 trait TextClipboard {
     fn get_text(&mut self) -> Answer;
+    fn get_image(&mut self) -> ImageAnswer;
 }
 
 impl TextClipboard for arboard::Clipboard {
@@ -127,6 +157,49 @@ impl TextClipboard for arboard::Clipboard {
     fn get_text(&mut self) -> Answer {
         arboard::Clipboard::get_text(self).map_err(|error| error.to_string())
     }
+
+    // A clipboard with no image is not a failure — arboard says
+    // `ContentNotAvailable` — and the RGBA it hands over is encoded here,
+    // on the worker, never on the UI thread.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn get_image(&mut self) -> ImageAnswer {
+        match arboard::Clipboard::get_image(self) {
+            Ok(image) => {
+                encode_png(image.width, image.height, &image.bytes).map(Some)
+            }
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+/// RGBA pixels as a PNG, the one image format every Typst `#image` reads
+/// and every browser shows. A width or height past `u32`, or a byte count
+/// that is not width × height × 4, is refused rather than guessed at.
+fn encode_png(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Result<Vec<u8>, String> {
+    let (w, h) = (
+        u32::try_from(width).map_err(|_| "image too wide".to_string())?,
+        u32::try_from(height).map_err(|_| "image too tall".to_string())?,
+    );
+    if rgba.len() != width.saturating_mul(height).saturating_mul(4) {
+        return Err(format!(
+            "image: {} bytes for {width}×{height} rgba",
+            rgba.len()
+        ));
+    }
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(rgba))
+        .map_err(|error| format!("image: {error}"))?;
+    Ok(out)
 }
 
 // Native construction is the same foreign boundary: the worker tests inject
@@ -158,6 +231,44 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| Err("no scripted answer".to_string()))
         }
+
+        /// The fake's image is its next text answer's bytes, or none when
+        /// the answer is empty — enough to drive both arms of the worker.
+        fn get_image(&mut self) -> ImageAnswer {
+            self.get_text()
+                .map(|text| (!text.is_empty()).then(|| text.into_bytes()))
+        }
+    }
+
+    #[test]
+    fn the_worker_answers_images_through_the_same_clipboard() {
+        let reader = start(
+            spawn_thread,
+            Box::new(move || {
+                Ok(Box::new(FakeClipboard {
+                    answers: VecDeque::from([
+                        Ok("png".to_string()),
+                        Ok(String::new()),
+                        Err("gone".to_string()),
+                    ]),
+                }))
+            }),
+        );
+        assert_eq!(block_on(reader.read_image()), Ok(Some(b"png".to_vec())));
+        assert_eq!(block_on(reader.read_image()), Ok(None));
+        assert_eq!(block_on(reader.read_image()), Err("gone".to_string()));
+    }
+
+    #[test]
+    fn rgba_encodes_as_png_and_a_wrong_byte_count_is_refused() {
+        let png = encode_png(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255])
+            .expect("two pixels encode");
+        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert!(encode_png(2, 1, &[0; 5]).is_err());
+        // the encoder itself refuses an empty image
+        assert!(encode_png(0, 0, &[]).is_err());
+        assert!(encode_png(usize::MAX, 1, &[]).is_err());
+        assert!(encode_png(1, usize::MAX, &[]).is_err());
     }
 
     #[test]
@@ -235,6 +346,10 @@ mod tests {
             block_on(stopped.read_text()),
             Err("clipboard reader stopped".to_string())
         );
+        assert_eq!(
+            block_on(stopped.read_image()),
+            Err("clipboard reader stopped".to_string())
+        );
 
         let (requests, pending) = sync_channel(1);
         let unanswered = Reader {
@@ -250,6 +365,22 @@ mod tests {
             Err("clipboard reader stopped before answering".to_string())
         );
         handle.join().expect("the test worker stops");
+
+        // the image read stops the same way
+        let (requests, pending) = sync_channel(1);
+        let unanswered = Reader {
+            state: State::Running(requests),
+        };
+        let handle = std::thread::spawn(move || {
+            if let Ok(request) = pending.recv() {
+                drop(request);
+            }
+        });
+        assert_eq!(
+            block_on(unanswered.read_image()),
+            Err("clipboard reader stopped before answering".to_string())
+        );
+        handle.join().expect("the test worker stops");
     }
 
     #[test]
@@ -258,9 +389,15 @@ mod tests {
         let reader = Reader {
             state: State::Running(requests),
         };
-        let _held = reader.request().expect("the first slot");
+        let (reply, _held) = oneshot::channel();
+        reader
+            .request(Request::Text(reply))
+            .expect("the first slot");
+        let (reply, _second) = oneshot::channel();
         assert_eq!(
-            reader.request().expect_err("the queue is full"),
+            reader
+                .request(Request::Image(reply))
+                .expect_err("the queue is full"),
             "clipboard reader is busy"
         );
     }

@@ -303,6 +303,17 @@ impl Notice {
         }
     }
 
+    /// A clipboard image the vault could not take in — the png did not
+    /// land in `assets/`, so no `#image` was spelled
+    /// (adr/2026-09-an-image-pastes-into-assets.md).
+    pub fn image_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Clipboard,
+            text: format!("image: {detail} — nothing was pasted"),
+        }
+    }
+
     /// A delete the filesystem refused: nothing is half-deleted
     /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
     pub fn delete_failed(detail: &str) -> Notice {
@@ -573,6 +584,7 @@ mod tests {
                 .starts_with("clipboard: denied")
         );
         assert!(Notice::delete_failed("boom").text.contains("still on disk"));
+        assert!(Notice::image_failed("boom").text.starts_with("image: boom"));
         assert!(Notice::create_failed("boom").text.starts_with("create:"));
         assert!(
             Notice::open_failed("xdg-open: not found")

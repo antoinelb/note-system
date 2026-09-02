@@ -191,6 +191,21 @@ pub struct Clipboard(
     >,
 );
 
+/// The clipboard's image as PNG bytes, read the way its text is: `main`
+/// injects the worker's image read, the headless tests a scripted answer.
+/// `Ok(None)` is a clipboard holding no image
+/// (adr/2026-09-an-image-pastes-into-assets.md).
+#[derive(Clone)]
+pub struct ClipboardImage(
+    #[allow(clippy::type_complexity)]
+    pub  Arc<
+        dyn Fn() -> Pin<
+                Box<dyn Future<Output = Result<Option<Vec<u8>>, String>>>,
+            > + Send
+            + Sync,
+    >,
+);
+
 /// How the vault watcher reaches the screen: `main` starts the watcher on
 /// its own thread and hands the receiving end over here, the headless tests
 /// send batches by hand (adr/2026-08-watcher-feeds-the-ui.md). Taken out of
@@ -458,6 +473,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let hit = try_consume_context::<HitProbe>();
     let line_probe = try_consume_context::<LineProbe>();
     let clipboard = try_consume_context::<Clipboard>();
+    let clipboard_image = try_consume_context::<ClipboardImage>();
     let clipboard_write = try_consume_context::<ClipboardWrite>();
     let now = try_consume_context::<Now>();
     let launcher = try_consume_context::<Launcher>();
@@ -2019,7 +2035,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // slots between the translation and this (editor.rs)
     let apply_action = use_callback({
         let clipboard = clipboard.clone();
+        let clipboard_image = clipboard_image.clone();
         let clipboard_write = clipboard_write.clone();
+        let now = now.clone();
+        let root = root.clone();
         let fragments = fragments.clone();
         move |action: keymap::Action| match action {
             keymap::Action::Insert(text) => {
@@ -2070,12 +2089,22 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             }
             keymap::Action::Paste => {
                 // the capture seam read the other way: a clipboard that
-                // will not answer pastes nothing
+                // will not answer pastes nothing; one that holds an image
+                // and no text pastes the image's `#image` call
                 if let Some(clipboard) = clipboard.clone() {
+                    let paste = pasted(
+                        clipboard,
+                        clipboard_image.clone(),
+                        now.clone(),
+                        root.clone(),
+                        editor
+                            .peek()
+                            .note()
+                            .map(|(path, _)| crate::domain::stem_of(path)),
+                        status,
+                    );
                     spawn(async move {
-                        if let Some(text) =
-                            clipboard_answer((clipboard.0)().await, status)
-                        {
+                        if let Some(text) = paste.await {
                             editor.write().insert_at_caret(&text);
                         }
                     });
@@ -2114,7 +2143,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let apply_vim = use_callback({
         let fragments = fragments.clone();
         let clipboard = clipboard.clone();
+        let clipboard_image = clipboard_image.clone();
         let clipboard_write = clipboard_write.clone();
+        let now = now.clone();
+        let root = root.clone();
         let line_probe = line_probe.clone();
         let goal = goal.clone();
         move |acts: Vec<vim::Act>| {
@@ -2257,16 +2289,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         let Some(clipboard) = clipboard.clone() else {
                             continue;
                         };
+                        let paste = pasted(
+                            clipboard,
+                            clipboard_image.clone(),
+                            now.clone(),
+                            root.clone(),
+                            editor
+                                .peek()
+                                .note()
+                                .map(|(path, _)| crate::domain::stem_of(path)),
+                            status,
+                        );
                         spawn(async move {
-                            let Some(clip) = clipboard_answer(
-                                (clipboard.0)().await,
-                                status,
-                            ) else {
-                                return;
-                            };
-                            if clip.is_empty() {
-                                return;
-                            }
+                            let Some(clip) = paste.await else { return };
                             // a paste is always an insertion inside the
                             // active block: no other block can wake, so no
                             // fragment goes stale
@@ -5350,6 +5385,75 @@ fn dir_category(relative: &Path) -> NoteCategory {
         .and_then(|dir| dir.to_str())
         .and_then(NoteCategory::from_dir)
         .unwrap_or(NoteCategory::Permanent)
+}
+
+/// What a paste puts into the note: the clipboard's text when it holds
+/// any; otherwise its image, written into `assets/` under the note's stem
+/// and a timestamp and spelled as the `#image` call that shows it; nothing
+/// when it holds neither, when the note has no name to file the image
+/// under, or when a read or the write refused — each refusal a notice
+/// (adr/2026-09-an-image-pastes-into-assets.md).
+async fn pasted(
+    clipboard: Clipboard,
+    image: Option<ClipboardImage>,
+    now: Option<Now>,
+    root: PathBuf,
+    stem: Option<String>,
+    mut status: Signal<Status>,
+) -> Option<String> {
+    // a clipboard holding only an image refuses the text read outright
+    // on X11, so a refusal is not the end: it is reported only once the
+    // image read has found nothing either
+    let refused = match (clipboard.0)().await {
+        Ok(clip) if !clip.is_empty() => {
+            status.write().resolve(Source::Clipboard);
+            return Some(clip);
+        }
+        Ok(_) => None,
+        Err(detail) => Some(detail),
+    };
+    let Some(((image, now), stem)) = image.zip(now).zip(stem) else {
+        return refused.and_then(|detail| {
+            status.write().report(Notice::clipboard_failed(&detail));
+            None
+        });
+    };
+    let png = match (image.0)().await {
+        Ok(Some(png)) => png,
+        Ok(None) => {
+            return refused.and_then(|detail| {
+                status.write().report(Notice::clipboard_failed(&detail));
+                None
+            });
+        }
+        Err(detail) => {
+            status.write().report(Notice::clipboard_failed(&detail));
+            return None;
+        }
+    };
+    let name = image_asset_name(&stem, &(now.0)());
+    match crate::persist::write_atomic_bytes(
+        &root.join("assets").join(&name),
+        &png,
+    ) {
+        Ok(_) => {
+            status.write().resolve(Source::Clipboard);
+            Some(format!("#image(\"/assets/{name}\")"))
+        }
+        Err(error) => {
+            status
+                .write()
+                .report(Notice::image_failed(&error.to_string()));
+            None
+        }
+    }
+}
+
+/// `assets/<stem>-<yyyymmdd-hhmmss>.png`: the note it was pasted into and
+/// the moment, so two pastes never collide and a directory listing reads
+/// as a timeline.
+fn image_asset_name(stem: &str, now: &jiff::Zoned) -> String {
+    format!("{stem}-{}.png", now.strftime("%Y%m%d-%H%M%S"))
 }
 
 /// The finder's hits for a query, read from the index per keystroke — the
@@ -17622,6 +17726,225 @@ mod tests {
         let mutations = dom.rebuild_to_vec();
         let clicks = listeners(&mutations, "click");
         (dom, clicks, written)
+    }
+
+    /// The app with a scripted text read, a scripted image read and a
+    /// fixed clock — the three seams an image paste crosses.
+    fn image_app(
+        root: Option<PathBuf>,
+        pasted: Result<String, String>,
+        image: Result<Option<Vec<u8>>, String>,
+    ) -> (VirtualDom, Vec<ElementId>) {
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(test_today())));
+        dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
+            move || {
+                let pasted = pasted.clone();
+                Box::pin(async move { pasted })
+            },
+        ))));
+        dom.insert_any_root_context(Box::new(ClipboardImage(Arc::new(
+            move || {
+                let image = image.clone();
+                Box::pin(async move { image })
+            },
+        ))));
+        let stamp: jiff::Zoned = "2026-07-23T10:15:00[UTC]"
+            .parse()
+            .expect("the paste clock is a valid timestamp");
+        dom.insert_any_root_context(Box::new(Now(Arc::new(move || {
+            stamp.clone()
+        }))));
+        let mutations = dom.rebuild_to_vec();
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks)
+    }
+
+    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 13, 10, 26, 10];
+
+    #[test]
+    fn p_over_an_image_and_no_text_files_the_png_and_spells_the_image() {
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join("assets"))
+            .expect("the assets dir");
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Ok(String::new()),
+            Ok(Some(PNG_SIGNATURE.to_vec())),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let name = "2026-07-23-20260723-101500.png";
+        assert_eq!(
+            std::fs::read(vault.path().join("assets").join(name))
+                .expect("the png landed"),
+            PNG_SIGNATURE.to_vec()
+        );
+        assert!(
+            source_of(&dom).contains(&format!("#image(\"/assets/{name}\")")),
+            "{}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn ctrl_v_in_insert_mode_pastes_the_image_call_at_the_caret() {
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join("assets"))
+            .expect("the assets dir");
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Ok(String::new()),
+            Ok(Some(PNG_SIGNATURE.to_vec())),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("v".into()),
+            Modifiers::CONTROL,
+        );
+        block_on(settle(&mut dom));
+        assert!(
+            source_of(&dom).contains("#image(\"/assets/2026-07-23-"),
+            "{}",
+            source_of(&dom)
+        );
+        // text on the clipboard still wins over an image
+        let vault = temp_vault();
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Ok("texte".to_string()),
+            Ok(Some(PNG_SIGNATURE.to_vec())),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(source_of(&dom).contains("texte"), "{}", source_of(&dom));
+        assert!(!source_of(&dom).contains("#image"), "{}", source_of(&dom));
+    }
+
+    #[test]
+    fn a_refused_text_read_still_pastes_the_image_and_is_reported_only_alone()
+    {
+        // X11 refuses the text read when the clipboard holds only an image
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join("assets"))
+            .expect("the assets dir");
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Err("no text target".to_string()),
+            Ok(Some(PNG_SIGNATURE.to_vec())),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(source_of(&dom).contains("#image("), "{}", source_of(&dom));
+        assert!(!dioxus_ssr::render(&dom).contains("clipboard: "));
+
+        // and with no image behind the refusal, the refusal is the notice
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Err("no text target".to_string()),
+            Ok(None),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom).contains("clipboard: no text target"),
+            "{}",
+            dioxus_ssr::render(&dom)
+        );
+    }
+
+    #[test]
+    fn an_image_read_that_finds_nothing_refuses_or_cannot_be_filed_pastes_nothing()
+     {
+        let vault = temp_vault();
+        // nothing on the clipboard at all
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Ok(String::new()),
+            Ok(None),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before);
+        assert!(!dioxus_ssr::render(&dom).contains("notice-warning"));
+
+        // the image read refused
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Ok(String::new()),
+            Err("no image target".to_string()),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("clipboard: no image target"), "{html}");
+
+        // the assets directory is not there to write into
+        let (mut dom, clicks) = image_app(
+            Some(vault.path().to_path_buf()),
+            Ok(String::new()),
+            Ok(Some(PNG_SIGNATURE.to_vec())),
+        );
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let before = source_of(&dom);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("p".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("image: "), "the write refused aloud: {html}");
+        assert!(html.contains("nothing was pasted"), "{html}");
+        assert_eq!(source_of(&dom), before);
     }
 
     /// A sequence of clipboard outcomes for recovery assertions.

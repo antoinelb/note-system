@@ -52,7 +52,7 @@ e2e_window() {
 # Named up front, so a missing tool fails the run in its first second and
 # by its own name, not thirty seconds in as "the app opened no window".
 e2e_preflight() {
-    for tool in Xvfb i3 xprop xdotool import sqlite3; do
+    for tool in Xvfb i3 xprop xdotool import sqlite3 xclip; do
         command -v "$tool" >/dev/null 2>&1 || e2e_fail \
             "$tool is not installed; the e2e suite needs Xvfb, i3, xorg-xprop, xdotool, ImageMagick (import) and sqlite3"
     done

@@ -64,7 +64,9 @@ pub fn seed(vault: &Path) -> Result<(), TemplateError> {
         NoteCategory::Capture,
         NoteCategory::Generated,
     ];
-    let dirs = std::iter::once(templates.clone()).chain(
+    // `assets/` is where a pasted image lands: the first non-`.typ` files
+    // in the vault (adr/2026-09-an-image-pastes-into-assets.md)
+    let dirs = [templates.clone(), vault.join("assets")].into_iter().chain(
         categories
             .iter()
             .map(|category| vault.join(category.as_dir())),
@@ -360,7 +362,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         seed(dir.path()).expect("first seed");
         seed(dir.path()).expect("second seed finds everything in place");
-        for sub in ["templates", "time", "permanent", "capture", "generated"] {
+        for sub in [
+            "templates",
+            "assets",
+            "time",
+            "permanent",
+            "capture",
+            "generated",
+        ] {
             assert!(dir.path().join(sub).is_dir(), "{sub}");
         }
         for (name, text) in DEFAULTS {
