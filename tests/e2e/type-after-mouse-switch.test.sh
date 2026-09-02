@@ -13,13 +13,12 @@
 
 trap e2e_stop EXIT INT TERM
 e2e_start
-today=$(date +%Y-%m-%d)
 
 # the typing target has to exist before either mouse leg runs
 e2e_key ctrl+d
 # the fixture ships no note for today
 e2e_key Return
-e2e_file_appears "time/$today.typ"
+e2e_file_appears "time/$E2E_TODAY.typ"
 
 # leg 1: table icon, then the logs icon back, with no keyboard gesture
 # between the two clicks — `i` and prose come immediately after the second
@@ -27,7 +26,7 @@ e2e_click_chrome table
 e2e_click_chrome logs
 e2e_key i
 e2e_type "typed right after the click back to the logs icon"
-e2e_note_holds "time/$today.typ" \
+e2e_note_holds "time/$E2E_TODAY.typ" \
     "typed right after the click back to the logs icon"
 
 # leg 2: the table icon, then Ctrl+D with nothing in between — the chord
@@ -37,6 +36,6 @@ e2e_click_chrome table
 e2e_key ctrl+d
 e2e_key i
 e2e_type "typed after a table click then ctrl+d"
-e2e_note_holds "time/$today.typ" "typed after a table click then ctrl+d"
+e2e_note_holds "time/$E2E_TODAY.typ" "typed after a table click then ctrl+d"
 
 echo "ok: $(basename "$0")"

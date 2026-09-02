@@ -578,7 +578,14 @@ impl Editor {
             let mut value = source;
             value.replace_range(rel, replacement);
             self.edit(&value);
-            self.place(caret);
+            // a caret the grammar measured in the old text's bytes
+            // degrades onto a boundary of the new one, as the cross-block
+            // path's does, instead of poisoning every later edit
+            let landed = self
+                .note()
+                .map(|(_, text)| floor_boundary(text, caret))
+                .unwrap_or(caret);
+            self.place(landed);
             return;
         }
         let Some(note) = self.buffer.as_mut() else {
@@ -2166,6 +2173,18 @@ mod tests {
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, "");
         assert_eq!(editor.caret().map(|caret| caret.head), Some(0));
+    }
+
+    #[test]
+    fn a_splice_whose_caret_lands_inside_a_character_floors_it() {
+        let (_dir, mut editor) = open_note("Ⱥa\n");
+        editor.activate(0);
+        // ⱥ is three bytes where Ⱥ was two: byte 2 is now inside it
+        editor.splice(0..2, "ⱥ", 2);
+        assert_eq!(editor.trouble(), None);
+        assert_eq!(editor.caret().map(|caret| caret.head), Some(0));
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "ⱥa\n");
     }
 
     #[test]

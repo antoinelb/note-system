@@ -28,29 +28,16 @@ MISSING_META="permanent/missing-meta.typ"
 MISSING_TYPE="permanent/missing-type.typ"
 
 # Every overlay opened below, and every sheet closed, grabs or releases
-# focus through its own async onmounted, exactly like a textarea does
-# (create-then-follow.test.sh, notice-resolves.test.sh,
-# table-chords.test.sh). `e2e_key_paced`/`e2e_type_paced` pace every
-# keystroke behind a real screenshot round trip — a genuine wall-clock
-# wait tied to the compositor, never a guessed sleep — instead of only
-# the marker sentence's own leg. table-chords.test.sh's trap still rules
-# out retrying the typed sentence itself: a retry that fires after a
-# slow-but-landed first send does not just splice a duplicate into the
-# open buffer here, it can also open a save conflict (the disk changing
-# under an editor a fresh retry already reopened, `save: the note changed
-# on disk`), which swallows the sentence entirely rather than merely
-# duplicating it. So every leg below sends its whole "open loops -> reach
-# the row -> type" chain exactly once, paced at every step, and
-# `e2e_note_holds` (harness.sh) supplies the only retry — a read-only
-# grep absorbing the debounced autosave, never resending a keystroke.
-e2e_key_paced() {
-    e2e_key "$@"
-    e2e_shot "$E2E_DIR/probe.png"
-}
-e2e_type_paced() {
-    e2e_type "$1"
-    e2e_shot "$E2E_DIR/probe.png"
-}
+# focus through its own async onmounted, so every keystroke is paced
+# (harness.sh `e2e_key_paced`). A retry of the typed sentence is ruled
+# out twice over: a retry that fires after a slow-but-landed first send
+# splices a duplicate into the open buffer, and here it can also open a
+# save conflict (the disk changing under an editor a fresh retry already
+# reopened, `save: the note changed on disk`), which swallows the
+# sentence entirely. So every leg below sends its whole "open loops ->
+# reach the row -> type" chain exactly once, paced at every step, and
+# `e2e_note_holds` supplies the only retry — a read-only grep absorbing
+# the debounced autosave, never resending a keystroke.
 
 # --- keyboard leg: Ctrl+P palette -> "open loops" -> Enter on rank 0 ----
 # no Down: rank 0 is missing-meta, the note with no #meta at all and so no
@@ -90,14 +77,13 @@ e2e_key_paced shift+Escape
 # today's daily note is the file this leg proves receives the keystrokes
 # instead — table-screen reachability is finding #3's fix
 # (adr/2026-08-screen-switch-gesture.md)
-today=$(date +%Y-%m-%d)
 e2e_open_todays_daily() {
     e2e_key ctrl+d
     e2e_key Return
-    test -f "$E2E_DIR/vault/time/$today.typ"
+    test -f "$E2E_DIR/vault/time/$E2E_TODAY.typ"
 }
 e2e_await e2e_open_todays_daily \
-    || e2e_fail "time/$today.typ was never written"
+    || e2e_fail "time/$E2E_TODAY.typ was never written"
 
 # the "OPEN LOOPS" head sits inside the same box as every row but wears
 # no row's own onclick, so a click here bubbles to the box's onclick and
@@ -110,7 +96,7 @@ e2e_shot "$E2E_DIR/probe.png"
 e2e_key_paced i
 e2e_type "backdrop click left the day note in focus"
 e2e_key Escape
-e2e_note_holds "time/$today.typ" "backdrop click left the day note in focus"
+e2e_note_holds "time/$E2E_TODAY.typ" "backdrop click left the day note in focus"
 
 if grep -qF "backdrop click left the day note in focus" \
     "$E2E_DIR/vault/$MISSING_TYPE" 2>/dev/null; then

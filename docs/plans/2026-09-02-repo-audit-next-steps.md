@@ -26,11 +26,11 @@ No naked `.unwrap()`, no while loops, colours only in `assets/theme.css`, all UI
 
 ## Items
 
-### Tier 0 — the notes
+### Tier 0 — the notes (done 2026-09-02, commit 674f818)
 1. Vault backup: a systemd user timer commits the vault every few minutes (`git add -A && git commit`), plus an ADR recording that git is the recovery path for the trashless delete and that the app stays out of it.
 2. Overlay focus race: keys typed between an overlay's mount and its async focus grab must not reach the note behind. Fix Ctrl+N, audit the palette, the link picker, the recent-notes picker, the filter and settings overlays for the same race, add a unit test per overlay and one e2e scenario that types the title immediately after the chord, with an ADR.
 
-### Tier 1 — the harness
+### Tier 1 — the harness (done 2026-09-02: `src/launch.rs`, `tests/integration/properties.rs`, `harness.sh`, six scenarios, four ADRs; the first property run found three grammar defects, fixed in the same change)
 3. `main.rs` inside the gate: narrow `--ignore-filename-regex` to `lib.rs` and `mod.rs`; move the `--capture` path, `watcher_feed`/`feed`, `LINE_WALK` and the hit-probe script into covered modules so `main.rs` holds only the launch builder again (`adr/2026-07-ui-covered-at-100.md`'s promise).
 4. Property tests: add `proptest` as a dev-dependency with three properties — no key sequence panics the vim grammar and `u` restores the buffer; markup spans partition the source exactly once; `parse.rs` survives arbitrary input.
 5. E2e hardening: move the paced-keystroke helper into `harness.sh`; replace the pixel probes in `notice-resolves.test.sh` and `table-chords.test.sh` with file and index oracles; add a preflight naming a missing `convert` or `sqlite3`; inject today's date instead of reading `date`; retire the clock assertion at `src/time.rs:196`.

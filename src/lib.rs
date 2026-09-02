@@ -11,6 +11,7 @@ pub mod domain;
 pub mod editor;
 pub mod index;
 pub mod keymap;
+pub mod launch;
 pub mod links;
 pub mod logs;
 pub mod loops;

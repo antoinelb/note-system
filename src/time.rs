@@ -11,7 +11,19 @@ use jiff::civil::{Date, ISOWeekDate, Weekday};
 /// everything below it takes the date as a parameter
 /// (adr/2026-07-today-injected-root-context.md).
 pub fn today() -> Date {
-    jiff::Zoned::now().date()
+    today_from(std::env::var_os("NOTE_TODAY"))
+}
+
+/// The one clock read — unless `NOTE_TODAY` pins it, which only the e2e
+/// harness does: the shipped binary has no root context to inject a date
+/// through, and the environment is the seam `NOTE_VAULT` already crosses
+/// (adr/2026-09-note-today-pins-the-clock-for-e2e.md). A value the parser
+/// refuses is not a request to stop the clock; the harness's own file
+/// oracles catch a pin that did not take.
+fn today_from(pinned: Option<std::ffi::OsString>) -> Date {
+    pinned
+        .and_then(|value| value.to_str()?.parse().ok())
+        .unwrap_or_else(|| jiff::Zoned::now().date())
 }
 
 /// The ids a date belongs to, smallest scale first: day, week, season.
@@ -191,9 +203,26 @@ mod tests {
     }
 
     #[test]
-    fn today_reads_the_clock_once() {
-        // racing midnight is the only way this fails; acceptable odds
-        assert_eq!(today(), jiff::Zoned::now().date());
+    fn today_sits_between_two_clock_reads() {
+        // bracketed, so a midnight between the reads cannot fail it
+        let before = jiff::Zoned::now().date();
+        let today = today();
+        let after = jiff::Zoned::now().date();
+        assert!(before <= today && today <= after);
+    }
+
+    #[test]
+    fn a_pinned_today_replaces_the_clock_and_a_bad_pin_does_not() {
+        assert_eq!(today_from(Some("2026-07-24".into())), date("2026-07-24"));
+        let not_utf8 =
+            std::os::unix::ffi::OsStringExt::from_vec(vec![0xff, 0xfe]);
+        for bad in [Some("yesterday".into()), Some(not_utf8), None] {
+            let before = jiff::Zoned::now().date();
+            let unpinned = today_from(bad);
+            assert!(
+                before <= unpinned && unpinned <= jiff::Zoned::now().date()
+            );
+        }
     }
 
     #[test]

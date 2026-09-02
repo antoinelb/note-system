@@ -11,6 +11,8 @@ unicode-segmentation = "1"
 notify-debouncer-full = "0.7"
 # "hooks" is only used by the fault-injection tests in src/index.rs, but cargo
 # features are not per-profile, so it has to be declared here
+# the shape of what the webview answers a probe script with (src/launch.rs)
+serde_json = "1"
 rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "jiff"] }
 tokio = { version = "1", features = ["time", "sync"] }
 typst = "0.15.1"
@@ -30,3 +32,5 @@ manual_range_contains = "allow"
 # markup assertions for the UI tests (adr/2026-07-ui-covered-at-100.md)
 dioxus-ssr = "0.7"
 tempfile = "3.27.0"
+# tests/integration/properties.rs (adr/2026-09-property-tests-guard-three-invariants.md)
+proptest = "1"

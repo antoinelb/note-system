@@ -569,8 +569,13 @@ impl Vim {
         match key {
             Key::Character(cluster) => {
                 let line = Lines::of(view.text, view.blocks).around(view.head);
-                let end =
-                    caret::next_cluster(view.text, view.head).min(line.end);
+                // past the line's end — where an opened note's caret sits,
+                // after its trailing newline — there is nothing to
+                // overwrite and the span would run backwards: R inserts
+                // there, as vim's does (found by the key-sequence property)
+                let end = caret::next_cluster(view.text, view.head)
+                    .min(line.end)
+                    .max(view.head);
                 self.replaced.push(
                     view.text
                         .get(view.head..end)
@@ -1643,7 +1648,17 @@ impl Vim {
             // and a charwise one owns its span's start
             // (adr/2026-08-case-operators-are-verbs.md)
             Operator::Lower | Operator::Upper | Operator::Flip => {
-                let caret = if linewise { view.head } else { span.start };
+                // "alone" means on the same character: Ⱥ is two bytes and
+                // ⱥ three, so the offset is measured in the recased text
+                // (found by the key-sequence property)
+                let caret = if linewise {
+                    let prefix = cut
+                        .get(..view.head.saturating_sub(span.start))
+                        .unwrap_or_default();
+                    span.start + recase(prefix, op).len()
+                } else {
+                    span.start
+                };
                 acts.push(Act::Splice {
                     text: recase(cut, op),
                     span,
@@ -1860,10 +1875,19 @@ impl Vim {
             view.text.get(span.clone()).unwrap_or_default(),
             Operator::Flip,
         );
+        // the landing is measured in the flipped text, whose bytes may
+        // not match the span's (Ⱥ is two, ⱥ three): past the flipped run,
+        // or on the line's last cluster when the run reached its end
         let caret = if end >= line.end {
-            caret::prev_cluster(view.text, line.end).max(line.start)
+            let last = unicode_segmentation::UnicodeSegmentation::graphemes(
+                flipped.as_str(),
+                true,
+            )
+            .next_back()
+            .map_or(0, str::len);
+            span.start + flipped.len() - last
         } else {
-            end
+            span.start + flipped.len()
         };
         self.record(Change::Toggle { count: total });
         Outcome::Acts(vec![
@@ -4125,6 +4149,66 @@ mod tests {
         let outcome = feed(&mut vim, "R", &view(text, &parsed, 0));
         assert_eq!(outcome, Outcome::Acts(vec![Act::Checkpoint]));
         assert_eq!(vim.mode, Mode::Replace);
+    }
+
+    #[test]
+    fn recasing_lands_in_the_recased_texts_own_bytes() {
+        // Ⱥ is two bytes and ⱥ three, so every offset after it moves
+        let text = "Ⱥa\n";
+        let parsed = blocks::segment(text);
+        let splice_of = |outcome: Outcome| match outcome {
+            Outcome::Acts(acts) => acts
+                .into_iter()
+                .find_map(|act| match act {
+                    Act::Splice { text, caret, .. } => Some((text, caret)),
+                    _ => None,
+                })
+                .expect("a splice"),
+            other => panic!("no acts: {other:?}"),
+        };
+        // a linewise gu leaves the caret on its character, the "a"
+        let mut vim = normal();
+        let (recased, caret) =
+            splice_of(feed(&mut vim, "Vu", &view(text, &parsed, 2)));
+        assert!(recased.starts_with("ⱥa"), "{recased:?}");
+        assert_eq!(caret, 3);
+        // ~ steps past the flipped run
+        let mut vim = normal();
+        let (flipped, caret) =
+            splice_of(feed(&mut vim, "~", &view(text, &parsed, 0)));
+        assert_eq!((flipped.as_str(), caret), ("ⱥ", 3));
+        // and stays on the line's last cluster when the run reached its
+        // end, in the flipped text's own bytes
+        let text = "ȺȺ\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        let (flipped, caret) =
+            splice_of(feed(&mut vim, "2~", &view(text, &parsed, 0)));
+        assert_eq!((flipped.as_str(), caret), ("ⱥⱥ", 3));
+    }
+
+    #[test]
+    fn replace_past_the_trailing_newline_inserts_instead_of_reversing() {
+        // the caret an opened note starts with: after the final newline,
+        // where the line around it ends before it
+        let text = "*\n";
+        let parsed = blocks::segment(text);
+        let mut vim = normal();
+        feed(&mut vim, "R", &view(text, &parsed, 2));
+        let outcome = vim.handle(
+            &character("h"),
+            Modifiers::empty(),
+            &view(text, &parsed, 2),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Acts(vec![Act::Splice {
+                span: 2..2,
+                text: "h".into(),
+                caret: 3,
+            }]),
+        );
+        assert_eq!(vim.replaced, vec![String::new()]);
     }
 
     #[test]

@@ -5,21 +5,10 @@
 
 trap e2e_stop EXIT INT TERM
 e2e_start
-today=$(date +%Y-%m-%d)
 
-# Ctrl+N's overlay grabs focus through an async onmounted, and on a cold
-# start the fresh vault's first typst compile can still be settling when
-# the chord arrives — so each keystroke is paced behind a real screenshot
-# round trip rather than fired blind (create-note.test.sh names the same
-# trap).
-e2e_key_paced() {
-    e2e_key "$@"
-    e2e_shot "$E2E_DIR/probe.png"
-}
-e2e_type_paced() {
-    e2e_type "$1"
-    e2e_shot "$E2E_DIR/probe.png"
-}
+# on a cold start the fresh vault's first typst compile can still be
+# settling when the chord arrives — so each keystroke is paced
+# (create-note.test.sh names the same trap)
 e2e_key_paced ctrl+n
 e2e_type_paced "concept"
 e2e_key_paced Return
@@ -28,24 +17,10 @@ e2e_key_paced Return
 
 e2e_file_appears "permanent/freshness-proving-ground.typ"
 
-# harness.sh carries no index-reading helper, so this scenario defines its
-# own rather than editing it: the index is the assertion surface for
-# findings #1/#8, a note on disk with no row in vault/.index/index.db
-# under its own id is exactly the pre-fix bug this pins. The file itself
-# is checked before opening it so polling never creates an empty db ahead
-# of the app's own schema write.
-e2e_index_query_holds() {
-    test -f "$E2E_DIR/vault/.index/index.db" || return 1
-    sqlite3 "$E2E_DIR/vault/.index/index.db" \
-        "SELECT 1 FROM notes WHERE id = '$1';" 2>/dev/null | grep -q '^1$'
-}
-e2e_index_holds() {
-    e2e_await e2e_index_query_holds "$1" \
-        || e2e_fail "vault/.index/index.db never held a note with id '$1'"
-}
-# the assertion that fails against the pre-fix binary: the watcher's round
-# trip has not landed yet, so the note is on disk but not in the index
-e2e_index_holds "freshness-proving-ground"
+# the index is the assertion surface for findings #1/#8: a note on disk
+# with no row under its own id is exactly the pre-fix bug this pins — the
+# watcher's round trip has not landed yet
+e2e_index_holds "SELECT 1 FROM notes WHERE id = 'freshness-proving-ground';"
 
 # Ctrl+N's own Return auto-opens the new note's sheet
 # (adr/2026-08-every-card-opens-the-sheet.md), whose textarea grabs focus
@@ -59,10 +34,10 @@ e2e_go_to_todays_daily() {
     e2e_key ctrl+d
     # the empty day offers "no note for <day> — press enter to start one"
     e2e_key Return
-    test -f "$E2E_DIR/vault/time/$today.typ"
+    test -f "$E2E_DIR/vault/time/$E2E_TODAY.typ"
 }
 e2e_await e2e_go_to_todays_daily \
-    || e2e_fail "time/$today.typ was never written"
+    || e2e_fail "time/$E2E_TODAY.typ was never written"
 
 e2e_key i
 # a non-writing motion absorbs the day note textarea's own just-focused
@@ -84,11 +59,11 @@ e2e_insert_link_via_picker() {
     e2e_key ctrl+l
     e2e_type "freshness"
     e2e_key Return
-    grep -qaF "freshness-proving-ground" "$E2E_DIR/vault/time/$today.typ" \
+    grep -qaF "freshness-proving-ground" "$E2E_DIR/vault/time/$E2E_TODAY.typ" \
         2>/dev/null
 }
 e2e_await e2e_insert_link_via_picker \
-    || e2e_fail "time/$today.typ never held the link"
+    || e2e_fail "time/$E2E_TODAY.typ never held the link"
 
 # the caret lands past the link the picker just spliced in — still inside
 # the #l(...) call (links.rs: link_at treats just-past-')' as inside)

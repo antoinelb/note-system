@@ -18,7 +18,7 @@ static:
 
 test:
 	cargo +nightly llvm-cov \
-	  --ignore-filename-regex '(lib\.rs|/mod\.rs|/main\.rs)$$' \
+	  --ignore-filename-regex '(lib\.rs|/mod\.rs)$$' \
 	  --fail-under-regions 100 \
 	  --fail-under-lines 100 \
 	  --fail-under-functions 100
@@ -49,5 +49,8 @@ run:
 	@test -d $(DEV_VAULT) || cp -r $(VAULT) $(DEV_VAULT)
 	NOTE_VAULT=$(DEV_VAULT) cargo run
 
-upgrade:
+# the install is the release: the one gate the hook skips for speed runs
+# here, before a binary starts being used for real notes
+# (adr/2026-09-the-pre-commit-hook-is-the-ci.md)
+upgrade: e2e
 	cargo install --locked --force --path .

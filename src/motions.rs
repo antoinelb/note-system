@@ -21,10 +21,12 @@ impl Lines {
             let content = block.content();
             let slice = text.get(content.clone()).unwrap_or("");
             // a well-formed block's content never ends with '\n' — the
-            // separator carries it — but a malformed parse (an unterminated
-            // raw fence, say) could still hand one back; strip it so the
-            // split below never manufactures a phantom trailing row
-            let slice = slice.strip_suffix('\n').unwrap_or(slice);
+            // separator carries it — but a malformed parse (a lone `_` or
+            // `*`, an unterminated raw fence) hands one back, and the caret
+            // may legally rest at that content's end: the row after the
+            // newline is real, so the split keeps it — a table without it
+            // answered every verb there with a span running backwards
+            // (found by the key-sequence property)
             let mut start = content.start;
             for part in slice.split('\n') {
                 lines.push(start..start + part.len());
@@ -1085,10 +1087,11 @@ mod tests {
     }
 
     #[test]
-    fn a_block_whose_content_ends_with_a_newline_gets_no_phantom_row() {
-        // defensive: a well-formed block's content never ends with '\n',
-        // but Lines::of must not manufacture an extra empty row from the
-        // trailing split if one ever did (adr/2026-08-per-line-block-segmentation.md)
+    fn a_block_whose_content_ends_with_a_newline_keeps_its_last_row() {
+        // a well-formed block's content never ends with '\n', but a lone
+        // `_` parses into one that does, and the caret may rest at its
+        // end: the row after the newline is where it sits, so the table
+        // holds it rather than answering with the row before
         let text = "abc\n";
         let blocks = [Block {
             range: 0..4,
@@ -1096,8 +1099,10 @@ mod tests {
             standalone: false,
         }];
         let lines = Lines::of(text, &blocks);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.len(), 2);
         assert_eq!(lines.get(0), 0..3);
+        assert_eq!(lines.get(1), 4..4);
+        assert_eq!(lines.around(4), 4..4);
     }
 
     #[test]

@@ -10,11 +10,10 @@
 
 trap e2e_stop EXIT INT TERM
 e2e_start
-today=$(date +%Y-%m-%d)
 
 e2e_fingerprint() {
     (cd "$E2E_DIR/vault" && find . -name '*.typ' \
-        ! -name 'typed-before-focus.typ' ! -name "$today.typ" \
+        ! -name 'typed-before-focus.typ' ! -name "$E2E_TODAY.typ" \
         | sort | xargs cksum)
 }
 before=$(e2e_fingerprint)

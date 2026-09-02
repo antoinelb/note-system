@@ -16,6 +16,13 @@ E2E_BIN="$E2E_ROOT/target/release/note-system"
 # any single assertion: a save lands 500 ms after the last keystroke.
 E2E_POLLS=60
 E2E_POLL_SLEEP=0.5
+# The app's clock, pinned through NOTE_TODAY
+# (adr/2026-09-note-today-pins-the-clock-for-e2e.md): the fixture vault
+# lives in July 2026 and ships no note for this day, so "today" is empty
+# on every run, and the harness and the app agree on the date whatever
+# the wall clock says — a scenario straddling midnight used to write
+# time/<yesterday>.typ and poll for time/<today>.typ.
+E2E_TODAY=2026-07-24
 
 e2e_fail() {
     echo "FAIL: $*" >&2
@@ -42,9 +49,20 @@ e2e_window() {
     xdotool search --name "Dioxus App" | head -1 | grep .
 }
 
+# Named up front, so a missing tool fails the run in its first second and
+# by its own name, not thirty seconds in as "the app opened no window".
+e2e_preflight() {
+    for tool in Xvfb i3 xprop xdotool import sqlite3; do
+        command -v "$tool" >/dev/null 2>&1 || e2e_fail \
+            "$tool is not installed; the e2e suite needs Xvfb, i3, xorg-xprop, xdotool, ImageMagick (import) and sqlite3"
+    done
+    test -x "$E2E_BIN" || e2e_fail "$E2E_BIN is not built; run make e2e"
+}
+
 # The caller installs the teardown: a scenario wants `trap e2e_stop EXIT`,
 # a persona session wants the window to outlive the shell that opened it.
 e2e_start() {
+    e2e_preflight
     E2E_DIR=$(mktemp -d)
 
     cp -r "$E2E_ROOT/tests/fixtures/vault" "$E2E_DIR/vault"
@@ -78,6 +96,7 @@ e2e_start() {
     WEBKIT_DISABLE_COMPOSITING_MODE=1 \
     WEBKIT_DISABLE_DMABUF_RENDERER=1 \
     LIBGL_ALWAYS_SOFTWARE=1 \
+    NOTE_TODAY="$E2E_TODAY" \
     NOTE_VAULT="$E2E_DIR/vault" "$E2E_BIN" >"$E2E_DIR/app.log" 2>&1 &
     E2E_APP=$!
     e2e_await e2e_window \
@@ -111,15 +130,37 @@ e2e_type() {
     xdotool type --delay 40 "$1"
 }
 
+# Screenshots are for a person or a persona to look at, never asserted
+# on (adr/2026-08-headless-x11-e2e.md) — and for pacing: `import`'s round
+# trip through the compositor is real wall-clock work that only returns
+# once the window has something to hand back.
 e2e_shot() {
     import -window root "$1"
 }
 
+# `e2e_key`/`e2e_type` return the instant xdotool's XTest calls do, not
+# once WebKitGTK has drained the event, and every overlay, sheet and
+# screen switch grabs focus through an async onmounted
+# (adr/2026-09-overlay-keys-relay-before-focus-lands.md names the
+# overlays' half, adr/2026-09-sheet-and-screen-join-the-focus-effect.md
+# the panes'). A keystroke paced behind one screenshot round trip lands
+# on a window that has had a compositor frame to take focus — the app's
+# own speed, never a guessed sleep. Pace the key that crosses a focus
+# grab; never retry a sentence typed into a note (a retry after a
+# slow-but-landed first send splices a duplicate into the buffer), and
+# let `e2e_note_holds`' read-only poll absorb the autosave debounce.
+e2e_key_paced() {
+    e2e_key "$@"
+    e2e_shot "$E2E_DIR/probe.png"
+}
+e2e_type_paced() {
+    e2e_type "$1"
+    e2e_shot "$E2E_DIR/probe.png"
+}
+
 # i3's "new_window none" leaves the single tiled window undecorated and
-# filling the screen from (0, 0) — the same assumption every screenshot-
-# pixel probe in this suite already makes (table-chords.test.sh,
-# notice-resolves.test.sh) — so a root-relative click lands at the same
-# coordinate a root screenshot would show it at.
+# filling the screen from (0, 0), so a root-relative click lands at the
+# same coordinate a root screenshot would show it at.
 e2e_click_at() {
     xdotool mousemove --sync "$1" "$2" click 1
 }
@@ -150,4 +191,19 @@ e2e_note_holds() {
     e2e_await grep -qF "$2" "$E2E_DIR/vault/$1" || e2e_fail \
         "$1 never held '$2'; it holds:
 $(cat "$E2E_DIR/vault/$1" 2>/dev/null)"
+}
+
+# The index is the second oracle: a note on disk with no row under its
+# own id is exactly what the app-indexes-its-own-writes and watcher
+# scenarios pin (adr/2026-09-the-app-indexes-its-own-writes.md). The
+# query must answer a lone `1` row. The file is checked before opening
+# it so polling never creates an empty db ahead of the app's own schema
+# write.
+e2e_index_query() {
+    test -f "$E2E_DIR/vault/.index/index.db" || return 1
+    sqlite3 "$E2E_DIR/vault/.index/index.db" "$1" 2>/dev/null | grep -q '^1$'
+}
+e2e_index_holds() {
+    e2e_await e2e_index_query "$1" \
+        || e2e_fail "vault/.index/index.db never answered 1 to: $1"
 }
