@@ -835,12 +835,16 @@ fn nbsp_folded(text: &str) -> String {
 /// comparison punctuate prose far more often than they nest, so they stay
 /// out of the set the surround keys carry; the guillemets keep the padding
 /// those keys already chose (adr/2026-08-autopairs-in-the-typing-path.md,
-/// adr/2026-08-surround-pair-set-and-padding.md).
-const PAIRS: [(&str, &str, &str, bool); 7] = [
+/// adr/2026-08-surround-pair-set-and-padding.md). `$` opens an equation
+/// and nothing else in a Typst note, so it pairs without the apostrophe
+/// guard: a dollar against a word is a formula being typed, never a quote
+/// (adr/2026-09-dollar-joins-the-autopairs.md).
+const PAIRS: [(&str, &str, &str, bool); 8] = [
     ("(", "(", ")", false),
     ("[", "[", "]", false),
     ("{", "{", "}", false),
     ("«", "« ", " »", false),
+    ("$", "$", "$", false),
     ("'", "'", "'", true),
     ("\"", "\"", "\"", true),
     ("`", "`", "`", true),
@@ -1577,6 +1581,7 @@ mod tests {
             ("{", "}", "{}"),
             ("«", "»", "«  »"),
             ("\"", "\"", "\"\""),
+            ("$", "$", "$$"),
         ] {
             let (_dir, mut editor) = open_note("");
             editor.insert_typed(open);
@@ -1620,6 +1625,26 @@ mod tests {
         editor.insert_typed("\"");
         let (_, text) = editor.note().expect("still open");
         assert_eq!(text, "mot\"", "and the word behind too");
+    }
+
+    #[test]
+    fn a_dollar_pairs_against_a_word_and_a_formula_types_straight_through() {
+        // `$` opens an equation and nothing else in Typst, so it carries no
+        // apostrophe doubt: `x$` is a formula being typed, never a quote
+        let (_dir, mut editor) = open_note("x");
+        editor.insert_typed("$");
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "x$$", "the dollar paired beside a word");
+        assert_eq!(editor.caret_in_block(), (2, 2));
+
+        // and the equation is typed through the pair: open, body, step over
+        let (_dir, mut editor) = open_note("");
+        for cluster in ["$", "a", " ", "+", " ", "b", "$"] {
+            editor.insert_typed(cluster);
+        }
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "$a + b$", "the closing dollar stepped over its twin");
+        assert_eq!(editor.caret_in_block(), (7, 7));
     }
 
     #[test]
