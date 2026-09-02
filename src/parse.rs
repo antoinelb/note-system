@@ -130,6 +130,7 @@ fn extract_meta(call: ast::FuncCall) -> Meta {
                 "created" => extract_created(&mut meta, named),
                 "tags" => extract_tags(&mut meta, named),
                 "origin" => extract_origin(&mut meta, named),
+                "due" => extract_due(&mut meta, named),
                 unknown => meta.anomalies.push(MetaAnomaly::MalformedField(
                     unknown.to_string(),
                     named.expr().to_untyped().full_text().to_string(),
@@ -221,6 +222,22 @@ fn extract_origin(meta: &mut Meta, named: ast::Named) {
     }
 }
 
+/// `due` reads like `created`: a string that parses as a date, an
+/// unparseable one its own anomaly (the field is there, the day is not),
+/// a non-string a malformed field.
+fn extract_due(meta: &mut Meta, named: ast::Named) {
+    match get_string_value(named.expr()) {
+        Some(raw) => match raw.parse::<Date>() {
+            Ok(date) => meta.due = Some(date),
+            Err(_) => meta.anomalies.push(MetaAnomaly::InvalidDue(raw)),
+        },
+        None => meta.anomalies.push(MetaAnomaly::MalformedField(
+            "due".to_string(),
+            named.expr().to_untyped().full_text().to_string(),
+        )),
+    }
+}
+
 pub(crate) fn extract_link_target(call: ast::FuncCall) -> Option<NoteId> {
     for arg in call.args().items() {
         if let ast::Arg::Pos(expr) = arg {
@@ -282,6 +299,34 @@ mod tests {
         let meta = present(parse_note("#meta(type: 3)"));
         assert_eq!(meta.note_type, None);
         assert_eq!(meta.anomalies, vec![malformed("type", "3")]);
+    }
+
+    #[test]
+    fn due_reads_a_date_and_refuses_the_rest_field_by_field() {
+        let meta = present(parse_note(r#"#meta(due: "2026-09-10")"#));
+        assert_eq!(meta.due, Some(jiff::civil::date(2026, 9, 10)));
+        assert!(meta.anomalies.is_empty());
+
+        let meta = present(parse_note(r#"#meta(id: "x", due: "vendredi")"#));
+        assert_eq!(meta.due, None);
+        assert_eq!(
+            meta.id,
+            Some(NoteId("x".to_string())),
+            "the rest survives"
+        );
+        assert_eq!(
+            meta.anomalies,
+            vec![MetaAnomaly::InvalidDue("vendredi".to_string())]
+        );
+
+        let meta = present(parse_note("#meta(due: 20260910)"));
+        assert_eq!(
+            meta.anomalies,
+            vec![MetaAnomaly::MalformedField(
+                "due".to_string(),
+                "20260910".to_string()
+            )]
+        );
     }
 
     #[test]

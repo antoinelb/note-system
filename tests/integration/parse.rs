@@ -18,6 +18,7 @@ fn happy_path_extracts_full_meta_and_links_in_source_order() {
             created: Some(date(2026, 7, 21)),
             tags: vec!["method".to_string()],
             origin: None,
+            due: None,
             anomalies: vec![],
         })
     );

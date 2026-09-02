@@ -43,6 +43,7 @@
   --type-idea: #6a76a8;
   --type-personal: #896ea6;
   --type-project: #9a7d95;
+  --type-course: #6f9a7a;
   --bar-untyped: #4a4566;
   --bar-generated: #6f6a8c;
   --star-bright: #3d3660;
@@ -106,6 +107,7 @@
   --type-idea: #4d5ea3;
   --type-personal: #76549c;
   --type-project: #97598c;
+  --type-course: #3f8f5c;
   --bar-untyped: #a5a1b8;
   --bar-generated: #8b87a0;
   --star-bright: #c8c4de;
@@ -1140,6 +1142,10 @@ body {
 
 .card.bar-project {
   border-left-color: var(--type-project);
+}
+
+.card.bar-course {
+  border-left-color: var(--type-course);
 }
 
 /* filtered out: dim, never gone — spatial memory is the point

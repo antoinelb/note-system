@@ -420,10 +420,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let feed = feed.clone();
         move || {
             if !feed.inline {
-                (feed.submit)(compute::rescan(&root, false));
+                (feed.submit)(compute::rescan(&root, false, today));
                 return;
             }
-            match compute::refresh(&root, &[watch::VaultChange::Rescan]) {
+            match compute::refresh(&root, &[watch::VaultChange::Rescan], today)
+            {
                 Ok((time_notes, open, table, links)) => {
                     notes.set(time_notes);
                     loops.set(open);
@@ -640,6 +641,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         root: root.clone(),
                         batch,
                         escalated: false,
+                        today,
                     });
                 }
             });
@@ -727,7 +729,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 if !escalated {
                                     bodies.borrow_mut().clear();
                                     (feed.submit)(compute::rescan(
-                                        &root, true,
+                                        &root, true, today,
                                     ));
                                 }
                             }
@@ -1042,7 +1044,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // waiting on the watcher (adr/2026-09-the-app-indexes-its-own-writes.md)
             if let Some(relative) = relative {
                 bodies.borrow_mut().invalidate(&relative);
-                (feed.submit)(compute::removed(&root, relative));
+                (feed.submit)(compute::removed(&root, relative, today));
             }
             sheet.set(None);
             positions.write().remove(&own);
@@ -1112,6 +1114,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         &root,
                         NoteCategory::Permanent,
                         relative,
+                        today,
                     ));
                     show_sheet.call((id, Editor::open(path)));
                 }
@@ -1317,7 +1320,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         let category = dir_category(&relative);
                         bodies.borrow_mut().invalidate(&relative);
                         (feed.submit)(compute::touched(
-                            &root, category, relative,
+                            &root, category, relative, today,
                         ));
                     }
                     Err(error) => {
@@ -1431,6 +1434,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         &root,
                         NoteCategory::Time,
                         relative,
+                        today,
                     ));
                     notes.with_mut(|list| list.push((id, scale)));
                     true
@@ -1731,6 +1735,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             &root,
                             NoteCategory::Capture,
                             relative,
+                            today,
                         ));
                         Notice::captured(&crate::domain::stem_of(&path))
                     }
@@ -5652,6 +5657,11 @@ mod tests {
     /// The tests' clock: a Thursday inside the fixture week, so the initial
     /// selection is `time/2026-07-23.typ` and the grid opens on july 2026.
     const TODAY: &str = "2026-07-23";
+
+    /// The same clock as a date, for the survey legs the tests call by hand.
+    fn test_today() -> Date {
+        TODAY.parse().expect("the test clock is a valid date")
+    }
 
     /// Initial click-listener layout, established empirically (see the
     /// mounted-app doc): registration runs the chrome's two icons first,
@@ -11870,9 +11880,9 @@ mod tests {
     fn a_sabotaged_notes_table_fails_the_survey_and_the_count() {
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE notes");
-        let error = survey(&index).unwrap_err();
+        let error = survey(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
-        let error = open_loops(&index).unwrap_err();
+        let error = open_loops(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -11882,20 +11892,36 @@ mod tests {
         // reaches the links table and fails
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE links");
-        let error = survey(&index).unwrap_err();
+        let error = survey(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
     #[test]
-    fn a_vanished_anomalies_table_fails_only_the_loops_last_leg() {
-        // the one sabotage the three sibling loops queries survive: only
+    fn a_vanished_anomalies_table_fails_only_the_loops_fourth_leg() {
+        // the one sabotage the three earlier loops queries survive: only
         // the anomalies read fails (adr/2026-08-anomalies-join-the-loops.md)
         let vault = temp_vault();
         let index = sabotaged_index(vault.path(), "DROP TABLE anomalies");
         assert!(index.typeless_notes().is_ok());
         assert!(index.dangling_links().is_ok());
         assert!(index.unsummarized_captures().is_ok());
-        let error = open_loops(&index).unwrap_err();
+        assert!(index.due_notes(test_today()).is_ok());
+        let error = open_loops(&index, test_today()).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_dropped_due_column_fails_only_the_loops_last_leg() {
+        // the one sabotage every other loops query survives: the due read
+        // is the fifth and last leg (adr/2026-09-course-type-and-due-loops.md)
+        let vault = temp_vault();
+        let index =
+            sabotaged_index(vault.path(), "ALTER TABLE notes DROP COLUMN due");
+        assert!(index.typeless_notes().is_ok());
+        assert!(index.dangling_links().is_ok());
+        assert!(index.unsummarized_captures().is_ok());
+        assert!(index.anomalies().is_ok());
+        let error = open_loops(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -11909,8 +11935,8 @@ mod tests {
             "ALTER TABLE notes DROP COLUMN created",
         );
         assert!(index.time_notes().is_ok());
-        assert!(open_loops(&index).is_ok());
-        let error = survey(&index).unwrap_err();
+        assert!(open_loops(&index, test_today()).is_ok());
+        let error = survey(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -11928,9 +11954,9 @@ mod tests {
              VALUES ('time/blob.typ', 'alpha');",
         );
         assert!(index.time_notes().is_ok());
-        assert!(open_loops(&index).is_ok());
+        assert!(open_loops(&index, test_today()).is_ok());
         assert!(index.table_notes().is_ok());
-        let error = survey(&index).unwrap_err();
+        let error = survey(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -11964,7 +11990,7 @@ mod tests {
             vault.path(),
             "ALTER TABLE notes DROP COLUMN summarized",
         );
-        let error = open_loops(&index).unwrap_err();
+        let error = open_loops(&index, test_today()).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
 
         click(&mut dom, clicks[RAIL_DAY_23]);
@@ -12851,7 +12877,11 @@ mod tests {
         assert!(dioxus_ssr::render(&dom).contains("liveness-degraded"));
 
         // a later good survey resolves the degradation without a gesture
-        held.land(compute::run(compute::rescan(vault.path(), false)));
+        held.land(compute::run(compute::rescan(
+            vault.path(),
+            false,
+            test_today(),
+        )));
         block_on(settle(&mut dom));
         let healed = dioxus_ssr::render(&dom);
         assert!(healed.contains("liveness-watching"), "{healed}");
@@ -14761,8 +14791,8 @@ mod tests {
         assert!(html.contains(">filter<"), "the head names it: {html}");
         assert_eq!(
             picker_ids(&dom).len(),
-            9,
-            "one tag, then the eight types: {html}"
+            10,
+            "one tag, then the nine types: {html}"
         );
         // arrows move the highlight; an unhandled key is absorbed; a
         // second Ctrl+F over the open overlay is inert
@@ -14776,7 +14806,7 @@ mod tests {
         );
         press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
         press(&mut dom, filter_keys, ctrl_f(), Modifiers::CONTROL);
-        assert_eq!(picker_ids(&dom).len(), 9, "still the one overlay");
+        assert_eq!(picker_ids(&dom).len(), 10, "still the one overlay");
 
         // a query no entry matches: enter guesses nothing, the overlay holds
         type_into(&mut dom, input, "xyzzy");
@@ -15657,7 +15687,7 @@ mod tests {
         assert!(html.contains(">new note<"), "still step one: {html}");
         assert_eq!(
             picker_ids(&dom),
-            vec!["source", "concept", "claim", "project"]
+            vec!["source", "concept", "claim", "project", "course"]
         );
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before, "the note behind never moved");
@@ -15767,7 +15797,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_n_lists_the_eight_types_and_typing_narrows() {
+    fn ctrl_n_lists_the_nine_types_and_typing_narrows() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -15784,7 +15814,8 @@ mod tests {
                 "claim",
                 "idea",
                 "personal",
-                "project"
+                "project",
+                "course"
             ]
         );
 
@@ -15794,7 +15825,7 @@ mod tests {
         press(&mut dom, keys[LOGS_KEYS], ctrl_n(), Modifiers::CONTROL);
         press(&mut dom, keys[LOGS_KEYS], ctrl_p(), Modifiers::CONTROL);
         press(&mut dom, creator_keys, ctrl_n(), Modifiers::CONTROL);
-        assert_eq!(picker_ids(&dom).len(), 8, "still the one overlay");
+        assert_eq!(picker_ids(&dom).len(), 9, "still the one overlay");
         assert!(!dioxus_ssr::render(&dom).contains("palette-label"));
 
         // arrows move the highlight and hold at both ends
@@ -16061,7 +16092,7 @@ mod tests {
         press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(">new note<"), "step 1 again: {html}");
-        assert_eq!(picker_ids(&dom).len(), 8, "the full list is back");
+        assert_eq!(picker_ids(&dom).len(), 9, "the full list is back");
 
         // second escape: closed
         press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
@@ -16140,7 +16171,7 @@ mod tests {
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(">new note<"), "the creator opened: {html}");
-        assert_eq!(picker_ids(&dom).len(), 8, "{html}");
+        assert_eq!(picker_ids(&dom).len(), 9, "{html}");
     }
 
     #[test]

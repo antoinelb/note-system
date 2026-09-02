@@ -1643,7 +1643,10 @@ mod tests {
             editor.insert_typed(cluster);
         }
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "$a + b$", "the closing dollar stepped over its twin");
+        assert_eq!(
+            text, "$a + b$",
+            "the closing dollar stepped over its twin"
+        );
         assert_eq!(editor.caret_in_block(), (7, 7));
     }
 

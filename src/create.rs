@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use crate::domain::{NoteCategory, NoteType, stem_of};
 use crate::template::{self, TemplateError};
 
-/// The eight permanent types, in the order the picker lists them — the
+/// The nine permanent types, in the order the picker lists them — the
 /// wireframe palette's order plus the two turn-1 additions, the same order
-/// the type bars are documented in.
-pub const TYPES: [NoteType; 8] = [
+/// the type bars are documented in, and `course` last
+/// (adr/2026-09-course-type-and-due-loops.md).
+pub const TYPES: [NoteType; 9] = [
     NoteType::Person,
     NoteType::Organisation,
     NoteType::Source,
@@ -20,6 +21,7 @@ pub const TYPES: [NoteType; 8] = [
     NoteType::Idea,
     NoteType::Personal,
     NoteType::Project,
+    NoteType::Course,
 ];
 
 /// The types a query leaves — the palette's contains rule, over a closed
@@ -74,7 +76,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_eight_types_stand_in_picker_order() {
+    fn the_nine_types_stand_in_picker_order() {
         let names: Vec<&str> = TYPES.iter().map(NoteType::as_name).collect();
         assert_eq!(
             names,
@@ -86,7 +88,8 @@ mod tests {
                 "claim",
                 "idea",
                 "personal",
-                "project"
+                "project",
+                "course"
             ]
         );
     }

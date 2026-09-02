@@ -53,11 +53,22 @@
 // (adr/2026-08-one-font-size-for-source-and-render.md).
 #let base-size = sys.inputs.at("size", default: 13.5)
 
-#let meta(id: none, type: none, created: none, tags: (), origin: none) = {
+// `due` is the day a note's work is owed; the app's open-loops list reads
+// it, and the meta line says it so the page agrees with the list
+// (adr/2026-09-course-type-and-due-loops.md).
+#let meta(
+  id: none,
+  type: none,
+  created: none,
+  tags: (),
+  origin: none,
+  due: none,
+) = {
   let parts = ()
   if id != none { parts.push([#id]) }
   if type != none { parts.push([#type]) }
   if origin != none { parts.push([from #origin]) }
+  if due != none { parts.push([due #due]) }
   if tags.len() > 0 { parts.push(tags.map(t => "#" + t).join(" ")) }
   if parts.len() > 0 {
     block(

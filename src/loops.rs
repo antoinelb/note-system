@@ -4,8 +4,10 @@
 
 use std::path::PathBuf;
 
+use jiff::civil::Date;
+
 use crate::domain::stem_of;
-use crate::index::DanglingLink;
+use crate::index::{DanglingLink, DueNote};
 use crate::logs::STILL_OPEN;
 
 /// One line in the open-loops overlay: what it says, and the path of the
@@ -23,20 +25,25 @@ pub struct LoopLine {
 
 /// Every open loop, one line each, in query order: typeless notes, then
 /// dangling links, then captures still owing their summary, then the
-/// notes the index could not read cleanly
+/// notes the index could not read cleanly, then the notes whose `due` day
+/// has come or gone
 /// (`adr/2026-08-loops-list-overlay.md`,
-/// `adr/2026-08-anomalies-join-the-loops.md`). The count in the chrome is
+/// `adr/2026-08-anomalies-join-the-loops.md`,
+/// `adr/2026-09-course-type-and-due-loops.md`). The count in the chrome is
 /// this list's length, so the ember and the list cannot disagree.
 ///
 /// Notes are named by their stem, which is their id — the label the rest of
 /// the app shows them under. The tag after the `·` says which loop it is,
-/// and that is the whole vocabulary: no ages, no grouping, no actions
-/// (`adr/2026-07-debt-counter-then-list.md`).
+/// no grouping, no actions (`adr/2026-07-debt-counter-then-list.md`); the
+/// due families are the one place a date is spoken, because the date is
+/// the debt.
 pub fn lines(
     typeless: &[PathBuf],
     dangling: &[DanglingLink],
     unsummarized: &[PathBuf],
     anomalous: &[(PathBuf, String)],
+    due: &[DueNote],
+    today: Date,
 ) -> Vec<LoopLine> {
     let typeless = typeless.iter().map(|path| {
         let id = stem_of(path);
@@ -66,10 +73,23 @@ pub fn lines(
             path: path.clone(),
         }
     });
+    let due = due.iter().map(|note| {
+        let id = stem_of(&note.path);
+        let text = if note.due < today {
+            format!("{id} · overdue since {}", note.due)
+        } else {
+            format!("{id} · due {}", note.due)
+        };
+        LoopLine {
+            text,
+            path: note.path.clone(),
+        }
+    });
     typeless
         .chain(dangling)
         .chain(unsummarized)
         .chain(anomalous)
+        .chain(due)
         .collect()
 }
 
@@ -78,6 +98,8 @@ pub fn lines(
 mod tests {
     use super::*;
     use crate::domain::NoteId;
+
+    const TODAY: Date = jiff::civil::date(2026, 7, 24);
 
     fn dangling(source: &str, target: &str) -> DanglingLink {
         DanglingLink {
@@ -110,6 +132,17 @@ mod tests {
                         "truncated".to_string(),
                     ),
                 ],
+                &[
+                    DueNote {
+                        path: PathBuf::from("permanent/devoir-1.typ"),
+                        due: jiff::civil::date(2026, 7, 20),
+                    },
+                    DueNote {
+                        path: PathBuf::from("permanent/examen.typ"),
+                        due: TODAY,
+                    },
+                ],
+                TODAY,
             ),
             vec![
                 line("mystere · typeless", "permanent/mystere.typ"),
@@ -120,6 +153,11 @@ mod tests {
                 ),
                 line("bancal · malformed meta", "permanent/bancal.typ"),
                 line("fleuve · truncated", "permanent/fleuve.typ"),
+                line(
+                    "devoir-1 · overdue since 2026-07-20",
+                    "permanent/devoir-1.typ"
+                ),
+                line("examen · due 2026-07-24", "permanent/examen.typ"),
             ]
         );
     }
@@ -131,6 +169,8 @@ mod tests {
             &[dangling("time/2026-07-22.typ", "fantome")],
             &[],
             &[],
+            &[],
+            TODAY,
         );
         assert_eq!(
             list,
@@ -144,7 +184,10 @@ mod tests {
 
     #[test]
     fn a_vault_with_nothing_open_lists_nothing() {
-        assert_eq!(lines(&[], &[], &[], &[]), Vec::<LoopLine>::new());
+        assert_eq!(
+            lines(&[], &[], &[], &[], &[], TODAY),
+            Vec::<LoopLine>::new()
+        );
     }
 
     #[test]
@@ -154,7 +197,12 @@ mod tests {
             &[dangling("c.typ", "x"), dangling("c.typ", "y")],
             &[PathBuf::from("d.typ")],
             &[(PathBuf::from("e.typ"), "malformed meta".to_string())],
+            &[DueNote {
+                path: PathBuf::from("f.typ"),
+                due: TODAY,
+            }],
+            TODAY,
         );
-        assert_eq!(list.len(), 6, "the count is the list: {list:?}");
+        assert_eq!(list.len(), 7, "the count is the list: {list:?}");
     }
 }

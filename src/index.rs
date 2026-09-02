@@ -8,9 +8,10 @@ use crate::domain::{
     Meta, MetaAnomaly, MetaStatus, Note, NoteCategory, NoteId, NoteType,
 };
 use crate::parse;
+use jiff::{ToSpan, civil::Date};
 use rusqlite::{Connection, Row, Transaction};
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 const FOREIGN_KEYS: &str = "PRAGMA foreign_keys = on;";
 const SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -19,6 +20,7 @@ CREATE TABLE notes (
     id       TEXT,
     type     TEXT,
     created  TEXT,
+    due      TEXT,
     origin   TEXT,
     title    TEXT,
     summarized INTEGER NOT NULL DEFAULT 0
@@ -61,6 +63,14 @@ impl From<rusqlite::Error> for IndexError {
 pub struct DanglingLink {
     pub source: PathBuf,
     pub target: NoteId,
+}
+
+/// A note whose `due` day has come within the week or gone by — the loops
+/// list names it overdue or due (adr/2026-09-course-type-and-due-loops.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueNote {
+    pub path: PathBuf,
+    pub due: Date,
 }
 
 /// A note linking *to* the one being read. The source's own id is carried
@@ -459,6 +469,32 @@ impl Index {
         )
     }
 
+    /// Every note due on or before `today` plus seven days, soonest first:
+    /// the overdue ones and the ones due this week, which the loops list
+    /// tells apart against `today`. `due` is stored as `YYYY-MM-DD` text,
+    /// so the string comparison is the date comparison. A note with no
+    /// `due` owes nothing here.
+    pub fn due_notes(&self, today: Date) -> Result<Vec<DueNote>, IndexError> {
+        // the calendar's far edge is the only way a week from today fails;
+        // there the horizon is today itself and nothing future is listed
+        let horizon = today.checked_add(7.days()).unwrap_or(today);
+        query_rows(
+            &self.connection,
+            concat!(
+                "SELECT path, due FROM notes ",
+                "WHERE due IS NOT NULL AND due <= ?1 ",
+                "ORDER BY due, path"
+            ),
+            [horizon],
+            |row| {
+                Ok(DueNote {
+                    path: PathBuf::from(row.get::<_, String>(0)?),
+                    due: row.get::<_, Date>(1)?,
+                })
+            },
+        )
+    }
+
     /// Every note carrying an anomaly, one row per (note, family) — the
     /// malformed `#meta` the parser recorded, the truncations the walk
     /// hit — read back for the loops list
@@ -589,8 +625,9 @@ fn insert_note(
     transaction.execute(
         concat!(
             "INSERT INTO notes ",
-            "(path, category, id, type, created, origin, title, summarized)",
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            "(path, category, id, type, created, due, origin, title, ",
+            "summarized) ",
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         ),
         rusqlite::params![
             note.path.to_string_lossy(),
@@ -598,6 +635,7 @@ fn insert_note(
             meta.id.as_ref().map(|id| id.0.as_str()),
             meta.note_type.as_ref().map(NoteType::as_name),
             meta.created,
+            meta.due,
             meta.origin.as_deref(),
             note.title.as_deref(),
             note.summarized,
@@ -626,6 +664,9 @@ fn insert_note(
             MetaAnomaly::DuplicateMeta => ("duplicate-meta", None, None),
             MetaAnomaly::InvalidCreated(raw) => {
                 ("invalid-created", None, Some(raw.as_str()))
+            }
+            MetaAnomaly::InvalidDue(raw) => {
+                ("invalid-due", None, Some(raw.as_str()))
             }
             MetaAnomaly::MalformedField(field, raw) => {
                 ("malformed-field", Some(field.as_str()), Some(raw.as_str()))
@@ -968,6 +1009,7 @@ mod tests {
             index.tag_names().expect("query"),
             vec![
                 "book".to_string(),
+                "math".to_string(),
                 "method".to_string(),
                 "rendering".to_string(),
                 "rust".to_string()
@@ -1043,6 +1085,7 @@ mod tests {
                 pair("atomic-notes", "evergreen-notes"),
                 pair("atomic-notes", "zettelkasten"),
                 pair("capture-idea-canvas", "note-system"),
+                pair("devoir-1", "analyse-reelle"),
                 pair("digest-smart-notes", "smart-notes"),
                 pair("link-traps", "zettelkasten"),
                 pair("luhmann", "zettelkasten"),
@@ -1127,15 +1170,17 @@ mod tests {
         index.rebuild(&notes).expect("rebuild");
 
         let rows = index.table_notes().expect("query");
-        // the fixture's 14 non-time notes minus missing-meta.typ, whose
+        // the fixture's 16 non-time notes minus missing-meta.typ, whose
         // absent id keeps it off the table and in the loops list
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
+                "analyse-reelle",
                 "atomic-notes",
                 "capture-articles-zettel",
                 "capture-idea-canvas",
+                "devoir-1",
                 "digest-smart-notes",
                 "duplicate-meta",
                 "link-traps",
@@ -1434,6 +1479,75 @@ mod tests {
     }
 
     #[test]
+    fn due_notes_lists_the_week_ahead_and_everything_overdue_soonest_first() {
+        let (_dir, mut index) = temp_index();
+        let dated = |id: &str, due: Option<&str>| Note {
+            path: PathBuf::from(format!("permanent/{id}.typ")),
+            category: NoteCategory::Permanent,
+            meta: MetaStatus::Present(Meta {
+                id: Some(NoteId(id.to_string())),
+                note_type: Some(NoteType::Project),
+                due: due.map(|day| day.parse().expect("a test date")),
+                ..Meta::default()
+            }),
+            title: None,
+            links: vec![],
+            summarized: true,
+            truncated: false,
+        };
+        index
+            .rebuild(&[
+                dated("late", Some("2026-07-20")),
+                dated("today", Some("2026-07-24")),
+                dated("week", Some("2026-07-31")),
+                dated("later", Some("2026-08-01")),
+                dated("free", None),
+            ])
+            .expect("rebuild");
+        let today = jiff::civil::date(2026, 7, 24);
+        let listed: Vec<(String, String)> = index
+            .due_notes(today)
+            .expect("the due read")
+            .into_iter()
+            .map(|note| {
+                (crate::domain::stem_of(&note.path), note.due.to_string())
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("late".to_string(), "2026-07-20".to_string()),
+                ("today".to_string(), "2026-07-24".to_string()),
+                ("week".to_string(), "2026-07-31".to_string()),
+            ],
+            "a week out is listed, a day past it and the undated are not"
+        );
+    }
+
+    #[test]
+    fn a_due_row_that_will_not_decode_fails_the_due_read() {
+        // either column: a blob where the path should be, or text that
+        // sorts before the horizon but is no date (a blob due would sort
+        // after every text and never be selected at all). The row is
+        // reported, not skipped
+        for plant in [
+            "INSERT INTO notes (path, category, due) \
+             VALUES (x'00', 'permanent', '2026-07-01');",
+            "INSERT INTO notes (path, category, due) \
+             VALUES ('permanent/bad-due.typ', 'permanent', '0000-99-99');",
+        ] {
+            let (dir, index) = temp_index();
+            let raw = Connection::open(dir.path().join("index.sqlite"))
+                .expect("raw open");
+            raw.execute_batch(plant).expect("plant the undecodable row");
+            let error = index
+                .due_notes(jiff::civil::date(2026, 7, 24))
+                .expect_err("the row does not decode");
+            assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+        }
+    }
+
+    #[test]
     fn anomalies_read_back_one_row_per_note_and_family() {
         let (_dir, mut index) = temp_index();
         index.rebuild(&[rich_note()]).expect("seed the index");
@@ -1633,9 +1747,11 @@ mod tests {
                 created: None,
                 tags: vec!["method".to_string()],
                 origin: None,
+                due: None,
                 anomalies: vec![
                     MetaAnomaly::DuplicateMeta,
                     MetaAnomaly::InvalidCreated("hier".to_string()),
+                    MetaAnomaly::InvalidDue("bientôt".to_string()),
                     MetaAnomaly::MalformedField(
                         "tags".to_string(),
                         "(\"oops\"".to_string(),

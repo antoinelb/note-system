@@ -19,6 +19,7 @@ use crate::index::{Index, IndexError, TableNote};
 use crate::loops::{self, LoopLine};
 use crate::render::{BodyJob, FragmentJob, RenderTheme};
 use crate::watch::{self, VaultChange};
+use jiff::civil::Date;
 
 /// What the shell derives from a built index: the rail's time notes, the
 /// open loops, the table's notes and the link edges — the survey every
@@ -40,6 +41,10 @@ pub enum Job {
         root: PathBuf,
         batch: Vec<VaultChange>,
         escalated: bool,
+        /// The day the due loops are judged against — the shell's one
+        /// injected clock, carried in rather than read again here
+        /// (adr/2026-07-today-injected-root-context.md).
+        today: Date,
     },
 }
 
@@ -82,8 +87,9 @@ pub fn run(job: Job) -> Outcome {
             root,
             batch,
             escalated,
+            today,
         } => Outcome::Survey {
-            result: refresh(&root, &batch),
+            result: refresh(&root, &batch, today),
             escalated,
         },
     }
@@ -167,15 +173,24 @@ fn lane(
 /// screen catches up with the index — startup is just this with a
 /// `Rescan` batch. Every step reports the same way, so the caller has one
 /// message to show rather than three.
-pub fn refresh(root: &Path, batch: &[VaultChange]) -> Result<Survey, String> {
-    absorb(root, batch).map_err(|err| format!("indexing the vault: {err:?}"))
+pub fn refresh(
+    root: &Path,
+    batch: &[VaultChange],
+    today: Date,
+) -> Result<Survey, String> {
+    absorb(root, batch, today)
+        .map_err(|err| format!("indexing the vault: {err:?}"))
 }
 
 /// Open, apply, re-read. The `.index/` directory is ensured here because
 /// the first survey of a fresh vault is what creates it — but only inside
 /// a vault that exists: a mistyped root must fail the survey, not be
 /// silently created and surveyed as empty.
-fn absorb(root: &Path, batch: &[VaultChange]) -> Result<Survey, IndexError> {
+fn absorb(
+    root: &Path,
+    batch: &[VaultChange],
+    today: Date,
+) -> Result<Survey, IndexError> {
     if !root.is_dir() {
         return Err(IndexError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -186,16 +201,16 @@ fn absorb(root: &Path, batch: &[VaultChange]) -> Result<Survey, IndexError> {
     std::fs::create_dir_all(&dir)?;
     let mut index = Index::open(&dir.join("index.db"))?;
     watch::apply(&mut index, root, batch)?;
-    survey(&index)
+    survey(&index, today)
 }
 
 /// What the shell needs from a built index. Separate from `absorb` so its
 /// error arms stay reachable — after a successful rebuild they only fire
 /// on a sabotaged database.
-pub fn survey(index: &Index) -> Result<Survey, IndexError> {
+pub fn survey(index: &Index, today: Date) -> Result<Survey, IndexError> {
     Ok((
         index.time_notes()?,
-        open_loops(index)?,
+        open_loops(index, today)?,
         index.table_notes()?,
         index.link_edges()?,
     ))
@@ -204,23 +219,29 @@ pub fn survey(index: &Index) -> Result<Survey, IndexError> {
 /// The open loops themselves, not a count of them: the chrome's ember
 /// shows this list's length and clicking it shows the list, so the two
 /// cannot drift apart (adr/2026-08-loops-list-overlay.md).
-pub fn open_loops(index: &Index) -> Result<Vec<LoopLine>, IndexError> {
+pub fn open_loops(
+    index: &Index,
+    today: Date,
+) -> Result<Vec<LoopLine>, IndexError> {
     Ok(loops::lines(
         &index.typeless_notes()?,
         &index.dangling_links()?,
         &index.unsummarized_captures()?,
         &index.anomalies()?,
+        &index.due_notes(today)?,
+        today,
     ))
 }
 
 /// A rescan is what a vault entering through this seam always starts
 /// with: the batch startup submits, and the batch a failed one escalates
 /// to.
-pub fn rescan(root: &Path, escalated: bool) -> Job {
+pub fn rescan(root: &Path, escalated: bool, today: Date) -> Job {
     Job::Survey {
         root: root.to_path_buf(),
         batch: vec![VaultChange::Rescan],
         escalated,
+        today,
     }
 }
 
@@ -229,21 +250,28 @@ pub fn rescan(root: &Path, escalated: bool) -> Job {
 /// file, instead of waiting on the watcher to notice its own effect
 /// (adr/2026-09-the-app-indexes-its-own-writes.md). `path` is
 /// vault-relative, the same shape `watch::note_path` yields.
-pub fn touched(root: &Path, category: NoteCategory, path: PathBuf) -> Job {
+pub fn touched(
+    root: &Path,
+    category: NoteCategory,
+    path: PathBuf,
+    today: Date,
+) -> Job {
     Job::Survey {
         root: root.to_path_buf(),
         batch: vec![VaultChange::Touched { category, path }],
         escalated: false,
+        today,
     }
 }
 
 /// A one-note `Removed` survey: the delete seam's counterpart to
 /// `touched`, submitted the instant the app removes a file itself.
-pub fn removed(root: &Path, path: PathBuf) -> Job {
+pub fn removed(root: &Path, path: PathBuf, today: Date) -> Job {
     Job::Survey {
         root: root.to_path_buf(),
         batch: vec![VaultChange::Removed(path)],
         escalated: false,
+        today,
     }
 }
 
@@ -252,6 +280,8 @@ pub fn removed(root: &Path, path: PathBuf) -> Job {
 mod tests {
     use super::*;
     use crate::render::DEFAULT_SIZE;
+
+    const TODAY: Date = jiff::civil::date(2026, 7, 24);
 
     fn fixture_vault() -> PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -264,7 +294,7 @@ mod tests {
         seed_vault(vault.path());
         let feed = inline();
         assert!(feed.inline);
-        (feed.submit)(rescan(vault.path(), false));
+        (feed.submit)(rescan(vault.path(), false, TODAY));
         let outcome = feed
             .outcomes
             .lock()
@@ -298,7 +328,7 @@ mod tests {
 
         (feed.submit)(fragment_job(&fixture_vault()));
         (feed.submit)(body_job(&fixture_vault()));
-        (feed.submit)(rescan(vault.path(), true));
+        (feed.submit)(rescan(vault.path(), true, TODAY));
 
         let mut kinds = (false, false, false);
         for _ in 0..3 {
@@ -340,7 +370,7 @@ mod tests {
         let (outcomes, listener) = unbounded_channel();
         let (jobs, worker) = lane(outcomes);
         drop(listener);
-        jobs.send(rescan(Path::new("/nowhere"), false))
+        jobs.send(rescan(Path::new("/nowhere"), false, TODAY))
             .expect("the lane still queues");
         worker.join().expect("the unheard lane returns");
     }
@@ -352,7 +382,8 @@ mod tests {
     #[test]
     fn a_missing_vault_fails_at_the_scan() {
         let dir = tempfile::tempdir().expect("a temp dir is available");
-        let error = absorb(&dir.path().join("missing"), RESCAN).unwrap_err();
+        let error =
+            absorb(&dir.path().join("missing"), RESCAN, TODAY).unwrap_err();
         assert!(matches!(error, IndexError::Io(_)), "{error:?}");
     }
 
@@ -361,7 +392,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is available");
         std::fs::write(dir.path().join(".index"), "not a directory")
             .expect("the squatting file is written");
-        let error = absorb(dir.path(), RESCAN).unwrap_err();
+        let error = absorb(dir.path(), RESCAN, TODAY).unwrap_err();
         assert!(matches!(error, IndexError::Io(_)), "{error:?}");
     }
 
@@ -370,7 +401,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is available");
         std::fs::create_dir_all(dir.path().join(".index/index.db"))
             .expect("the squatting directory is created");
-        let error = absorb(dir.path(), RESCAN).unwrap_err();
+        let error = absorb(dir.path(), RESCAN, TODAY).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -378,7 +409,7 @@ mod tests {
     fn a_read_only_database_fails_at_the_rebuild() {
         let vault = tempfile::tempdir().expect("a temp dir is available");
         seed_vault(vault.path());
-        absorb(vault.path(), RESCAN).expect("the first build succeeds");
+        absorb(vault.path(), RESCAN, TODAY).expect("the first build succeeds");
         let db = vault.path().join(".index/index.db");
         let mut permissions = std::fs::metadata(&db)
             .expect("the database exists after the first build")
@@ -386,7 +417,7 @@ mod tests {
         permissions.set_readonly(true);
         std::fs::set_permissions(&db, permissions)
             .expect("the database is made read-only");
-        let error = absorb(vault.path(), RESCAN).unwrap_err();
+        let error = absorb(vault.path(), RESCAN, TODAY).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
     }
 
@@ -399,10 +430,12 @@ mod tests {
             root: job_root,
             batch,
             escalated,
+            today,
         } = touched(
             root,
             NoteCategory::Permanent,
             PathBuf::from("permanent/fresh.typ"),
+            TODAY,
         )
         else {
             panic!("touched builds a Survey job");
@@ -416,6 +449,7 @@ mod tests {
             }]
         );
         assert!(!escalated, "the app's own write is never an escalation");
+        assert_eq!(today, TODAY, "the clock rides along for the due loops");
     }
 
     #[test]
@@ -425,7 +459,8 @@ mod tests {
             root: job_root,
             batch,
             escalated,
-        } = removed(root, PathBuf::from("permanent/gone.typ"))
+            ..
+        } = removed(root, PathBuf::from("permanent/gone.typ"), TODAY)
         else {
             panic!("removed builds a Survey job");
         };
@@ -454,6 +489,7 @@ mod tests {
             vault.path(),
             NoteCategory::Permanent,
             PathBuf::from("permanent/fresh.typ"),
+            TODAY,
         ))
         else {
             panic!("the survey lands whole");
@@ -473,14 +509,18 @@ mod tests {
             "#meta(id: \"fresh\", type: \"concept\")\n",
         )
         .expect("write the note");
-        run(rescan(vault.path(), false));
+        run(rescan(vault.path(), false, TODAY));
         std::fs::remove_file(vault.path().join("permanent/fresh.typ"))
             .expect("the app's own delete");
 
         let Outcome::Survey {
             result: Ok((_, _, table, _)),
             escalated: false,
-        } = run(removed(vault.path(), PathBuf::from("permanent/fresh.typ")))
+        } = run(removed(
+            vault.path(),
+            PathBuf::from("permanent/fresh.typ"),
+            TODAY,
+        ))
         else {
             panic!("the survey lands whole");
         };
@@ -495,7 +535,7 @@ mod tests {
         let Outcome::Survey {
             result: Err(message),
             ..
-        } = run(rescan(Path::new("/nowhere"), false))
+        } = run(rescan(Path::new("/nowhere"), false, TODAY))
         else {
             panic!("a missing vault is an error, not a survey");
         };
