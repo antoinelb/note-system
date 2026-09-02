@@ -8,6 +8,19 @@ use crate::domain::stem_of;
 use crate::index::DanglingLink;
 use crate::logs::STILL_OPEN;
 
+/// One line in the open-loops overlay: what it says, and the path of the
+/// note that OWES the debt — for a dangling link that is the link's
+/// source, not its missing target. Clicking or Enter-ing the line opens
+/// this note directly by path, never through the index's id lookup: a
+/// note that owes debt because its own `#meta` is missing or broken has no
+/// id row `path_for_id` could ever resolve, and the path is the one thing
+/// every family already carries (`adr/2026-09-loop-lines-open-their-notes.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopLine {
+    pub text: String,
+    pub path: PathBuf,
+}
+
 /// Every open loop, one line each, in query order: typeless notes, then
 /// dangling links, then captures still owing their summary, then the
 /// notes the index could not read cleanly
@@ -24,19 +37,35 @@ pub fn lines(
     dangling: &[DanglingLink],
     unsummarized: &[PathBuf],
     anomalous: &[(PathBuf, String)],
-) -> Vec<String> {
-    let typeless = typeless
-        .iter()
-        .map(|path| format!("{} · typeless", stem_of(path)));
-    let dangling = dangling.iter().map(|link| {
-        format!("{} → {} · dangling", stem_of(&link.source), link.target.0)
+) -> Vec<LoopLine> {
+    let typeless = typeless.iter().map(|path| {
+        let id = stem_of(path);
+        LoopLine {
+            text: format!("{id} · typeless"),
+            path: path.clone(),
+        }
     });
-    let unsummarized = unsummarized
-        .iter()
-        .map(|path| format!("{} · {STILL_OPEN}", stem_of(path)));
-    let anomalous = anomalous
-        .iter()
-        .map(|(path, family)| format!("{} · {family}", stem_of(path)));
+    let dangling = dangling.iter().map(|link| {
+        let id = stem_of(&link.source);
+        LoopLine {
+            text: format!("{id} → {} · dangling", link.target.0),
+            path: link.source.clone(),
+        }
+    });
+    let unsummarized = unsummarized.iter().map(|path| {
+        let id = stem_of(path);
+        LoopLine {
+            text: format!("{id} · {STILL_OPEN}"),
+            path: path.clone(),
+        }
+    });
+    let anomalous = anomalous.iter().map(|(path, family)| {
+        let id = stem_of(path);
+        LoopLine {
+            text: format!("{id} · {family}"),
+            path: path.clone(),
+        }
+    });
     typeless
         .chain(dangling)
         .chain(unsummarized)
@@ -54,6 +83,13 @@ mod tests {
         DanglingLink {
             source: PathBuf::from(source),
             target: NoteId(target.to_string()),
+        }
+    }
+
+    fn line(text: &str, path: &str) -> LoopLine {
+        LoopLine {
+            text: text.to_string(),
+            path: PathBuf::from(path),
         }
     }
 
@@ -76,18 +112,39 @@ mod tests {
                 ],
             ),
             vec![
-                "mystere · typeless".to_string(),
-                "2026-07-22 → fantome · dangling".to_string(),
-                "capture-articles-zettel · still open".to_string(),
-                "bancal · malformed meta".to_string(),
-                "fleuve · truncated".to_string(),
+                line("mystere · typeless", "permanent/mystere.typ"),
+                line("2026-07-22 → fantome · dangling", "time/2026-07-22.typ"),
+                line(
+                    "capture-articles-zettel · still open",
+                    "capture/capture-articles-zettel.typ"
+                ),
+                line("bancal · malformed meta", "permanent/bancal.typ"),
+                line("fleuve · truncated", "permanent/fleuve.typ"),
             ]
         );
     }
 
     #[test]
+    fn a_dangling_links_path_is_the_source_not_the_missing_target() {
+        let list = lines(
+            &[],
+            &[dangling("time/2026-07-22.typ", "fantome")],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            list,
+            vec![line(
+                "2026-07-22 → fantome · dangling",
+                "time/2026-07-22.typ"
+            )],
+            "the path is the note that owes the link, not the id it names"
+        );
+    }
+
+    #[test]
     fn a_vault_with_nothing_open_lists_nothing() {
-        assert_eq!(lines(&[], &[], &[], &[]), Vec::<String>::new());
+        assert_eq!(lines(&[], &[], &[], &[]), Vec::<LoopLine>::new());
     }
 
     #[test]

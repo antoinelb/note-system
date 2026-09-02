@@ -746,6 +746,23 @@ body {
   padding: 4px 0;
 }
 
+/* a loop line opens the note that owes it
+   (adr/2026-09-loop-lines-open-their-notes.md) — scoped to `-open` so the
+   notices overlay's plain `.loops-line` history stays inert */
+.loops-line-open {
+  cursor: pointer;
+}
+
+.loops-line-open:hover {
+  color: var(--ink-bright);
+}
+
+/* the rail's selection grammar: bold bright ink, no box, no fill */
+.loops-line-open.selected {
+  color: var(--ink-bright);
+  font-weight: 700;
+}
+
 /* the command palette (adr/2026-08-command-palette-overlay-shape.md): the
    app's one floating overlay — the first fixed position and z-index in this
    file, a deliberate break from the in-flow boxes above, because a

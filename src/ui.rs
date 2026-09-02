@@ -372,6 +372,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let fallback =
         use_hook(|| Rc::new(RefCell::new(table::Fallback::default())));
     let mut loops_open = use_signal(|| false);
+    // the loops overlay's highlighted row, the link picker's idiom over a
+    // list with no query field: reset to 0 whenever the overlay opens
+    // (`toggle_loops`), so a stale rank from a shorter list never survives
+    let mut loops_highlighted = use_signal(|| 0usize);
     // the status surface: every notice and the liveness fact — one owner,
     // one line, one glyph (adr/2026-08-status-surface-owns-notices.md)
     let mut status = use_signal(Status::default);
@@ -890,20 +894,68 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let open_sheet = use_callback({
         let root = root.clone();
         move |id: String| {
-            if sheet.peek().as_deref() == Some(id.as_str()) {
+            // already showing this sheet AND actually holding its note —
+            // the one repeat worth swallowing. A failed lookup's bare
+            // sheet (closed editor) stays retryable: the next click on
+            // the same card re-runs the lookup instead of standing on the
+            // error, which is the natural retry once the index heals
+            // (adr/2026-09-index-notices-resolve-on-a-good-lookup.md)
+            if sheet.peek().as_deref() == Some(id.as_str())
+                && editor.peek().note().is_some()
+            {
                 return;
             }
             // a lookup that fails still opens the sheet: the closed editor
             // keeps the pane bare and the notice line — rendered inside the
             // sheet — puts the message where the user is looking
-            let opened = match open_sheet_note(&root, &id) {
-                Ok(opened) => opened,
+            let (opened, found) = match open_sheet_note(&root, &id) {
+                Ok(opened) => (opened, true),
                 Err(message) => {
                     status.write().report(Notice::index(message));
-                    Editor::closed()
+                    (Editor::closed(), false)
                 }
             };
-            show_sheet.call((id, opened));
+            show_sheet.call((id.clone(), opened));
+            // resolved only once `show_sheet` actually landed on this id: a
+            // refused flush (an unsaved sheet's own save failing) leaves
+            // the prior sheet standing, and a lookup that merely succeeded
+            // is not proof the navigation the user asked for happened
+            if found
+                && sheet.peek().as_deref() == Some(id.as_str())
+                && status.peek().has(Source::Index)
+            {
+                status.write().resolve(Source::Index);
+            }
+        }
+    });
+    // the one id -> destination rule: a time note lands on the logs,
+    // everything the table already knows about opens through the sheet,
+    // and an id nothing in the vault knows — a dangling link's target —
+    // stays inert, the same gate the links footer applies
+    // (adr/2026-08-permanent-links-open-sheets.md: "dangling links stay
+    // inert"). Every entry point that names a note by id — gf, Ctrl+Enter,
+    // the palette's follow link — shares this one rule, so none of them
+    // needs its own per-category match. The loops list does NOT route
+    // through here: a loop line opens its note by path
+    // (`open_loop`, `adr/2026-09-loop-lines-open-their-notes.md`), because
+    // some of what it names — a note with no `#meta` at all — has no id
+    // row for this gate to find in the first place.
+    let open_id = use_callback(move |id: String| {
+        if let Some(scale) = links::scale_of(&id, &notes.peek()) {
+            // a time link followed from a sheet lands on the logs.
+            // `select` runs first: it records the sheet on Ctrl+B's log
+            // and closes it itself — closing here first made the log
+            // record the logs selection the sheet stood over instead of
+            // the sheet. The screen only switches once the sheet really
+            // closed: a refused flush keeps the sheet, so it must keep
+            // its screen too
+            let from_sheet = sheet.peek().is_some();
+            select.call((scale, id));
+            if from_sheet && sheet.peek().is_none() {
+                screen.set(Screen::Logs);
+            }
+        } else if table_notes.peek().iter().any(|note| note.id == id) {
+            open_sheet.call(id);
         }
     });
 
@@ -916,6 +968,17 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         move |()| {
             if !editor.write().flush() {
                 return;
+            }
+            // an error sheet (a failed lookup's own closed editor) is the
+            // one thing a "sheet: no note has the id" notice can outlive
+            // with no later index read to prove it stale: leaving it ends
+            // the notice's own cause just as directly as a fresh success
+            // would (adr/2026-09-index-notices-resolve-on-a-good-lookup.md)
+            if sheet.peek().is_some()
+                && editor.peek().note().is_none()
+                && status.peek().has(Source::Index)
+            {
+                status.write().resolve(Source::Index);
             }
             picker.set(None);
             sheet.set(None);
@@ -932,11 +995,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // unconfirmed, no trash. Deliberately not `close_sheet` — its flush
     // would rewrite the just-deleted file from the buffer. The landing half
     // is close_sheet's minus the flush: card and position go optimistically,
-    // the watcher converges the index, and the dangling links the deletion
-    // causes surface in the loops list as designed.
+    // and the app indexes its own removal in the same tick rather than
+    // waiting on the watcher (adr/2026-09-the-app-indexes-its-own-writes.md)
+    // — the dangling links the deletion causes surface in the loops list
+    // as designed.
     let delete_note = use_callback({
         let root = root.clone();
         let fragments = fragments.clone();
+        let feed = feed.clone();
+        let bodies = bodies.clone();
         move |()| {
             let Some(own) = sheet.peek().clone() else {
                 return;
@@ -958,6 +1025,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     }
                 })
             });
+            let relative =
+                file.as_ref().map(|file| vault_relative(&root, file));
             if let Some(file) = file
                 && let Err(error) = std::fs::remove_file(&file)
             {
@@ -968,6 +1037,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             }
             if let Some(intent) = intent {
                 undo_register.write().push(intent);
+            }
+            // the app indexes its own delete in the same tick rather than
+            // waiting on the watcher (adr/2026-09-the-app-indexes-its-own-writes.md)
+            if let Some(relative) = relative {
+                bodies.borrow_mut().invalidate(&relative);
+                (feed.submit)(compute::removed(&root, relative));
             }
             sheet.set(None);
             positions.write().remove(&own);
@@ -1002,6 +1077,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         let window_size = window_size.clone();
         let fallback = fallback.clone();
+        let feed = feed.clone();
+        let bodies = bodies.clone();
         move |(picked, title): (NoteType, String)| {
             let created = today.to_string();
             match crate::create::permanent(&root, &picked, &title, &created) {
@@ -1015,15 +1092,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // drifts to its links as they arrive, and only a drag
                     // pins it (adr/2026-08-auto-place-strongest-link-ring.md)
                     fallback.borrow_mut().place(&id, (x, y));
-                    // optimistic, the time-note idiom: the watcher batch
-                    // converges the same row ~200 ms later
+                    let relative = vault_relative(&root, &path);
+                    // optimistic in-memory push, and the app indexes its
+                    // own write in the same tick rather than waiting on the
+                    // watcher (adr/2026-09-the-app-indexes-its-own-writes.md)
                     table_notes.with_mut(|list| {
                         list.push(TableNote {
                             id: id.clone(),
-                            path: PathBuf::from(format!(
-                                "{}/{id}.typ",
-                                NoteCategory::Permanent.as_dir()
-                            )),
+                            path: relative.clone(),
                             kind: NoteCategory::Permanent,
                             note_type: Some(picked),
                             title: Some(title.clone()),
@@ -1031,6 +1107,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             tags: Vec::new(),
                         });
                     });
+                    bodies.borrow_mut().invalidate(&relative);
+                    (feed.submit)(compute::touched(
+                        &root,
+                        NoteCategory::Permanent,
+                        relative,
+                    ));
                     show_sheet.call((id, Editor::open(path)));
                 }
                 Err(error) => {
@@ -1046,6 +1128,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         move |()| match tag_names(&root) {
             Ok(tags) => {
+                if status.peek().has(Source::Index) {
+                    status.write().resolve(Source::Index);
+                }
                 filter_query.set(String::new());
                 filter_highlighted.set(0);
                 filter_picker.set(Some(FilterPicker {
@@ -1070,6 +1155,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         move |()| match template_names(&root) {
             Ok(entries) => {
+                if status.peek().has(Source::Index) {
+                    status.write().resolve(Source::Index);
+                }
                 template_query.set(String::new());
                 template_highlighted.set(0);
                 template_picker.set(Some(TemplatePicker { entries }));
@@ -1104,6 +1192,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         move |()| match completions(&root) {
             Ok(entries) => {
+                if status.peek().has(Source::Index) {
+                    status.write().resolve(Source::Index);
+                }
                 let carded: Vec<links::Completion> = entries
                     .into_iter()
                     .filter(|entry| {
@@ -1197,41 +1288,56 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-08-app-level-undo-register.md): a deleted note returns
     // exactly as it left — `create_new`, never a clobber of a path that
     // holds a living file again — and an arrange returns every card it
-    // moved. The card itself reappears when the watcher converges, the
-    // same trust the delete's own landing half leans on. The palette hides
+    // moved. The restored note is a fifth write seam indexing itself in
+    // the same tick, the delete's own landing half leans on. The palette hides
     // the command when the register is empty, so the pop is combinator-fed
     // rather than guarded.
-    let undo_last = use_callback(move |()| {
-        let intent = undo_register.write().pop();
-        intent.into_iter().for_each(|intent| match intent {
-            undo::Intent::Delete {
-                path,
-                id,
-                text,
-                position,
-            } => match crate::persist::create_new(&path, &text) {
-                Ok(()) => {
-                    if let Some((x, y)) = position {
-                        positions.write().set(&id, x, y);
-                    }
-                }
-                Err(error) => {
-                    status
-                        .write()
-                        .report(Notice::undo_failed(&error.to_string()));
-                }
-            },
-            undo::Intent::Arrange { prior } => {
-                positions.with_mut(|store| {
-                    for (id, at) in &prior {
-                        match at {
-                            Some((x, y)) => store.set(id, *x, *y),
-                            None => store.remove(id),
+    let undo_last = use_callback({
+        let root = root.clone();
+        let feed = feed.clone();
+        let bodies = bodies.clone();
+        move |()| {
+            let intent = undo_register.write().pop();
+            intent.into_iter().for_each(|intent| match intent {
+                undo::Intent::Delete {
+                    path,
+                    id,
+                    text,
+                    position,
+                } => match crate::persist::create_new(&path, &text) {
+                    Ok(()) => {
+                        if let Some((x, y)) = position {
+                            positions.write().set(&id, x, y);
                         }
+                        // the app indexes its own write in the same tick
+                        // rather than waiting on the watcher — the same seam
+                        // create_note and delete_note already use
+                        // (adr/2026-09-the-app-indexes-its-own-writes.md)
+                        let relative = vault_relative(&root, &path);
+                        let category = dir_category(&relative);
+                        bodies.borrow_mut().invalidate(&relative);
+                        (feed.submit)(compute::touched(
+                            &root, category, relative,
+                        ));
                     }
-                });
-            }
-        });
+                    Err(error) => {
+                        status
+                            .write()
+                            .report(Notice::undo_failed(&error.to_string()));
+                    }
+                },
+                undo::Intent::Arrange { prior } => {
+                    positions.with_mut(|store| {
+                        for (id, at) in &prior {
+                            match at {
+                                Some((x, y)) => store.set(id, *x, *y),
+                                None => store.remove(id),
+                            }
+                        }
+                    });
+                }
+            });
+        }
     });
 
     // the small movements, lifted so chord, button, wheel and palette all
@@ -1239,7 +1345,48 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let page = use_callback(move |forward: bool| {
         month.set(logs::page_month(month(), forward));
     });
-    let toggle_loops = use_callback(move |()| loops_open.set(!loops_open()));
+    let toggle_loops = use_callback(move |()| {
+        let opening = !loops_open();
+        loops_open.set(opening);
+        if opening {
+            loops_highlighted.set(0);
+        }
+    });
+    // a click or Enter on a loops-list row: close the overlay, then open
+    // the note by its own path — never through `open_id`'s id lookup. A
+    // note that owes debt because its own `#meta` is missing or broken
+    // has no id row `path_for_id` could resolve, so this is not a fifth
+    // branch of the id -> destination rule, it is the one place that
+    // still has the path and uses it instead of round-tripping through an
+    // id the index may not have. The destination still follows the
+    // category rule every other entry point applies: a time note lands on
+    // the logs, where its rail, calendar and crumbs are — a sheet over
+    // the table would float it with no card behind it. Only a time file
+    // whose stem no scale can parse falls back to the sheet, the one
+    // surface that can show a file the logs cannot place
+    // (`adr/2026-09-loop-lines-open-their-notes.md`)
+    let open_loop = use_callback({
+        let root = root.clone();
+        move |path: PathBuf| {
+            loops_open.set(false);
+            let id = crate::domain::stem_of(&path);
+            if dir_category(&path) == NoteCategory::Time
+                && let Some(scale) = logs::scale_of_id(&id)
+            {
+                select.call((scale, id.clone()));
+                // the screen only switches once the selection really
+                // landed: a refused flush keeps the editor — and any
+                // sheet — where they were, so they keep their screen too
+                // (`open_id`'s own guard)
+                if sheet.peek().is_none() && selected.peek().1 == id {
+                    screen.set(Screen::Logs);
+                }
+                return;
+            }
+            let opened = Editor::open(root.join(&path));
+            show_sheet.call((id, opened));
+        }
+    });
     // the notices overlay's toggle, the loops list's twin
     let toggle_notices =
         use_callback(move |()| notices_open.set(!notices_open()));
@@ -1265,6 +1412,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // never moves the selection onto a period with no note.
     let create_time_note = use_callback({
         let root = root.clone();
+        let feed = feed.clone();
+        let bodies = bodies.clone();
         move |(scale, id): (NoteType, String)| -> bool {
             let created = logs::selection_date(&scale, &id).unwrap_or(today);
             match crate::template::create(
@@ -1275,7 +1424,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 &created.to_string(),
                 "",
             ) {
-                Ok(_) => {
+                Ok(path) => {
+                    let relative = vault_relative(&root, &path);
+                    bodies.borrow_mut().invalidate(&relative);
+                    (feed.submit)(compute::touched(
+                        &root,
+                        NoteCategory::Time,
+                        relative,
+                    ));
                     notes.with_mut(|list| list.push((id, scale)));
                     true
                 }
@@ -1431,7 +1587,22 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // replayed on the next click
                 || settings_open()
                 || notices_open();
-            let target = if editing && !listing {
+            // the sheet and the screen, the two elements the effect used to
+            // leave unread (adr/2026-09-sheet-and-screen-join-the-focus-effect.md).
+            // `blocks_view` — and the sink inside it — only mounts on the
+            // logs screen or behind an open sheet; the table screen with no
+            // sheet renders neither. Closing a sheet can still leave the one
+            // editor `active` (the reactivated note wakes with its last
+            // block, adr/2026-08-cursor-always-in-the-note.md), so `editing`
+            // alone would aim at a sink that just unmounted with the sheet —
+            // a stale handle nothing answers. Reading `sheet` and `screen`
+            // every run, and gating the sink on an actual host for it,
+            // means every screen switch and every sheet open-or-close
+            // re-picks the right target instead of stranding focus on
+            // `<body>`.
+            let sheeted = sheet.read().is_some();
+            let hosted = screen() == Screen::Logs || sheeted;
+            let target = if editing && !listing && hosted {
                 sink.borrow().clone()
             } else {
                 pane.borrow().clone()
@@ -1461,25 +1632,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 .and_then(|slice| links::link_at(slice, head))
         };
         let Some(target) = target else { return };
-        if let Some(scale) = links::scale_of(&target, &notes.peek()) {
-            // a time link followed from a sheet lands on the logs.
-            // `select` runs first: it records the sheet on Ctrl+B's log
-            // and closes it itself — closing here first made the log
-            // record the logs selection the sheet stood over instead of
-            // the sheet. The screen only switches once the sheet really
-            // closed: a refused flush keeps the sheet, so it must keep
-            // its screen too
-            let from_sheet = sheet.peek().is_some();
-            select.call((scale, target));
-            if from_sheet && sheet.peek().is_none() {
-                screen.set(Screen::Logs);
-            }
-        } else if table_notes.peek().iter().any(|note| note.id == target) {
-            // everything else the vault knows lives on the table: the link
-            // opens its card's sheet — the v0 "wait for v1's table" branch
-            // ends here (adr/2026-08-permanent-links-open-sheets.md)
-            open_sheet.call(target);
-        }
+        open_id.call(target);
     });
 
     // one accept path for Enter and for a click on a row: the link lands at
@@ -1499,12 +1652,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         let clipboard = clipboard.clone();
         let now = now.clone();
+        let feed = feed.clone();
+        let bodies = bodies.clone();
         move |()| {
             let Some(clipboard) = clipboard.clone() else {
                 return;
             };
             let Some(now) = now.clone() else { return };
             let root = root.clone();
+            let feed = feed.clone();
+            let bodies = bodies.clone();
             spawn(async move {
                 let Some(pasted) =
                     clipboard_answer((clipboard.0)().await, status)
@@ -1521,6 +1678,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     &pasted,
                 ) {
                     Ok(path) => {
+                        // the app indexes its own write in the same tick
+                        // rather than waiting on the watcher
+                        // (adr/2026-09-the-app-indexes-its-own-writes.md)
+                        let relative = vault_relative(&root, &path);
+                        bodies.borrow_mut().invalidate(&relative);
+                        (feed.submit)(compute::touched(
+                            &root,
+                            NoteCategory::Capture,
+                            relative,
+                        ));
                         Notice::captured(&crate::domain::stem_of(&path))
                     }
                     Err(err) => Notice::capture_failed(&format!("{err:?}")),
@@ -1536,6 +1703,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let root = root.clone();
         move |()| match completions(&root) {
             Ok(entries) => {
+                if status.peek().has(Source::Index) {
+                    status.write().resolve(Source::Index);
+                }
                 query.set(String::new());
                 highlighted.set(0);
                 picker.set(Some(Picker { entries }));
@@ -3688,15 +3858,46 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 onmounted: move |event| async move {
                     let _ = event.set_focus(true).await;
                 },
+                // the link picker's arrow/enter grammar over a list with no
+                // query field to carry it
+                // (adr/2026-09-loop-lines-open-their-notes.md)
                 onkeydown: move |event: KeyboardEvent| {
-                    if event.key() == Key::Escape {
-                        loops_open.set(false);
+                    let last = loops.read().len().saturating_sub(1);
+                    match event.key() {
+                        Key::Escape => loops_open.set(false),
+                        Key::Enter => {
+                            if let Some(line) = loops.read().get(loops_highlighted()) {
+                                open_loop.call(line.path.clone());
+                            }
+                        }
+                        Key::ArrowDown => {
+                            loops_highlighted.set((loops_highlighted() + 1).min(last));
+                        }
+                        Key::ArrowUp => {
+                            loops_highlighted.set(loops_highlighted().saturating_sub(1));
+                        }
+                        _ => {}
                     }
                 },
                 onclick: move |_| loops_open.set(false),
                 div { class: "loops-head type-label", "open loops" }
-                for line in loops() {
-                    div { key: "{line}", class: "loops-line", "{line}" }
+                for (rank, line) in loops().into_iter().enumerate() {
+                    div {
+                        key: "{rank}",
+                        class: "loops-line loops-line-open",
+                        class: if rank == loops_highlighted() { "selected" },
+                        onclick: {
+                            let path = line.path.clone();
+                            move |event: MouseEvent| {
+                                // a row click must not also reach the
+                                // container's own onclick, which closes the
+                                // overlay instead of opening the note
+                                event.stop_propagation();
+                                open_loop.call(path.clone());
+                            }
+                        },
+                        "{line.text}"
+                    }
                 }
             }
         }
@@ -4773,8 +4974,13 @@ fn Chrome(
 /// closed otherwise — selection ≠ existence, so an empty selection must not
 /// touch the filesystem.
 fn open_selected(root: &Path, exists: bool, id: &str) -> Editor {
-    if exists {
-        Editor::open(time_note_path(root, id))
+    let path = time_note_path(root, id);
+    // `exists` names the rail's knowledge, which is the index's — but the
+    // file is the truth. A typeless or id-less time note is loops debt
+    // the rail excludes, yet its file opens fine
+    // (adr/2026-09-loop-lines-open-their-notes.md)
+    if exists || path.is_file() {
+        Editor::open(path)
     } else {
         Editor::closed()
     }
@@ -4817,6 +5023,33 @@ fn open_template(editor: &Editor, root: &Path) -> Option<String> {
 fn time_note_path(root: &Path, id: &str) -> PathBuf {
     root.join(NoteCategory::Time.as_dir())
         .join(format!("{id}.typ"))
+}
+
+/// The relative form every `VaultChange` carries: the app's own write seams
+/// (create, capture, delete) call this on the absolute path `create` /
+/// `template` hand back before submitting a `compute::touched` or
+/// `compute::removed` job, so the index catches up inside the same tick
+/// instead of waiting on the watcher to notice the app's own write
+/// (adr/2026-09-the-app-indexes-its-own-writes.md). `path` is always under
+/// `root` by construction, so the fallback never fires outside a test that
+/// deliberately passes something else.
+fn vault_relative(root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+/// The category a vault-relative path's leading directory names —
+/// `NoteCategory::from_dir`'s verdict, the one authority every reader
+/// consults (`src/domain.rs`), so a restored or loop-opened time note is
+/// never mistaken for a permanent one. The Permanent fallback is
+/// defensive only: every caller hands a path recorded under one of the
+/// four category directories.
+fn dir_category(relative: &Path) -> NoteCategory {
+    relative
+        .iter()
+        .next()
+        .and_then(|dir| dir.to_str())
+        .and_then(NoteCategory::from_dir)
+        .unwrap_or(NoteCategory::Permanent)
 }
 
 /// The sheet's editor: the card knows its id, not its file, so the path is
@@ -6009,6 +6242,44 @@ mod tests {
     }
 
     #[test]
+    fn a_chrome_icon_switch_asks_the_pane_for_focus_even_before_it_remounts() {
+        // regression: the shared focus effect never read `screen`, so a
+        // mouse-driven switch with a block still active behind it
+        // (adr/2026-08-cursor-always-in-the-note.md keeps it awake across
+        // the switch) never re-ran the effect at all — only the freshly
+        // mounted pane's own onmounted asked for focus, racing WebKitGTK's
+        // native click-focus with nothing backing it up if that race was
+        // lost (adr/2026-09-sheet-and-screen-join-the-focus-effect.md).
+        // The logs pane's own handle is mounted and never replaced here —
+        // the table pane's own mount is deliberately never delivered — so
+        // any rise in the count can only be the effect reaching for
+        // whatever the pane cell already holds, the instant the screen
+        // changes and ahead of the new pane's own mount.
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let clicks = listeners(&mutations, "click");
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[0],
+        );
+        block_on(settle(&mut dom));
+        let before = focused.load(Ordering::SeqCst);
+
+        click(&mut dom, clicks[CHROME_TABLE]);
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom).contains(r#"class="table""#),
+            "the screen switched"
+        );
+        assert!(
+            focused.load(Ordering::SeqCst) > before,
+            "the effect re-asked for focus on the still-registered pane \
+             handle the moment the screen changed"
+        );
+    }
+
+    #[test]
     fn ctrl_1_and_ctrl_2_switch_screens() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
@@ -6668,6 +6939,98 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_sheet_with_no_active_block_hands_focus_to_the_pane() {
+        // regression: the effect never read `sheet`, so `editing` alone
+        // picked the target. Closing this sheet reactivates the logs'
+        // daily note, which wakes with its own last block active
+        // (adr/2026-08-cursor-always-in-the-note.md) — but the table
+        // screen with no sheet open never mounts a sink for it
+        // (`blocks_view` only mounts on the logs screen or behind an open
+        // sheet), so the old code aimed at a sink nothing had ever mounted
+        // and focus was stranded on `<body>`, the table pane's own chords
+        // (Ctrl+2, Ctrl+D, Ctrl+P) going dead
+        // (adr/2026-09-sheet-and-screen-join-the-focus-effect.md).
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let mutations = click_for_mutations(&mut dom, clicks[CHROME_TABLE]);
+        let downs = listeners(&mutations, "mousedown");
+        let (pane_target, cards) = (downs[0], downs[1..].to_vec());
+        let keys = listeners(&mutations, "keydown")[0];
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[0],
+        );
+
+        // the sabotaged lookup opens the sheet over a closed editor: no
+        // active block to reactivate the sink with
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute("DELETE FROM notes WHERE id = 'alpha'", [])
+            .expect("the sabotage succeeds");
+        open_sheet_on(&mut dom, pane_target, cards[0]);
+        block_on(settle(&mut dom));
+        assert!(
+            !dioxus_ssr::render(&dom).contains("block-active"),
+            "the failed lookup leaves nothing active: {}",
+            dioxus_ssr::render(&dom)
+        );
+
+        let before = focused.load(Ordering::SeqCst);
+        // Shift+Escape at the pane's own keydown closes the sheet directly,
+        // the same chord `plain_escape_leaves_the_sheet_open_and_shift_escape_closes_it`
+        // exercises
+        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
+        block_on(settle(&mut dom));
+        assert!(
+            !dioxus_ssr::render(&dom).contains(r#"class="sheet""#),
+            "the sheet closed"
+        );
+        assert!(
+            focused.load(Ordering::SeqCst) > before,
+            "the pane asked for focus once the sheet closed, even though \
+             the reopened daily note came back active"
+        );
+    }
+
+    #[test]
+    fn a_sheet_with_an_active_block_keeps_the_sink_focused() {
+        // the fix's other half: a sheet that does hold an active block
+        // must keep routing to the sink — the table screen mounts one for
+        // exactly as long as the sheet stands
+        // (adr/2026-09-sheet-and-screen-join-the-focus-effect.md)
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let clicks = listeners(&mutations, "click");
+        // registration order established by
+        // `the_sink_takes_focus_back_when_an_overlay_closes`: the pane,
+        // then the sink
+        let focused = mount_counting_focus(
+            &mut dom,
+            listeners(&mutations, "mounted")[1],
+        );
+        block_on(settle(&mut dom));
+
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let before = focused.load(Ordering::SeqCst);
+        open_sheet_on(&mut dom, pane, cards[0]);
+        block_on(settle(&mut dom));
+        assert!(
+            dioxus_ssr::render(&dom).contains("block-active"),
+            "the sheet opens with its last block awake: {}",
+            dioxus_ssr::render(&dom)
+        );
+        assert!(
+            focused.load(Ordering::SeqCst) > before,
+            "a sheet with an active block still routes focus to the sink"
+        );
+    }
+
+    #[test]
     fn the_sheet_survives_its_card_vanishing() {
         let vault = temp_vault();
         let (mut dom, clicks, sender) =
@@ -6713,6 +7076,258 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="sheet""#), "{html}");
         assert!(html.contains("sheet: no note has the id alpha"), "{html}");
+    }
+
+    /// A good lookup resolves the notice its predecessor left standing —
+    /// no gesture, the condition ending is the resolution
+    /// (`adr/2026-09-index-notices-resolve-on-a-good-lookup.md`).
+    #[test]
+    fn a_later_sheet_on_a_real_card_clears_a_standing_index_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute("DELETE FROM notes WHERE id = 'alpha'", [])
+            .expect("the sabotage succeeds");
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains("sheet: no note has the id alpha"),
+            "the notice is standing before the good lookup"
+        );
+
+        // capture-idea's row is untouched: this lookup succeeds and
+        // resolves the sabotaged one's leftover notice on the way
+        open_sheet_on(&mut dom, pane, cards[1]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("sheet: no note has the id alpha"), "{html}");
+    }
+
+    /// Escape at the bottom of the sheet's ladder acknowledges an index
+    /// notice the same as any other — the manual out the ADR keeps
+    /// alongside resolution.
+    #[test]
+    fn escape_over_the_sheet_acknowledges_a_standing_index_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute("DELETE FROM notes WHERE id = 'alpha'", [])
+            .expect("the sabotage succeeds");
+
+        open_sheet_on(&mut dom, pane, cards[0]);
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains("sheet: no note has the id alpha"),
+            "the notice is standing before Escape"
+        );
+
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("sheet: no note has the id alpha"), "{html}");
+        assert!(
+            html.contains(r#"class="sheet""#),
+            "plain Escape leaves the sheet open: {html}"
+        );
+    }
+
+    /// A failed lookup's bare sheet must not swallow the retry: the same
+    /// card clicked again re-runs the lookup, and once the index heals
+    /// that read is exactly the one that resolves the standing notice
+    /// (adr/2026-09-index-notices-resolve-on-a-good-lookup.md). Pre-fix,
+    /// `open_sheet`'s same-id early return fired before the lookup and
+    /// left the error sheet and its notice both standing forever.
+    #[test]
+    fn reclicking_the_same_card_after_the_index_heals_opens_and_resolves() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        let saboteur =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("a second connection opens");
+        saboteur
+            .execute("UPDATE notes SET id = 'broken' WHERE id = 'alpha'", [])
+            .expect("the sabotage succeeds");
+
+        // the failed open remounts the card as the raised one, so the
+        // retry click targets the raised card the mutations hand back —
+        // the element the user actually sees and clicks again
+        let mutations = open_sheet_on(&mut dom, pane, cards[0]);
+        let raised = listeners(&mutations, "mousedown")[0];
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains("sheet: no note has the id alpha"),
+            "the notice is standing before the retry"
+        );
+
+        saboteur
+            .execute("UPDATE notes SET id = 'alpha' WHERE id = 'broken'", [])
+            .expect("the index heals");
+
+        open_sheet_on(&mut dom, pane, raised);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("sheet: no note has the id alpha"),
+            "the retried lookup resolved the notice: {html}"
+        );
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+    }
+
+    /// The other three index-read reporters resolve the same way: a lookup
+    /// that fails while a sheet is open reports the notice inside it, and
+    /// the same lookup succeeding — no gesture beyond running the command
+    /// again — resolves it (`adr/2026-09-index-notices-resolve-on-a-good-lookup.md`).
+    /// A sheet already on real content, not an error sheet, is the vehicle:
+    /// it keeps a place to render the notice line without the sheet's own
+    /// lookup being what fails.
+    #[test]
+    fn filter_cards_resolves_a_standing_index_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        replace_database_with_a_directory(vault.path());
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "filter cards");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("notice-warning"),
+            "the failed lookup reports: {html}"
+        );
+
+        std::fs::remove_dir(vault.path().join(".index/index.db"))
+            .expect("the sabotage lifts");
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "filter cards");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("notice-warning"),
+            "the good lookup resolves it: {html}"
+        );
+        assert!(
+            html.contains(r#"class="sheet""#),
+            "the sheet stands: {html}"
+        );
+    }
+
+    #[test]
+    fn jump_to_note_resolves_a_standing_index_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+
+        replace_database_with_a_directory(vault.path());
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "jump to note");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("notice-warning"),
+            "the failed lookup reports: {html}"
+        );
+
+        std::fs::remove_dir(vault.path().join(".index/index.db"))
+            .expect("the sabotage lifts");
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "jump to note");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("notice-warning"),
+            "the good lookup resolves it: {html}"
+        );
+        assert!(
+            html.contains(r#"class="sheet""#),
+            "the sheet stands: {html}"
+        );
+    }
+
+    #[test]
+    fn insert_link_resolves_a_standing_index_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let (_, block_keys) = sheet_block_targets(&opened);
+
+        replace_database_with_a_directory(vault.path());
+        press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("notice-warning"),
+            "the failed lookup reports: {html}"
+        );
+
+        std::fs::remove_dir(vault.path().join(".index/index.db"))
+            .expect("the sabotage lifts");
+        let mutations = press_for_mutations(
+            &mut dom,
+            block_keys,
+            ctrl_l(),
+            Modifiers::CONTROL,
+        );
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("notice-warning"),
+            "the good lookup resolves it: {html}"
+        );
+        assert!(html.contains("link-picker"), "the picker opened: {html}");
+    }
+
+    /// `open_templates` reads the filesystem, not the index, but shares the
+    /// same resolve-on-a-good-lookup wiring as the other three
+    /// (`adr/2026-09-index-notices-resolve-on-a-good-lookup.md`). It needs
+    /// the logs screen, the one place its command is offered
+    /// (`palette::available`), so the notice line it shares with the sheet
+    /// renders in the centre pane instead.
+    #[test]
+    fn edit_template_resolves_a_standing_index_notice() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let templates = vault.path().join("templates");
+        let hidden = vault.path().join("templates-hidden");
+        std::fs::rename(&templates, &hidden).expect("the sabotage takes");
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "edit template");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("notice-warning"),
+            "the failed read reports: {html}"
+        );
+
+        std::fs::rename(&hidden, &templates).expect("the sabotage lifts");
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "edit template");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("notice-warning"),
+            "the good read resolves it: {html}"
+        );
     }
 
     #[test]
@@ -7188,7 +7803,7 @@ mod tests {
         let vault = debt_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, own_click) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        let (_, own_click, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
         assert!(dioxus_ssr::render(&dom).contains("loops-list"));
 
         click(&mut dom, own_click);
@@ -7200,7 +7815,7 @@ mod tests {
         let vault = debt_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (own_keys, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
 
         // only Escape is answered here; a plain key leaves the list up
         press(
@@ -7232,6 +7847,264 @@ mod tests {
 
         press(&mut dom, table_keys, Key::Escape, Modifiers::empty());
         assert!(!dioxus_ssr::render(&dom).contains("loops-list"));
+    }
+
+    /// A loop line carries the path of the note that owes the debt, and a
+    /// click or Enter on it opens that note directly — not just the
+    /// palette's arrow/Enter grammar over the list itself
+    /// (adr/2026-09-loop-lines-open-their-notes.md).
+    #[test]
+    fn arrows_move_the_loops_highlight_and_clamp_at_both_ends() {
+        let vault = debt_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+
+        let selected_line = |dom: &VirtualDom| {
+            let html = dioxus_ssr::render(dom);
+            html.split("loops-line-open selected\">")
+                .nth(1)
+                .and_then(|rest| rest.split('<').next())
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no highlighted row: {html}"))
+        };
+        assert_eq!(
+            selected_line(&dom),
+            "mystere · typeless",
+            "the first row starts lit"
+        );
+
+        // three rows: down past the end clamps on the last one
+        for _ in 0..5 {
+            press(&mut dom, own_keys, Key::ArrowDown, Modifiers::empty());
+        }
+        assert_eq!(
+            selected_line(&dom),
+            "capture-zettel · still open",
+            "arrow down clamps at the last row"
+        );
+
+        // and up past the start clamps back on the first
+        for _ in 0..5 {
+            press(&mut dom, own_keys, Key::ArrowUp, Modifiers::empty());
+        }
+        assert_eq!(
+            selected_line(&dom),
+            "mystere · typeless",
+            "arrow up clamps at the first row"
+        );
+    }
+
+    #[test]
+    fn enter_on_the_loops_overlay_opens_the_highlighted_notes_sheet() {
+        let vault = debt_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+
+        // the first row is lit by default: mystere, a typeless permanent
+        // note — nowhere to open before v1's table, which is exactly the
+        // objection this decision supersedes
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("loops-list"), "the overlay closed: {html}");
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert!(
+            html.contains("mystere"),
+            "the typeless note's own sheet opened: {html}"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_loops_row_opens_its_note_not_only_the_overlay() {
+        let vault = debt_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, rows) = open_loops_overlay(&mut dom, clicks[EMBER]);
+
+        // rank 1: "linky → ghost · dangling" — the id on the line is the
+        // source that owes the link, not the missing target
+        click(&mut dom, rows[1]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("loops-list"),
+            "a row click does more than close the overlay: {html}"
+        );
+        assert!(html.contains(r#"class="sheet""#), "a sheet opened: {html}");
+        assert!(
+            !html.contains("no note has the id"),
+            "the source note exists, so no lookup notice: {html}"
+        );
+        assert!(
+            html.contains("linky"),
+            "the dangling link's source opened, not its target: {html}"
+        );
+    }
+
+    /// The loops list reads the live signal, not a snapshot frozen at open:
+    /// a debt resolved from outside while the overlay is still up can
+    /// shrink the list out from under a highlighted rank the arrows had
+    /// clamped against the *old* length. Enter over that stale rank must
+    /// find nothing and do nothing, never panic or open the wrong note.
+    #[test]
+    fn enter_on_a_stale_highlight_after_the_list_shrinks_is_a_no_op() {
+        let vault = debt_vault();
+        let (mut dom, clicks, sender) =
+            watched_app(Some(vault.path().to_path_buf()));
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+
+        // the last of the three rows: capture-zettel, "still open"
+        for _ in 0..2 {
+            press(&mut dom, own_keys, Key::ArrowDown, Modifiers::empty());
+        }
+
+        // summarized from outside the app, the way the watcher would see
+        // any other edit — the debt it owed is gone
+        std::fs::write(
+            vault.path().join("capture/capture-zettel.typ"),
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"capture-zettel\", created: \"2026-07-23\")\n\
+             \n== Summary\n\nrésumé\n\n== Original\n\ncollé du navigateur\n",
+        )
+        .expect("the capture is summarized");
+        feed_batch(
+            &mut dom,
+            &sender,
+            vec![watch::VaultChange::Touched {
+                category: NoteCategory::Capture,
+                path: PathBuf::from("capture/capture-zettel.typ"),
+            }],
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("still open"),
+            "the summary resolved the debt: {html}"
+        );
+
+        // the highlight still names the row that used to be last
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("loops-list"),
+            "a stale highlight past the shrunk list opens nothing: {html}"
+        );
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+    }
+
+    /// A loop line owed by a time note lands on the logs — rail, calendar
+    /// and crumbs — never in a table card sheet floating with no card
+    /// behind it (adr/2026-09-loop-lines-open-their-notes.md).
+    #[test]
+    fn a_time_notes_loop_line_lands_on_the_logs_not_a_sheet() {
+        let vault = temp_vault();
+        // a rail-known daily owing a dangling link: the loops list names
+        // it by its source path
+        std::fs::write(
+            vault.path().join("time/2026-07-20.typ"),
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"2026-07-20\", type: \"daily\", \
+             created: \"2026-07-20\")\n\
+             \n= 2026-07-20\n\n#l(\"fantome\")\n",
+        )
+        .expect("the indebted day note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        // from the table screen, so the switch to the logs is observable
+        click(&mut dom, clicks[CHROME_TABLE]);
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "no sheet: {html}");
+        // the note's own body (its dangling #l call) only renders once
+        // the note is open in the logs editor — the rail row alone never
+        // shows it, so this is the landing, not the listing
+        assert!(
+            html.contains("fantome"),
+            "the day note opened on the logs: {html}"
+        );
+    }
+
+    /// A typeless time note is exactly the loops case the rail excludes:
+    /// `select`'s `exists` says no, the file says yes, and the file wins
+    /// (`open_selected`'s disk fallback) — the note opens in the logs
+    /// editor instead of a bare "press enter to start one".
+    #[test]
+    fn a_typeless_time_notes_loop_line_opens_its_file_in_the_logs() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-19.typ"),
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"2026-07-19\", created: \"2026-07-19\")\n\
+             \n= presque un jour\n",
+        )
+        .expect("the typeless day note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "no sheet: {html}");
+        assert!(
+            html.contains("presque un jour"),
+            "the file itself opened: {html}"
+        );
+    }
+
+    /// A time file whose stem no scale can parse has no place the logs
+    /// could put it — the sheet, which can show any file, is the fallback.
+    #[test]
+    fn a_time_file_with_an_unparseable_stem_falls_back_to_the_sheet() {
+        let vault = temp_vault();
+        std::fs::write(vault.path().join("time/notes.typ"), "= sans place\n")
+            .expect("the misfiled note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "a sheet opened: {html}");
+        assert!(html.contains("sans place"), "with the file's text: {html}");
+    }
+
+    /// A refused flush keeps everything where it was: `select` returns
+    /// before landing, and the loop's Enter must not switch the screen
+    /// onto a selection that never changed (`open_id`'s own guard).
+    #[test]
+    fn a_refused_flush_keeps_a_time_loop_line_from_landing() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-20.typ"),
+            "#import \"/templates/template.typ\": *\n\
+             #show: note\n\
+             #meta(id: \"2026-07-20\", type: \"daily\", \
+             created: \"2026-07-20\")\n\
+             \n= 2026-07-20\n\n#l(\"fantome\")\n",
+        )
+        .expect("the indebted day note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        // an unsaved edit the locked directory will refuse to flush
+        let (input, _) = activate_heading(&mut dom, &clicks);
+        type_into(&mut dom, input, "= pas encore sauvé\n");
+        lock_dir(&vault.path().join("time"), true);
+
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+        lock_dir(&vault.path().join("time"), false);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("fantome"),
+            "the refused flush kept the selection, so no landing: {html}"
+        );
     }
 
     // -- the rail: every time note, newest first, nothing else ---------------
@@ -14811,6 +15684,136 @@ mod tests {
         assert!(html.contains("left: 552px; top: 372px"), "{html}");
     }
 
+    // -- the app indexes its own writes ---------------------------------
+    // (adr/2026-09-the-app-indexes-its-own-writes.md): `rendered_app` and
+    // `capture_app` inject no `VaultFeed`, so no watcher runs and no batch
+    // is ever fed in here — the only way the index below can hold the new
+    // note is the app's own `compute::touched` submit at the write seam.
+    // These fail against the pre-fix binary, which left the index waiting
+    // on a watcher that was never even started.
+
+    #[test]
+    fn vault_relative_strips_the_vault_root() {
+        assert_eq!(
+            vault_relative(
+                Path::new("/vault"),
+                Path::new("/vault/permanent/a.typ")
+            ),
+            PathBuf::from("permanent/a.typ")
+        );
+    }
+
+    #[test]
+    fn vault_relative_falls_back_to_the_whole_path_outside_the_root() {
+        // defensive only: every real caller passes a path `create` or
+        // `template` wrote under `root`, so this branch never fires in
+        // production — it exists so the fallback is `unwrap_or`, not a
+        // naked unwrap
+        assert_eq!(
+            vault_relative(Path::new("/vault"), Path::new("/elsewhere/a.typ")),
+            PathBuf::from("/elsewhere/a.typ")
+        );
+    }
+
+    #[test]
+    fn dir_category_reads_the_leading_directory() {
+        assert_eq!(
+            dir_category(Path::new("time/2026-07-20.typ")),
+            NoteCategory::Time
+        );
+        assert_eq!(
+            dir_category(Path::new("capture/x.typ")),
+            NoteCategory::Capture
+        );
+        assert_eq!(
+            dir_category(Path::new("generated/x.typ")),
+            NoteCategory::Generated
+        );
+        assert_eq!(
+            dir_category(Path::new("permanent/x.typ")),
+            NoteCategory::Permanent
+        );
+        // defensive only: every real caller hands a path recorded under
+        // one of the four category directories
+        assert_eq!(
+            dir_category(Path::new("elsewhere/x.typ")),
+            NoteCategory::Permanent
+        );
+    }
+
+    #[test]
+    fn creating_a_note_through_ctrl_n_indexes_it_with_no_watcher_batch() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        type_into(&mut dom, input, "Watcher Proving Ground");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+
+        let index = Index::open(&vault.path().join(".index/index.db"))
+            .expect("open the index directly");
+        let ids: Vec<String> = index
+            .table_notes()
+            .expect("table notes")
+            .into_iter()
+            .map(|note| note.id)
+            .collect();
+        assert!(
+            ids.contains(&"watcher-proving-ground".to_string()),
+            "the app indexed its own create before any watcher could: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn opening_the_next_daily_indexes_it_with_no_watcher_batch() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open next daily");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        let written = vault.path().join("time/2026-07-24.typ");
+        assert!(written.exists(), "the missing day was created");
+
+        let index = Index::open(&vault.path().join(".index/index.db"))
+            .expect("open the index directly");
+        let ids: Vec<String> = index
+            .time_notes()
+            .expect("time notes")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert!(
+            ids.contains(&"2026-07-24".to_string()),
+            "the app indexed its own time-note create before any watcher \
+             could: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn capturing_through_the_chord_indexes_it_with_no_watcher_batch() {
+        let vault = temp_vault();
+        let (mut dom, _, keys) = capture_app(
+            Some(vault.path().to_path_buf()),
+            Ok("collé du navigateur".to_string()),
+            Some(CAPTURED_AT),
+        );
+        capture_chord(&mut dom, &keys);
+
+        let index = Index::open(&vault.path().join(".index/index.db"))
+            .expect("open the index directly");
+        assert_eq!(
+            index
+                .unsummarized_captures()
+                .expect("unsummarized captures"),
+            vec![PathBuf::from("capture/capture-2026-07-23-091542.typ")],
+            "the app indexed its own capture before any watcher could"
+        );
+    }
+
     #[test]
     fn the_new_card_lands_at_the_injected_viewport_centre() {
         let vault = temp_vault();
@@ -15159,6 +16162,111 @@ mod tests {
                 .any(|label| label.contains("undo")),
             "{:?}",
             palette_labels(&dom)
+        );
+    }
+
+    /// `undo_last`'s own write seam derives the restored note's category
+    /// from its path rather than assuming `Permanent`
+    /// (`adr/2026-09-the-app-indexes-its-own-writes.md`) — a capture and a
+    /// generated note both take the other two branches. Both deletes run
+    /// before either undo, so the fixture's original card elements (keyed
+    /// by id, untouched by a *different* card's delete-then-restore) stay
+    /// valid throughout — no re-querying the table after a card
+    /// disappears and reappears.
+    #[test]
+    fn undo_after_delete_restores_capture_and_generated_notes() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let capture_path = vault.path().join("capture/capture-idea.typ");
+        let capture_original = std::fs::read_to_string(&capture_path)
+            .expect("the note is readable");
+        open_sheet_on(&mut dom, pane, cards[1]);
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete note");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(!capture_path.exists(), "the capture note was deleted");
+
+        let generated_path = vault.path().join("generated/digest.typ");
+        let generated_original = std::fs::read_to_string(&generated_path)
+            .expect("the note is readable");
+        open_sheet_on(&mut dom, pane, cards[2]);
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete note");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(!generated_path.exists(), "the generated note was deleted");
+
+        // the register pops newest first: digest's delete, then
+        // capture-idea's
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert_eq!(
+            std::fs::read_to_string(&generated_path)
+                .expect("the generated note is back"),
+            generated_original,
+            "undo restores a generated note"
+        );
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert_eq!(
+            std::fs::read_to_string(&capture_path)
+                .expect("the capture note is back"),
+            capture_original,
+            "undo restores a capture note"
+        );
+    }
+
+    /// The fourth branch of the restored note's category: a deleted time
+    /// note re-enters the index as `time`, never as a phantom permanent
+    /// card the table would draw until a rescan (`dir_category`,
+    /// adr/2026-09-the-app-indexes-its-own-writes.md). The sheet it is
+    /// deleted from is the unparseable-stem fallback — the one door a
+    /// time file has into a sheet.
+    #[test]
+    fn undo_after_delete_restores_a_time_note_as_time() {
+        let vault = temp_vault();
+        std::fs::write(vault.path().join("time/notes.typ"), "= sans place\n")
+            .expect("the misfiled note is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        let (own_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        press(&mut dom, own_keys, Key::Enter, Modifiers::empty());
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "delete note");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(
+            !vault.path().join("time/notes.typ").exists(),
+            "the delete landed"
+        );
+
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "undo");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(
+            vault.path().join("time/notes.typ").exists(),
+            "the note is back"
+        );
+
+        let index =
+            rusqlite::Connection::open(vault.path().join(".index/index.db"))
+                .expect("open the index directly");
+        let category: String = index
+            .query_row(
+                "SELECT category FROM notes WHERE path = 'time/notes.typ'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the restored note has a row");
+        assert_eq!(
+            category, "time",
+            "the restored note re-entered under its own category"
         );
     }
 
@@ -16320,16 +17428,23 @@ mod tests {
     /// Opens the loops overlay through the ember and returns its own
     /// (keydown, click) targets — the same self-contained escape and
     /// click-to-close as the notices pane
-    /// (adr/2026-08-palette-order-and-overlay-placement.md).
+    /// (adr/2026-08-palette-order-and-overlay-placement.md) — plus its
+    /// rows' click targets in list order, the back picker's shape
+    /// (`open_back_picker`) now that a row opens its note
+    /// (adr/2026-09-loop-lines-open-their-notes.md). The container's own
+    /// click listener registers before its children's, so it is the first
+    /// of the batch and the rows are everything after it.
     fn open_loops_overlay(
         dom: &mut VirtualDom,
         ember: ElementId,
-    ) -> (ElementId, ElementId) {
+    ) -> (ElementId, ElementId, Vec<ElementId>) {
         let mutations = click_for_mutations(dom, ember);
         let keydown = listeners(&mutations, "keydown")[0];
-        let click = listeners(&mutations, "click")[0];
+        let clicks = listeners(&mutations, "click");
+        let click = clicks[0];
+        let rows = clicks[1..].to_vec();
         mount(dom, listeners(&mutations, "mounted")[0]);
-        (keydown, click)
+        (keydown, click, rows)
     }
 
     /// The constellation svg's inner markup — the chrome icons also hold

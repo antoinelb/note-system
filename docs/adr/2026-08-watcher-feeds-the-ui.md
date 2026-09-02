@@ -1,5 +1,14 @@
 # The watcher feeds the screen
 
+> Superseded in part by `adr/2026-09-the-app-indexes-its-own-writes.md`: the
+> "two signals" bullet below grew to four once the table screen and the
+> links footer joined the rail and the open loops on `compute::Survey`'s
+> whole tuple, and the "app's own writes round-trip through the watcher"
+> bullet gained delete and lost its exclusivity — creation, capture and
+> delete now submit their own one-note survey at write time, and the
+> watcher's round trip is a second, slower path for the same files.
+> Autosave still relies on the watcher alone.
+
 ## Context
 
 The file watcher has existed since phase 3 (`adr/2026-07-incremental-vault-watching.md`)

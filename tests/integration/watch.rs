@@ -8,6 +8,7 @@ use std::time::Duration;
 use note_system::domain::{NoteCategory, NoteId, NoteType};
 use note_system::index::{Index, scan_vault};
 use note_system::watch::{VaultChange, VaultWatcher, apply};
+use note_system::{create, template};
 
 /// Long enough for inotify plus the 200 ms debounce, short enough that a
 /// genuine failure fails the suite instead of hanging it.
@@ -104,6 +105,66 @@ fn rewriting_a_note_drops_the_rows_of_its_previous_contents() {
     assert_eq!(
         index.notes_by_type(&NoteType::Claim).expect("by type"),
         paths(&["permanent/seed.typ"])
+    );
+}
+
+// ---------------------------------------------------------- the app's writes
+
+// These two pin the diagnosis behind
+// `adr/2026-09-the-app-indexes-its-own-writes.md`: they write through the
+// same functions the UI calls (`create::permanent`,
+// `template::create_capture`) rather than through `std::fs::write`, to
+// tell apart a watcher that cannot classify the app's own writes from an
+// app that never told the watcher — and to stay green once the app feeds
+// its own `compute::touched` job, since the watcher's round trip still
+// applies independently.
+
+#[test]
+fn creating_a_permanent_note_through_the_app_reaches_the_index() {
+    let (dir, mut index) = templated_vault();
+    let watcher = VaultWatcher::start(dir.path()).expect("start watcher");
+
+    create::permanent(
+        dir.path(),
+        &NoteType::Concept,
+        "watcher proving ground",
+        "2026-09-01",
+    )
+    .expect("create through the app's own write path");
+    drain(&watcher, &mut index, dir.path());
+
+    let ids: Vec<String> = index
+        .table_notes()
+        .expect("table notes")
+        .into_iter()
+        .map(|note| note.id)
+        .collect();
+    assert!(
+        ids.contains(&"watcher-proving-ground".to_string()),
+        "a note created through create::permanent reaches the index: {ids:?}"
+    );
+}
+
+#[test]
+fn capturing_through_the_app_reaches_the_index() {
+    let (dir, mut index) = templated_vault();
+    let watcher = VaultWatcher::start(dir.path()).expect("start watcher");
+
+    template::create_capture(
+        dir.path(),
+        "capture-2026-09-01-120000",
+        "2026-09-01",
+        "pasted",
+    )
+    .expect("capture through the app's own write path");
+    drain(&watcher, &mut index, dir.path());
+
+    assert_eq!(
+        index
+            .unsummarized_captures()
+            .expect("unsummarized captures"),
+        paths(&["capture/capture-2026-09-01-120000.typ"]),
+        "a capture written through template::create_capture reaches the index"
     );
 }
 
@@ -291,6 +352,27 @@ fn temp_vault() -> (tempfile::TempDir, Index) {
     }
     let index = Index::open(&dir.path().join(".index/index.db"))
         .expect("open fresh index");
+    (dir, index)
+}
+
+/// A `temp_vault` whose `templates/` holds the real fixture templates, so
+/// the app's own write path (`create::permanent`,
+/// `template::create_capture`) can run against it exactly as it would
+/// against a real vault.
+fn templated_vault() -> (tempfile::TempDir, Index) {
+    let (dir, index) = temp_vault();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/vault/templates");
+    for entry in
+        std::fs::read_dir(&fixtures).expect("read fixture templates dir")
+    {
+        let entry = entry.expect("read fixture template entry");
+        std::fs::copy(
+            entry.path(),
+            dir.path().join("templates").join(entry.file_name()),
+        )
+        .expect("copy fixture template");
+    }
     (dir, index)
 }
 

@@ -1,5 +1,11 @@
 # The logs pane takes focus back whenever no block holds it
 
+> Superseded in part by `adr/2026-09-sheet-and-screen-join-the-focus-effect.md`:
+> once the table screen and its sheet joined the logs pane on the same
+> effect, the two conditions below grew to four — `sheet` and `screen`
+> read alongside `editor` and the overlay flags, so a closed sheet or a
+> mouse-driven screen switch also re-picks the right target.
+
 ## Context
 
 Ctrl+Q (and Ctrl+T with it) stopped working whenever the caret was not in a

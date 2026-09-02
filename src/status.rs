@@ -448,6 +448,17 @@ mod tests {
     }
 
     #[test]
+    fn resolving_index_clears_only_the_index_notice() {
+        let mut status = Status::default();
+        status
+            .report(Notice::index("sheet: no note has the id x".to_string()));
+        status.report(Notice::save_failed("disk full"));
+        status.resolve(Source::Index);
+        assert!(!status.has(Source::Index));
+        assert!(status.has(Source::Save), "the other source still stands");
+    }
+
+    #[test]
     fn showing_gates_a_re_report_and_history_dedups_it() {
         let mut status = Status::default();
         let notice = Notice::save_failed("disk full");

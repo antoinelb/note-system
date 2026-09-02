@@ -1,5 +1,13 @@
 # The open-loops list is an overlay in the centre pane
 
+> Superseded in part by `adr/2026-09-loop-lines-open-their-notes.md`: the
+> "nothing clickable" clause below, and the Rejected section's "making each
+> line open its note", no longer hold now that v1's table and its sheets
+> exist. A line carries the id of the note that owes the debt and opens it
+> through the same rule `gf` and Ctrl+Enter use. Everything else here — the
+> overlay-not-a-screen shape, the count-is-the-list's-length invariant, the
+> one-line-per-loop vocabulary — stands unchanged.
+
 ## Context
 
 `adr/2026-07-debt-counter-then-list.md` decided the ember opens a flat list,

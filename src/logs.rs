@@ -84,6 +84,23 @@ fn sort_key(scale: &NoteType, id: &str) -> Option<(Date, Date, Date)> {
     }
 }
 
+/// The scale an id's own shape names — day, week or season by parse, no
+/// index row needed. The loops list can carry a time note the rail
+/// excludes (typeless, id-less), and its stem is still the one thing that
+/// says where in the logs it belongs
+/// (`adr/2026-09-loop-lines-open-their-notes.md`).
+pub fn scale_of_id(id: &str) -> Option<NoteType> {
+    if time::parse_day(id).is_some() {
+        Some(NoteType::Daily)
+    } else if time::parse_week(id).is_some() {
+        Some(NoteType::Weekly)
+    } else if time::parse_season(id).is_some() {
+        Some(NoteType::Seasonal)
+    } else {
+        None
+    }
+}
+
 /// The rail's right-aligned kind tag; day rows carry none — the date is
 /// the row.
 pub fn rail_tag(scale: &NoteType) -> &'static str {
@@ -661,5 +678,13 @@ mod tests {
             ),
             "digest-smart-notes · generated"
         );
+    }
+
+    #[test]
+    fn scale_of_id_reads_the_scale_from_the_ids_own_shape() {
+        assert_eq!(scale_of_id("2026-07-23"), Some(NoteType::Daily));
+        assert_eq!(scale_of_id("2026-w30"), Some(NoteType::Weekly));
+        assert_eq!(scale_of_id("2026-summer"), Some(NoteType::Seasonal));
+        assert_eq!(scale_of_id("notes"), None, "a stem no scale can parse");
     }
 }

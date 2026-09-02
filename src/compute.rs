@@ -14,9 +14,9 @@ use tokio::sync::mpsc::{
     UnboundedReceiver, UnboundedSender, unbounded_channel,
 };
 
-use crate::domain::NoteType;
+use crate::domain::{NoteCategory, NoteType};
 use crate::index::{Index, IndexError, TableNote};
-use crate::loops;
+use crate::loops::{self, LoopLine};
 use crate::render::{BodyJob, FragmentJob, RenderTheme};
 use crate::watch::{self, VaultChange};
 
@@ -25,7 +25,7 @@ use crate::watch::{self, VaultChange};
 /// batch re-reads whole.
 pub type Survey = (
     Vec<(String, NoteType)>,
-    Vec<String>,
+    Vec<LoopLine>,
     Vec<TableNote>,
     Vec<(String, String)>,
 );
@@ -204,7 +204,7 @@ pub fn survey(index: &Index) -> Result<Survey, IndexError> {
 /// The open loops themselves, not a count of them: the chrome's ember
 /// shows this list's length and clicking it shows the list, so the two
 /// cannot drift apart (adr/2026-08-loops-list-overlay.md).
-pub fn open_loops(index: &Index) -> Result<Vec<String>, IndexError> {
+pub fn open_loops(index: &Index) -> Result<Vec<LoopLine>, IndexError> {
     Ok(loops::lines(
         &index.typeless_notes()?,
         &index.dangling_links()?,
@@ -221,6 +221,29 @@ pub fn rescan(root: &Path, escalated: bool) -> Job {
         root: root.to_path_buf(),
         batch: vec![VaultChange::Rescan],
         escalated,
+    }
+}
+
+/// A one-note `Touched` survey: the app's own write seams (create,
+/// create a time note, capture) submit this the instant they write a
+/// file, instead of waiting on the watcher to notice its own effect
+/// (adr/2026-09-the-app-indexes-its-own-writes.md). `path` is
+/// vault-relative, the same shape `watch::note_path` yields.
+pub fn touched(root: &Path, category: NoteCategory, path: PathBuf) -> Job {
+    Job::Survey {
+        root: root.to_path_buf(),
+        batch: vec![VaultChange::Touched { category, path }],
+        escalated: false,
+    }
+}
+
+/// A one-note `Removed` survey: the delete seam's counterpart to
+/// `touched`, submitted the instant the app removes a file itself.
+pub fn removed(root: &Path, path: PathBuf) -> Job {
+    Job::Survey {
+        root: root.to_path_buf(),
+        batch: vec![VaultChange::Removed(path)],
+        escalated: false,
     }
 }
 
@@ -365,6 +388,106 @@ mod tests {
             .expect("the database is made read-only");
         let error = absorb(vault.path(), RESCAN).unwrap_err();
         assert!(matches!(error, IndexError::Sqlite(_)), "{error:?}");
+    }
+
+    // -- touched / removed: the app's own write seams -----------------------
+
+    #[test]
+    fn touched_wraps_a_single_touched_change_unescalated() {
+        let root = Path::new("/vault");
+        let Job::Survey {
+            root: job_root,
+            batch,
+            escalated,
+        } = touched(
+            root,
+            NoteCategory::Permanent,
+            PathBuf::from("permanent/fresh.typ"),
+        )
+        else {
+            panic!("touched builds a Survey job");
+        };
+        assert_eq!(job_root, root);
+        assert_eq!(
+            batch,
+            vec![VaultChange::Touched {
+                category: NoteCategory::Permanent,
+                path: PathBuf::from("permanent/fresh.typ"),
+            }]
+        );
+        assert!(!escalated, "the app's own write is never an escalation");
+    }
+
+    #[test]
+    fn removed_wraps_a_single_removed_change_unescalated() {
+        let root = Path::new("/vault");
+        let Job::Survey {
+            root: job_root,
+            batch,
+            escalated,
+        } = removed(root, PathBuf::from("permanent/gone.typ"))
+        else {
+            panic!("removed builds a Survey job");
+        };
+        assert_eq!(job_root, root);
+        assert_eq!(
+            batch,
+            vec![VaultChange::Removed(PathBuf::from("permanent/gone.typ"))]
+        );
+        assert!(!escalated, "the app's own delete is never an escalation");
+    }
+
+    #[test]
+    fn a_touched_job_run_against_a_temp_vault_indexes_the_note() {
+        let vault = tempfile::tempdir().expect("tempdir");
+        seed_vault(vault.path());
+        std::fs::write(
+            vault.path().join("permanent/fresh.typ"),
+            "#meta(id: \"fresh\", type: \"concept\")\n",
+        )
+        .expect("write the note the app just created");
+
+        let Outcome::Survey {
+            result: Ok((_, _, table, _)),
+            escalated: false,
+        } = run(touched(
+            vault.path(),
+            NoteCategory::Permanent,
+            PathBuf::from("permanent/fresh.typ"),
+        ))
+        else {
+            panic!("the survey lands whole");
+        };
+        assert!(
+            table.iter().any(|note| note.id == "fresh"),
+            "the note the app just wrote is indexed: {table:?}"
+        );
+    }
+
+    #[test]
+    fn a_removed_job_run_against_a_temp_vault_drops_the_note() {
+        let vault = tempfile::tempdir().expect("tempdir");
+        seed_vault(vault.path());
+        std::fs::write(
+            vault.path().join("permanent/fresh.typ"),
+            "#meta(id: \"fresh\", type: \"concept\")\n",
+        )
+        .expect("write the note");
+        run(rescan(vault.path(), false));
+        std::fs::remove_file(vault.path().join("permanent/fresh.typ"))
+            .expect("the app's own delete");
+
+        let Outcome::Survey {
+            result: Ok((_, _, table, _)),
+            escalated: false,
+        } = run(removed(vault.path(), PathBuf::from("permanent/fresh.typ")))
+        else {
+            panic!("the survey lands whole");
+        };
+        assert!(
+            !table.iter().any(|note| note.id == "fresh"),
+            "the note the app just deleted is gone: {table:?}"
+        );
     }
 
     #[test]

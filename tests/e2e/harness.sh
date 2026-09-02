@@ -115,6 +115,29 @@ e2e_shot() {
     import -window root "$1"
 }
 
+# i3's "new_window none" leaves the single tiled window undecorated and
+# filling the screen from (0, 0) — the same assumption every screenshot-
+# pixel probe in this suite already makes (table-chords.test.sh,
+# notice-resolves.test.sh) — so a root-relative click lands at the same
+# coordinate a root screenshot would show it at.
+e2e_click_at() {
+    xdotool mousemove --sync "$1" "$2" click 1
+}
+
+# The chrome header (assets/theme.css .chrome: flex, 8px/16px padding,
+# 16px gap, align-items center) packs two 14x14 icons left to right, table
+# then logs, both centred on the header's own 14px-tall line box. Measured
+# once off an e2e_shot of a fresh window: table's icon spans x 16-30,
+# logs' spans x 46-60, both y 8-22 — the coordinates below are each
+# icon's centre.
+e2e_click_chrome() {
+    case "$1" in
+        table) e2e_click_at 23 15 ;;
+        logs) e2e_click_at 53 15 ;;
+        *) e2e_fail "e2e_click_chrome: unknown icon '$1'" ;;
+    esac
+}
+
 e2e_file_appears() {
     e2e_await test -f "$E2E_DIR/vault/$1" || e2e_fail "$1 was never written"
 }
