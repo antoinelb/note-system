@@ -1,5 +1,7 @@
 # Temporal panes: a narrower rail and a way to fold both side panes
 
+Done 2026-09-02 (`adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md`), as item 8 of `2026-09-02-tier-3-student-workflow.md`.
+
 ## Goal
 The logs screen's side panes cost no more width than they need, and the keyboard can fold them.
 

@@ -70,6 +70,7 @@ A line beginning `> ` is a block quote, stored literally and taught to vanilla T
 **No colour literal appears outside `assets/theme.css`** — every colour is a custom property, and both themes (dark `:root`, light `:root[data-theme="light"]`) are filled in together (`adr/2026-07-design-language-own-phase.md`).
 
 One `--prose-size` token drives both the editor's textarea and the rendered SVG's type scale — no separate size for source and render (`adr/2026-08-one-font-size-for-source-and-render.md`). A settings overlay (Ctrl+,) holds the only controls that move it, alongside a theme toggle; both are session-only, with no persistence file (`adr/2026-08-settings-overlay.md`).
+On the logs, Alt+H folds the rail and Alt+L the jump panel — normal mode, the pane itself, or the palette rows; a folded pane keeps its hairline, insert mode keeps every AltGr character, and the folds are session-only too (`adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md`).
 
 Every aspect of the interface should be keyboard-driven first and then usable by mouse.
 

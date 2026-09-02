@@ -231,12 +231,25 @@ body {
   outline: none;
 }
 
+/* 176px: the widest row the fixture vault draws — "2026-summer" and its
+   "season" tag — plus the 16px gutter each side, measured on a headless
+   screenshot (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md) */
 .rail {
-  width: 208px;
+  width: 176px;
   flex-shrink: 0;
   overflow-y: auto;
   border-right: 1px solid var(--hairline);
   padding: 16px 0;
+}
+
+/* a folded pane keeps its hairline and nothing else, so the fold is
+   visible as a line and the centre takes the room; session-only, like the
+   settings overlay's knobs */
+.rail.folded,
+.jump.folded {
+  width: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 .rail-row {

@@ -36,6 +36,8 @@ pub enum CommandId {
     ZoomToBodies,
     ZoomToTitles,
     FilterCards,
+    FoldRail,
+    FoldJump,
     JumpToNote,
     ArrangeCluster,
     Undo,
@@ -58,7 +60,7 @@ pub struct Command {
 /// (`adr/2026-08-screen-switch-gesture.md`), alphabetized by label
 /// (`adr/2026-08-palette-order-and-overlay-placement.md`) — the order the
 /// palette shows it in.
-pub const COMMANDS: [Command; 32] = [
+pub const COMMANDS: [Command; 34] = [
     // chordless: layout is rare and deliberate — "at most a command"
     // (adr/2026-08-arrange-cluster-command.md)
     Command {
@@ -92,6 +94,18 @@ pub const COMMANDS: [Command; 32] = [
         id: CommandId::FilterCards,
         label: "filter cards",
         chord: Some("ctrl+f"),
+    },
+    // the temporal panes fold on the logs alone
+    // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
+    Command {
+        id: CommandId::FoldJump,
+        label: "fold jump panel",
+        chord: Some("alt+l"),
+    },
+    Command {
+        id: CommandId::FoldRail,
+        label: "fold rail",
+        chord: Some("alt+h"),
     },
     Command {
         id: CommandId::FollowLink,
@@ -316,6 +330,8 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::ZoomToTitles => context.on_table && context.at_bodies,
         // the finders act on cards, which only the table shows
         CommandId::FilterCards | CommandId::JumpToNote => context.on_table,
+        // the panes are the logs'
+        CommandId::FoldRail | CommandId::FoldJump => !context.on_table,
         // the arrange scopes to the open sheet's component
         CommandId::ArrangeCluster => context.sheet_open,
         // no conflict, no sides to pick
@@ -495,9 +511,19 @@ mod tests {
     #[test]
     fn the_finders_hide_off_the_table() {
         assert_eq!(labels(&filter("filter", READING)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("jump", READING)), Vec::<&str>::new());
+        // "jump" now also names the fold row, which is the logs' own
+        assert_eq!(labels(&filter("jump", READING)), vec!["fold jump panel"]);
         assert_eq!(labels(&filter("filter", AT_TABLE)), vec!["filter cards"]);
         assert_eq!(labels(&filter("jump", AT_TABLE)), vec!["jump to note"]);
+    }
+
+    #[test]
+    fn the_folds_hide_on_the_table() {
+        assert_eq!(
+            labels(&filter("fold", READING)),
+            vec!["fold jump panel", "fold rail"]
+        );
+        assert_eq!(labels(&filter("fold", AT_TABLE)), Vec::<&str>::new());
     }
 
     #[test]
@@ -599,6 +625,8 @@ mod tests {
             chords,
             vec![
                 "ctrl+f",
+                "alt+l",
+                "alt+h",
                 "ctrl+enter",
                 "ctrl+2",
                 "ctrl+1",

@@ -412,6 +412,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // holding the theme toggle and the font-size stepper
     // (adr/2026-08-settings-overlay.md)
     let mut settings_open = use_signal(|| false);
+    // the temporal panes' folds, session-only like the settings knobs
+    // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
+    let mut rail_folded = use_signal(|| false);
+    let mut jump_folded = use_signal(|| false);
     // Ctrl+B's visit log: what `select` and `show_sheet` were showing right
     // before they changed it, capped so the log stays bounded
     // (adr/2026-08-note-history-back.md,
@@ -1442,6 +1446,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // its own onkeydown, so unlike the toggles above it has one direction
     // (adr/2026-08-settings-overlay.md)
     let open_settings = use_callback(move |()| settings_open.set(true));
+    // one toggle for both chords, both palette rows and the sink's arm
+    let fold_pane = use_callback(move |fold: keymap::Fold| match fold {
+        keymap::Fold::Rail => rail_folded.set(!rail_folded()),
+        keymap::Fold::Jump => jump_folded.set(!jump_folded()),
+    });
     let open_daily = use_callback(move |()| {
         select.call((NoteType::Daily, time::day_id(today)))
     });
@@ -1983,6 +1992,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     zoom_to.call(table::Zoom::Titles);
                 }
                 palette::CommandId::FilterCards => open_filter.call(()),
+                palette::CommandId::FoldRail => {
+                    fold_pane.call(keymap::Fold::Rail);
+                }
+                palette::CommandId::FoldJump => {
+                    fold_pane.call(keymap::Fold::Jump);
+                }
                 palette::CommandId::JumpToNote => open_jump.call(()),
                 palette::CommandId::ArrangeCluster => {
                     arrange_cluster.call(());
@@ -2635,6 +2650,21 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     // relay it a second time
                                                     if relay.call((event.key(), event.modifiers())) {
                                                         event.stop_propagation();
+                                                        return;
+                                                    }
+                                                    // the pane folds are the logs' and normal
+                                                    // mode's: insert mode keeps every alt
+                                                    // character typeable (AltGr), and the
+                                                    // grammar would swallow the chord inert
+                                                    // before the pane saw it
+                                                    // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
+                                                    if vim.peek().mode == vim::Mode::Normal
+                                                        && *screen.peek() == Screen::Logs
+                                                        && let Some(fold) = keymap::fold(&event.key(), event.modifiers())
+                                                    {
+                                                        event.prevent_default();
+                                                        event.stop_propagation();
+                                                        fold_pane.call(fold);
                                                         return;
                                                     }
                                                     // the grammar speaks first (editor.rs
@@ -3518,6 +3548,26 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     event.prevent_default();
                     open_settings.call(());
                 }
+                // Alt+H / Alt+L fold the panes from the pane itself — the
+                // empty day, where no sink holds the keys
+                // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
+                Key::Character(_)
+                    if keymap::fold(&event.key(), event.modifiers())
+                        .is_some()
+                        && palette.peek().is_none()
+                        && creator.peek().is_none()
+                        && back.peek().is_none()
+                        && !finder_open()
+                        && !settings_open() =>
+                {
+                    event.prevent_default();
+                    // the guard proved the chord; the default is never
+                    // the value taken
+                    fold_pane.call(
+                        keymap::fold(&event.key(), event.modifiers())
+                            .unwrap_or(keymap::Fold::Rail),
+                    );
+                }
                 // Ctrl+B, the back history's chord
                 // (adr/2026-08-note-history-back.md), guarded like every
                 // other overlay-aware chord here: overlays never stack
@@ -4389,7 +4439,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     }
                 },
                 onkeydown: keyboard,
-                nav { class: "rail",
+                nav {
+                    class: "rail",
+                    class: if rail_folded() { "folded" },
                     for row in rows {
                         div {
                             key: "{row.id}",
@@ -4544,6 +4596,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 }
                 aside {
                     class: "jump",
+                    class: if jump_folded() { "folded" },
                     // months page by scrolling — no ‹ › buttons (adr/2026-07-month-paging-arrow-keys.md)
                     onwheel: move |event| {
                         let delta = event.delta().strip_units().y;
@@ -14097,6 +14150,8 @@ mod tests {
             vec![
                 "edit template",
                 "export pdf",
+                "fold jump panel",
+                "fold rail",
                 "follow link",
                 "go to table",
                 "insert link",
@@ -14139,7 +14194,7 @@ mod tests {
         let (_, keys) = activate_heading(&mut dom, &clicks);
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
-        assert_eq!(labels.len(), 22, "{labels:?}");
+        assert_eq!(labels.len(), 24, "{labels:?}");
         assert!(labels.contains(&"insert link".to_string()), "{labels:?}");
         assert!(labels.contains(&"follow link".to_string()), "{labels:?}");
     }
@@ -14287,6 +14342,81 @@ mod tests {
     }
 
     #[test]
+    fn alt_h_and_alt_l_fold_the_panes_from_normal_mode_and_the_pane() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("rail folded"), "{html}");
+
+        // from the sink, in normal mode: the rail folds, then the jump
+        press(&mut dom, sink, Key::Character("h".into()), Modifiers::ALT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="rail folded""#), "{html}");
+        press(&mut dom, sink, Key::Character("L".into()), Modifiers::ALT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="jump folded""#), "{html}");
+        // a second press unfolds
+        press(&mut dom, sink, Key::Character("h".into()), Modifiers::ALT);
+        press(&mut dom, sink, Key::Character("l".into()), Modifiers::ALT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("folded"), "{html}");
+
+        // in insert mode the same key types: alt stays insertable
+        press(
+            &mut dom,
+            sink,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, sink, Key::Character("h".into()), Modifiers::ALT);
+        assert!(!dioxus_ssr::render(&dom).contains("folded"));
+        assert!(source_of(&dom).contains('h'), "{}", source_of(&dom));
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+
+        // from the pane itself, the empty day: the arm on the logs keydown
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("h".into()),
+            Modifiers::ALT,
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="rail folded""#));
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("x".into()),
+            Modifiers::ALT,
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="rail folded""#));
+    }
+
+    #[test]
+    fn the_palette_folds_the_panes_on_the_logs_only() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "fold rail");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="rail folded""#));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "fold jump");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="jump folded""#));
+
+        // on the table the rows are not offered
+        let (_, _, table_keys) = table_targets_with_keys(&mut dom, &clicks);
+        open_palette(&mut dom, table_keys);
+        let labels = palette_labels(&dom);
+        assert!(
+            !labels.iter().any(|label| label.starts_with("fold")),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
     fn the_palette_exports_the_open_note_beside_itself() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
@@ -14362,8 +14492,8 @@ mod tests {
             Modifiers::CONTROL,
         );
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        // alphabetized, `toggle theme` is the last of the 22 visible rows
-        click(&mut dom, listeners(&mutations, "click")[21]);
+        // alphabetized, `toggle theme` is the last of the 24 visible rows
+        click(&mut dom, listeners(&mutations, "click")[23]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"data-theme="light""#), "{html}");
         assert!(!html.contains("command-palette"), "{html}");

@@ -41,6 +41,33 @@ pub enum Action {
 /// widget's and bubbles exactly as the textarea let it — Escape to the
 /// pane, every app chord (Ctrl+P/L/N/T/Q/1/2, Ctrl+Enter, Ctrl+Shift+V) to
 /// its handler.
+/// The two temporal panes a chord can fold
+/// (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fold {
+    Rail,
+    Jump,
+}
+
+/// Alt+H folds the rail, Alt+L the jump panel — plain Alt only: a Ctrl or
+/// Meta alongside is another chord's, and the character has to be the
+/// letter itself, so an AltGr composition that carries `alt` with some
+/// other glyph never folds anything.
+pub fn fold(key: &Key, modifiers: Modifiers) -> Option<Fold> {
+    if !modifiers.alt() || modifiers.ctrl() || modifiers.meta() {
+        return None;
+    }
+    match key {
+        Key::Character(character) if character.eq_ignore_ascii_case("h") => {
+            Some(Fold::Rail)
+        }
+        Key::Character(character) if character.eq_ignore_ascii_case("l") => {
+            Some(Fold::Jump)
+        }
+        _ => None,
+    }
+}
+
 pub fn action(key: &Key, modifiers: Modifiers) -> Option<Action> {
     let ctrl = modifiers.ctrl();
     let meta = modifiers.meta();
@@ -253,5 +280,20 @@ mod tests {
         ] {
             assert_eq!(action(&key, modifiers), None, "{key:?}");
         }
+    }
+
+    #[test]
+    fn alt_h_and_alt_l_fold_and_nothing_else_does() {
+        let h = Key::Character("h".into());
+        assert_eq!(fold(&h, Modifiers::ALT), Some(Fold::Rail));
+        assert_eq!(
+            fold(&Key::Character("L".into()), Modifiers::ALT),
+            Some(Fold::Jump)
+        );
+        assert_eq!(fold(&h, Modifiers::ALT | Modifiers::CONTROL), None);
+        assert_eq!(fold(&h, Modifiers::ALT | Modifiers::META), None);
+        assert_eq!(fold(&h, Modifiers::empty()), None);
+        assert_eq!(fold(&Key::Character("{".into()), Modifiers::ALT), None);
+        assert_eq!(fold(&Key::Enter, Modifiers::ALT), None);
     }
 }
