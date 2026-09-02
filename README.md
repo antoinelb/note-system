@@ -9,8 +9,8 @@ AI can suggest links and tags, but never writes in your notes: accepting a sugge
 Built with Rust and Dioxus for Linux.
 Single user, no accounts, no plugins — it's my system, extended by editing the source.
 
-**Status: v0 complete** — the logs screen, the hybrid block editor, links and capture.
-The canvas itself is v1.
+**Status: v0, v1 and v2 shipped** — the logs screen, the block editor, links and capture; the table with persistent positions; the vim layer.
+v3, the AI, has no code yet.
 Decisions — and the design's intent — in [`docs/adr/`](docs/adr/).
 
 The vault path comes from `$NOTE_VAULT`, falling back to `~/documents/notes`.

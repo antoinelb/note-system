@@ -1,5 +1,12 @@
 # On any UI conflict, the wireframes win — plan.md realigned
 
+> Superseded by `adr/2026-08-shipped-ui-is-the-spec.md`: `plan.md`,
+> `roadmap-v0.md` and the wireframes are gone from the repository, the
+> shipped code is the spec, and the rule "on any UI conflict the wireframes
+> win" is retired with nothing left for the code to conflict with. The
+> table below stays as the record of which design turn retired which plan
+> statement.
+
 ## Context
 
 `docs/plan.md` § Screens, § Canvas, § Friction and § AI were written before the six-turn design pass, and were never re-read against its result.

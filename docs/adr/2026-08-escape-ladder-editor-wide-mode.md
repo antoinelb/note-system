@@ -1,5 +1,12 @@
 # The Escape ladder, and one editor-wide mode that survives
 
+> Superseded in part by `adr/2026-08-shift-escape-leaves-the-note.md`: the
+> ladder's third rung — normal-mode Escape rendering the block again and
+> handing focus back to the pane — is gone. A plain Escape in normal mode
+> kills the pending grammar and then goes inert; Shift+Escape is the one way
+> out of a note from any mode. The first two rungs, the editor-wide mode and
+> normal-at-open stand as written here.
+
 ## Context
 
 v2 phase 1 introduces normal and insert modes.

@@ -37,7 +37,7 @@ No naked `.unwrap()`, no while loops, colours only in `assets/theme.css`, all UI
 6. E2e scenarios: `j`/`k` across a wrapped line (the only thing that sees `LINE_WALK`), delete then undo, an external edit while the app runs, `--capture` from a second process, the ex line, settings.
 7. CI decision: an ADR deciding whether the pre-commit hook is the CI or a job runs all four gates including e2e; the hook installed by `make init` is opt-in today.
 
-### Tier 2 — drift
+### Tier 2 — drift (done 2026-09-02: README and roadmap status, seven ADR banners, `todo.md` retired into `2026-09-02-temporal-panes.md`, four ADRs — versioning, `generated/`, no log file, the note-taker practice)
 8. README status (v0, v1 and v2 shipped) and CLAUDE.md roadmap status; the v2 line lists "configuration" among the six that stay out.
 9. Superseded banners on the seven ADRs superseded one way (`note-history-back`, `ctrl-q-flushes-then-closes`, `cursor-always-in-the-note`, `status-surface-owns-notices`, `watcher-feeds-the-ui`, `escape-ladder-editor-wide-mode`, `plan-realigned-with-wireframes`) and a lift note on `2026-07-logs-centre-read-only.md`'s "until phase 8".
 10. `todo.md`: the three temporal-pane items become a plan or are dropped; the foreign `data/cache/` line leaves `.gitignore`.

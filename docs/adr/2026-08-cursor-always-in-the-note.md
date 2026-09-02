@@ -1,5 +1,13 @@
 # The cursor always lives somewhere in an open note
 
+> Superseded in part by `adr/2026-08-escape-ladder-editor-wide-mode.md` and
+> `adr/2026-08-shift-escape-leaves-the-note.md`: "Escape never deactivates"
+> below no longer holds as stated. A plain Escape is now inert in normal
+> mode and Shift+Escape is the one gesture that puts the cursor away and,
+> on the table, closes the sheet. Everything else stands: a note opens with
+> its last block active, the default caret is the block's end, and the last
+> block keeps its trailing newline visible as the line writing starts on.
+
 ## Context
 
 Since v0's hybrid editor, opening a note activated nothing: every block rendered, the caret existed only after a click, and Escape returned to the caretless state.

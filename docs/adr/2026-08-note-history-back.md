@@ -1,5 +1,11 @@
 # Ctrl+B: a back history over logs selections and sheets
 
+> Superseded in part by `adr/2026-08-ctrl-b-recent-notes-picker.md`: the
+> gesture below — Ctrl+B as a blind pop through the visit stack, with
+> `restoring_history` suppressing the landing's own push — is replaced by a
+> picker over the recent notes. The visit log itself (what pushes, the
+> 64-entry cap, `Visit::Logs`/`Visit::Sheet`) stands as written here.
+
 ## Context
 
 The rail, the crumbs, time-navigation and link-following all move the

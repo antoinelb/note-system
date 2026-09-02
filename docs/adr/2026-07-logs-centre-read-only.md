@@ -1,5 +1,10 @@
 # The logs centre pane is read-only until phase 8
 
+> Lifted by `adr/2026-07-hybrid-active-block-textarea.md` (phase 8): editing
+> returned to the centre pane, and with it the debounced autosave and the
+> Ctrl+Q flush-then-close path this ADR had suspended. The centre pane has
+> been the editor ever since; only the phase-7 reasoning below is historical.
+
 ## Context
 
 Phase 7 deletes the phase-5 split-view widget — the design's centre column

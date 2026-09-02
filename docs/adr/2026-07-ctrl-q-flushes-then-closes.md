@@ -1,5 +1,11 @@
 # Ctrl+Q quits by flushing the buffer, then closing the window
 
+> Suspended by `adr/2026-07-logs-centre-read-only.md` for phase 7, when the
+> centre pane had no buffer to flush and Ctrl+Q closed directly, and
+> reinstated by `adr/2026-07-hybrid-active-block-textarea.md` with phase 8's
+> editor. In force: `App`'s `quit` callback flushes through `QuitFlush` and
+> a failed save cancels the close, exactly as decided below.
+
 ## Context
 
 Saves are debounced (`QUIET`), so a quit pressed mid-sentence lands inside

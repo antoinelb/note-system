@@ -1,5 +1,12 @@
 # The status surface: one module owns every notice and the liveness fact
 
+> Amended twice. `adr/2026-08-watcher-stop-is-glyph-only.md` deleted the
+> mid-session "vault is no longer watched" sentence — the degraded glyph
+> alone says it — and `adr/2026-09-index-notices-resolve-on-a-good-lookup.md`
+> added the rule that an index notice resolves on the next successful read
+> of its source. The module, the severity ladder, Escape-acknowledgement and
+> the liveness fact stand as decided below.
+
 ## Context
 
 An architecture review against AIR found that the app's entire error surface was `Editor.notice: Option<String>` — single-slot, severity-less, overwritten by any later tick — while a real degraded mode (the watcher failing to start) announced itself only on stderr.
