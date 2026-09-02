@@ -1619,6 +1619,50 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
     });
 
+    // A bare key that reaches the sink or a pane while an overlay is up
+    // was typed at the overlay before its async focus grab landed
+    // (adr/2026-09-overlay-keys-relay-before-focus-lands.md). The grammar
+    // must never see it — "c" is an operator there, not a letter — so it
+    // goes into the open overlay's query instead, or is dropped when the
+    // overlay has none. Escape and the chords still pass: the ladders and
+    // the chord arms below own those whether or not an overlay is up.
+    let relay = use_callback(move |(key, modifiers): (Key, Modifiers)| {
+        if key == Key::Escape
+            || modifiers.intersects(
+                Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
+            )
+        {
+            return false;
+        }
+        let listing = loops_open() && !loops.read().is_empty();
+        let open_query = [
+            (palette.read().is_some(), palette_query),
+            (creator.read().is_some(), creator_query),
+            (picker.read().is_some(), query),
+            (filter_picker.read().is_some(), filter_query),
+            (jump.read().is_some(), jump_query),
+            (template_picker.read().is_some(), template_query),
+            (search_prompt(), search_query),
+            (ex_prompt(), ex_query),
+            (back.read().is_some(), back_query),
+        ]
+        .into_iter()
+        .find_map(|(open, query)| open.then_some(query));
+        let Some(mut open_query) = open_query else {
+            return listing || settings_open() || notices_open();
+        };
+        match key {
+            Key::Character(character) => {
+                open_query.write().push_str(&character);
+            }
+            Key::Backspace => {
+                open_query.write().pop();
+            }
+            _ => {}
+        }
+        true
+    });
+
     // one follow path for Ctrl+Enter, Ctrl+click and the palette: the
     // caret is app state now, so everyone reads the same one — no probe,
     // no frozen offsets (adr/2026-08-ctrl-enter-opens-time-links.md,
@@ -2439,6 +2483,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     {
                                                         return;
                                                     }
+                                                    // typed at an overlay that had not yet
+                                                    // taken the focus: relayed into it, and
+                                                    // stopped here so the pane does not
+                                                    // relay it a second time
+                                                    if relay.call((event.key(), event.modifiers())) {
+                                                        event.stop_propagation();
+                                                        return;
+                                                    }
                                                     // the grammar speaks first (editor.rs
                                                     // names this slot); Pass hands the key to
                                                     // the phase-0 keymap unchanged
@@ -2774,6 +2826,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 div { class: "link-picker",
                     input {
                         class: "picker-query",
+                        value: "{query}",
                         placeholder: "link to…",
                         onmounted: move |event| async move {
                             let _ = event.set_focus(true).await;
@@ -2844,6 +2897,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             div { class: "link-picker",
                 input {
                     class: "picker-query",
+                    value: "{search_query}",
                     placeholder: "/",
                     onmounted: move |event| async move {
                         let _ = event.set_focus(true).await;
@@ -2893,7 +2947,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 input {
                     class: "picker-query",
                     placeholder: ":",
-                    initial_value: "{ex_query()}",
+                    value: "{ex_query}",
                     onmounted: move |event| async move {
                         let _ = event.set_focus(true).await;
                     },
@@ -2971,6 +3025,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     div { class: "palette-head type-label", "edit template" }
                     input {
                         class: "picker-query",
+                        value: "{template_query}",
                         placeholder: "template…",
                         onmounted: move |event| async move {
                             let _ = event.set_focus(true).await;
@@ -3137,6 +3192,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // when an arm writes the editor back
             let over_template = open_template(&editor.peek(), &root).is_some();
             match event.key() {
+                // typed at an overlay that had not yet taken the focus:
+                // relayed into it, never read as a rung or a chord here
+                key if relay.call((key.clone(), event.modifiers())) => {
+                    event.stop_propagation();
+                }
                 // shift+Escape belongs to the note it just left; the rungs
                 // below are plain Escape's, and a note must not acknowledge
                 // a notice on its way out
@@ -3368,6 +3428,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // everything else bubbles to the app root
     let table_keys = {
         move |event: KeyboardEvent| match event.key() {
+            // typed at an overlay that had not yet taken the focus:
+            // relayed into it, never read as a rung or a chord here
+            key if relay.call((key.clone(), event.modifiers())) => {
+                event.stop_propagation();
+            }
             // the note's own exit gesture, arriving from the block it just
             // left: the sheet is the note here, so it goes with it
             // (adr/2026-08-shift-escape-leaves-the-note.md)
@@ -3633,6 +3698,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         div { class: "palette-head type-label", "commands" }
                         input {
                             class: "picker-query",
+                            value: "{palette_query}",
                             placeholder: "command…",
                             onmounted: move |event| async move {
                                 let _ = event.set_focus(true).await;
@@ -3978,6 +4044,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         div { class: "palette-head type-label", "recent notes" }
                         input {
                             class: "picker-query",
+                            value: "{back_query}",
                             placeholder: "note…",
                             onmounted: move |event| async move {
                                 let _ = event.set_focus(true).await;
@@ -4519,6 +4586,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 div { class: "palette-head type-label", "filter" }
                                 input {
                                     class: "picker-query",
+                                    value: "{filter_query}",
                                     placeholder: "tag or type…",
                                     onmounted: move |event| async move {
                                         let _ = event.set_focus(true).await;
@@ -4599,6 +4667,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 div { class: "palette-head type-label", "jump" }
                                 input {
                                     class: "picker-query",
+                                    value: "{jump_query}",
                                     placeholder: "note…",
                                     onmounted: move |event| async move {
                                         let _ = event.set_focus(true).await;
@@ -15558,6 +15627,144 @@ mod tests {
     }
 
     // -- ctrl+n: creation, and the sheet's delete ----------------------------
+
+    /// A bare key that reaches the sink while an overlay is up was typed
+    /// at the overlay before its focus grab landed: it joins the query and
+    /// is never a motion (adr/2026-09-overlay-keys-relay-before-focus-lands.md)
+    #[test]
+    fn a_key_at_the_sink_under_the_creator_joins_its_query_not_the_grammar() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_link(&mut dom, &clicks);
+        let before = source_of(&dom);
+        open_creator(&mut dom, keys[LOGS_KEYS]);
+
+        // "c" then "x": an operator and a delete in normal mode, letters
+        // in the overlay; Backspace takes the "x" back and Enter, with no
+        // accept path to relay into, is dropped rather than read as a
+        // motion — the ADR's known ceiling
+        for key in [
+            Key::Character("c".into()),
+            Key::Character("x".into()),
+            Key::Backspace,
+            Key::Enter,
+        ] {
+            press(&mut dom, sink, key, Modifiers::empty());
+        }
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"value="c""#), "{html}");
+        assert!(html.contains(">new note<"), "still step one: {html}");
+        assert_eq!(
+            picker_ids(&dom),
+            vec!["source", "concept", "claim", "project"]
+        );
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before, "the note behind never moved");
+    }
+
+    #[test]
+    fn a_key_at_the_pane_under_the_palette_joins_its_query() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        open_palette(&mut dom, keys[LOGS_KEYS]);
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("n".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"value="n""#), "{html}");
+        let labels = palette_labels(&dom);
+        assert!(!labels.is_empty());
+        assert!(labels.iter().all(|label| label.contains('n')), "{labels:?}");
+    }
+
+    #[test]
+    fn a_key_at_the_table_pane_under_the_creator_joins_its_query() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let mutations = press_for_mutations(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        let table_keys = listeners(&mutations, "keydown")[0];
+        open_creator(&mut dom, table_keys);
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        assert!(dioxus_ssr::render(&dom).contains(r#"value="i""#));
+        assert_eq!(picker_ids(&dom), vec!["organisation", "claim", "idea"]);
+    }
+
+    /// The three overlays with no query drop a bare key rather than let
+    /// the grammar run it; with nothing up the same key is the delete it
+    /// always was.
+    #[test]
+    fn a_key_at_the_sink_under_a_list_overlay_is_dropped_not_run() {
+        // one typeless note is the debt the loops overlay needs to render;
+        // with debt the ember takes click listener 2 (`EMBER`), so every
+        // block index of the fixture day note sits one higher than in a
+        // clean vault
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("permanent/typeless.typ"),
+            "#import \"/templates/template.typ\": *\n#show: note\n\
+             #meta(id: \"typeless\", created: \"2026-07-01\")\n\n= typeless\n",
+        )
+        .expect("the fixture vault is writable");
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_block(&mut dom, clicks[BLOCK_LINK + 1]);
+        let before = source_of(&dom);
+        assert!(before.contains("#l"), "the link line is active: {before}");
+        // dd, not x: the click leaves the caret past the line's end, where
+        // x has nothing under it; dd cuts the line from anywhere. Two keys
+        // also prove a leaked first d never completes into a cut
+        let dd = |dom: &mut VirtualDom| {
+            for _ in 0..2 {
+                press(
+                    dom,
+                    sink,
+                    Key::Character("d".into()),
+                    Modifiers::empty(),
+                );
+            }
+        };
+        let gone = |dom: &VirtualDom, overlay: &str| {
+            let html = dioxus_ssr::render(dom);
+            assert!(!html.contains(overlay), "{overlay} closed: {html}");
+        };
+
+        let (loops_keys, _, _) = open_loops_overlay(&mut dom, clicks[EMBER]);
+        dd(&mut dom);
+        press(&mut dom, loops_keys, Key::Escape, Modifiers::empty());
+        gone(&dom, "loops-list");
+        let (settings_keys, _) =
+            open_settings_overlay(&mut dom, keys[LOGS_KEYS]);
+        dd(&mut dom);
+        press(&mut dom, settings_keys, Key::Escape, Modifiers::empty());
+        gone(&dom, "command-palette settings");
+        let (notices_keys, _) =
+            open_notices_overlay(&mut dom, keys[LOGS_KEYS]);
+        dd(&mut dom);
+        press(&mut dom, notices_keys, Key::Escape, Modifiers::empty());
+        gone(&dom, ">notices<");
+        block_on(settle(&mut dom));
+        assert_eq!(source_of(&dom), before, "six keys, nothing moved");
+
+        dd(&mut dom);
+        block_on(settle(&mut dom));
+        assert_ne!(source_of(&dom), before, "with nothing up, dd cuts");
+    }
 
     #[test]
     fn ctrl_n_lists_the_eight_types_and_typing_narrows() {
