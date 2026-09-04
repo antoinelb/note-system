@@ -17,7 +17,7 @@ Choosing a template still opens it in the logs' centre pane: `edit_template` end
 The order is the table's own Ctrl+D (`open_daily` before `go_logs`):
 
 1. the flush guard first — a refused flush keeps the picker open and the note in place, unchanged;
-2. then a sheet's `select`-style bookkeeping — the sheet goes onto Ctrl+B's visit log, its picker and card close;
+2. then a sheet's `select`-style bookkeeping — the sheet goes onto the switcher's visit log, its picker and card close;
 3. then the editor takes the template, and only then does the screen change.
 
 Not `go_logs` itself: its `close_sheet` would put the logs' selected note back into the one editor the template is about to take.

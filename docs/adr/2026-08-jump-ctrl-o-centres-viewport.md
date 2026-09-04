@@ -1,5 +1,14 @@
 # Ctrl+O jumps to a note and centres the viewport on it
 
+> **Superseded 2026-09-04** by
+> `adr/2026-09-ctrl-o-is-the-one-note-switcher.md`: Ctrl+O now *opens* a
+> note from any screen rather than panning the table's viewport onto its
+> card, and the restriction to ids that have cards is gone with it —
+> time notes and untyped notes are switchable. `table::centre_on` and the
+> palette's "jump to note" row are removed. What survives is the matching
+> rule this ADR chose: `links::filter` over ids and titles, Ctrl+L's own
+> rule and cap.
+
 ## Context
 
 Phase 7's jump-to-note: search ids and titles, pan the viewport to the card.
