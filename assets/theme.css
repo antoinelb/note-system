@@ -325,11 +325,12 @@ body {
    host gives it — below the cap the column shrinks with its host rather
    than scrolling sideways, which is what CSS rendering makes free
    (rewrapping prose costs nothing once no SVG has to agree with it). The
-   two hosts no longer share one cap: the logs read at 720px
-   (adr/2026-09-the-logs-column-is-720px.md), the sheet still at the
-   compiled page's own width (14cm ≈ 529px, template.typ § note()). Around
-   the logs' column sit 177px of rail (176 + its hairline), 281px of jump
-   (248 + 32 of padding + its hairline) and `.centre`'s own 64px of
+   logs read at 720px (adr/2026-09-the-logs-column-is-720px.md); the
+   sheet's column no longer shares this rule at all: the sheet is an index
+   card sized against the pane, and a card is already a measure
+   (`.sheet-column` below, adr/2026-09-the-sheet-is-an-index-card.md).
+   Around the logs' column sit 177px of rail (176 + its hairline), 281px of
+   jump (248 + 32 of padding + its hairline) and `.centre`'s own 64px of
    padding, so 1242px is the window width below which the logs column
    starts giving room back. None of this reopens
    adr/2026-08-one-font-size-for-source-and-render.md — that ADR rejected
@@ -339,9 +340,11 @@ body {
   margin: 0 auto;
 }
 
+/* the sheet's reading column fills the card's content box: the card itself
+   bounds the measure, and a second cap inside it would leave the note in a
+   narrow strip of a wide card (adr/2026-09-the-sheet-is-an-index-card.md) */
 .sheet-column {
-  width: min(529px, 100%);
-  margin: 0 auto;
+  width: 100%;
 }
 
 .crumbs {
@@ -1321,11 +1324,12 @@ body {
   background: var(--selection);
 }
 
-/* left and width arrive inline from the table's geometry consts */
+/* an index card: landscape 5:3, centred on the table, the note scrolling
+   inside it. Left, top, width and height all arrive inline from
+   `table::sheet_frame`, the same function the tether measures against
+   (adr/2026-09-the-sheet-is-an-index-card.md) */
 .sheet {
   position: absolute;
-  top: 44px;
-  bottom: 44px;
   box-sizing: border-box;
   overflow-y: auto;
   padding: 24px 32px;
