@@ -185,19 +185,19 @@ fn the_theme_input_picks_the_templates_palette_column() {
         render_svg(&vault(), &note, &text, RenderTheme::Paper(DEFAULT_SIZE))
             .expect("the paper column renders");
     assert!(paper.contains("#ffffff"), "paper keeps the white page");
-    assert!(paper.contains("#45415a"), "and the light-column ink");
+    assert!(paper.contains("#45415a"), "and the paper-column ink");
 
     let dark =
         render_svg(&vault(), &note, &text, RenderTheme::Dark(DEFAULT_SIZE))
             .expect("the dark column renders");
     assert!(!dark.contains("#ffffff"), "no white anywhere (design § 4a)");
-    assert!(dark.contains("#c9c4dd"), "the dark-column ink");
+    assert!(dark.contains("#e0def4"), "the dark-column ink");
 
     let light =
         render_svg(&vault(), &note, &text, RenderTheme::Light(DEFAULT_SIZE))
             .expect("the light column renders");
     assert!(!light.contains("#ffffff"), "transparent page in-app");
-    assert!(light.contains("#45415a"), "the light-column ink");
+    assert!(light.contains("#1b1c22"), "the light-column ink");
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn checklist_items_render_as_task_circles() {
     let dark =
         render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
             .expect("the checklist renders");
-    assert!(dark.contains("#6fb08c"), "the dark done circle: {dark}");
+    assert!(dark.contains("#87d37c"), "the dark done circle: {dark}");
 
     let paper =
         render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
@@ -268,7 +268,7 @@ fn block_quotes_render_with_the_themes_muted_vertical_rule() {
     let dark =
         render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
             .expect("the dark quote renders");
-    assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
+    assert!(dark.contains("#908caa"), "the dark muted rule: {dark}");
 
     let paper =
         render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
@@ -290,7 +290,7 @@ fn a_greater_than_line_renders_the_same_muted_rule_as_an_explicit_quote() {
     let dark =
         render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
             .expect("the > quote renders");
-    assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
+    assert!(dark.contains("#908caa"), "the dark muted rule: {dark}");
 
     let paper =
         render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
@@ -311,7 +311,7 @@ fn a_greater_than_line_with_a_trailing_attribution_renders_it() {
     let without =
         render_svg(&vault(), &note, bare, RenderTheme::Dark(DEFAULT_SIZE))
             .expect("the bare > quote renders");
-    assert!(without.contains("#6f6a8c"), "the muted rule: {without}");
+    assert!(without.contains("#908caa"), "the muted rule: {without}");
 
     let with = render_svg(
         &vault(),
@@ -320,7 +320,7 @@ fn a_greater_than_line_with_a_trailing_attribution_renders_it() {
         RenderTheme::Dark(DEFAULT_SIZE),
     )
     .expect("the attributed > quote renders");
-    assert!(with.contains("#6f6a8c"), "the muted rule: {with}");
+    assert!(with.contains("#908caa"), "the muted rule: {with}");
     // the attribution is emphasised text after the body: its glyphs are
     // extra `<use>` references the bare quote never draws, the only
     // signal available since typst's SVG glyphs are opaque path/`<use>`
@@ -341,7 +341,7 @@ fn inline_quotes_are_promoted_to_full_width_block_quotes() {
     let dark =
         render_svg(&vault(), &note, text, RenderTheme::Dark(DEFAULT_SIZE))
             .expect("the dark quote renders");
-    assert!(dark.contains("#6f6a8c"), "the dark muted rule: {dark}");
+    assert!(dark.contains("#908caa"), "the dark muted rule: {dark}");
 
     let paper =
         render_svg(&vault(), &note, text, RenderTheme::Paper(DEFAULT_SIZE))
