@@ -1,5 +1,8 @@
 # The sheet's knobs freeze at the deck defaults
 
+> Superseded in part by `adr/2026-09-the-sheet-is-an-index-card.md`: daily-driving supplied the feel signal this ADR froze without, and `SHEET_LEFT`/`SHEET_WIDTH` are gone — the sheet is a 5:3 card sized from the pane by `table::sheet_frame`.
+> `--dim-opacity: 0.4` still stands.
+
 ## Context
 
 Phase 3 left `sheetW` and `dimOpacity` as the deck's open knobs — "pick by feel once it runs, then freeze".

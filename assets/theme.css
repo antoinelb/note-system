@@ -300,26 +300,25 @@ body {
 
 /* the reading column: the compiled page's own width (14cm ≈ 529px,
    template.typ § note()) as a cap, fluid below it, centred in whatever room
-   the host gives — the logs' `.centre` and the sheet's content box share
-   this exact rule so a note wraps at the same measure on both screens
-   wherever the window can afford the full 529px, and below that the column
-   shrinks with its host instead of scrolling sideways. The two hosts carry
-   different chrome — the logs spend 209px on the rail and 281px on the
-   jump, the sheet 440px of left offset — so once a window is too narrow to
-   give both of them 529px the two measures part company: measured in
-   headless Chromium, 529/529 at a 1920px viewport but 406 (logs) against
-   432 (sheet) at 960px. Equalising them below that point would mean capping
-   both to whichever host is narrower, which is a magic number that also
-   wastes ~100px on the sheet at full width; being fully visible wins over
-   being identical when the window is cramped. Going fluid is what CSS
-   rendering makes free:
+   the host gives, so once a window is too narrow to afford the full 529px
+   the column shrinks with its host instead of scrolling sideways. The
+   sheet's column no longer shares this rule: the sheet is an index card
+   sized against the pane, and a card is already a measure
+   (`.sheet-column` below, adr/2026-09-the-sheet-is-an-index-card.md).
+   Going fluid is what CSS rendering makes free:
    rewrapping prose costs nothing once no SVG has to agree with it, and this
    does not reopen adr/2026-08-one-font-size-for-source-and-render.md — that
    ADR rejected shrinking the *type* to fit a narrow pane, not the column. */
-.centre-column,
-.sheet-column {
+.centre-column {
   width: min(529px, 100%);
   margin: 0 auto;
+}
+
+/* the sheet's reading column fills the card's content box: the card itself
+   bounds the measure, and a second cap inside it would leave the note in a
+   narrow strip of a wide card (adr/2026-09-the-sheet-is-an-index-card.md) */
+.sheet-column {
+  width: 100%;
 }
 
 .crumbs {
@@ -1286,11 +1285,12 @@ body {
   background: var(--selection);
 }
 
-/* left and width arrive inline from the table's geometry consts */
+/* an index card: landscape 5:3, centred on the table, the note scrolling
+   inside it. Left, top, width and height all arrive inline from
+   `table::sheet_frame`, the same function the tether measures against
+   (adr/2026-09-the-sheet-is-an-index-card.md) */
 .sheet {
   position: absolute;
-  top: 44px;
-  bottom: 44px;
   box-sizing: border-box;
   overflow-y: auto;
   padding: 24px 32px;

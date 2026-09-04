@@ -261,11 +261,15 @@ fn age_days(created: Option<&str>, today: Date) -> Option<i32> {
     Some((today - date).get_days().max(0))
 }
 
-/// The sheet's fixed frame (wireframe state 6b: the panel from x=440; width
-/// is the deck's `sheetW` knob at its default), in viewport coordinates —
-/// the sheet never pans, the tether bridges the two spaces.
-pub const SHEET_LEFT: f64 = 440.0;
-pub const SHEET_WIDTH: f64 = 620.0;
+/// The sheet is an index card: a landscape 5:3 rectangle centred in the
+/// pane, at most `SHEET_MAX_WIDTH` wide and never nearer than
+/// `SHEET_MARGIN` to an edge on either axis
+/// (adr/2026-09-the-sheet-is-an-index-card.md). Viewport coordinates — the
+/// sheet never pans, the tether bridges the two spaces.
+pub const SHEET_MAX_WIDTH: f64 = 900.0;
+pub const SHEET_MARGIN: f64 = 44.0;
+/// The card's proportions: height over width, 3 to 5.
+pub const SHEET_RATIO: f64 = 3.0 / 5.0;
 /// Where the tether meets the card: its mid-height at titles zoom.
 pub const TETHER_DROP: f64 = 28.0;
 /// How far a press may wander and still read as a click (max-norm, px).
@@ -356,6 +360,33 @@ pub fn spawn_position(viewport: (f64, f64), pan: (f64, f64)) -> (f64, f64) {
     )
 }
 
+/// Where the card stands in the pane, in viewport coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheetFrame {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The card's frame in a pane this size: the widest 5:3 card that still
+/// leaves its margin on both axes, centred. A pane with no room for a card
+/// at all yields a zero-sized frame rather than a negative one — the
+/// tether's idiom, and nothing divides by either extent.
+pub fn sheet_frame(viewport: (f64, f64)) -> SheetFrame {
+    let width = SHEET_MAX_WIDTH
+        .min(viewport.0 - 2.0 * SHEET_MARGIN)
+        .min((viewport.1 - 2.0 * SHEET_MARGIN) / SHEET_RATIO)
+        .max(0.0);
+    let height = width * SHEET_RATIO;
+    SheetFrame {
+        left: (viewport.0 - width) / 2.0,
+        top: (viewport.1 - height) / 2.0,
+        width,
+        height,
+    }
+}
+
 /// The tether's box: a horizontal line at the card's mid-height, from the
 /// card's nearest edge to the sheet's, in viewport coordinates.
 #[derive(Debug, Clone, PartialEq)]
@@ -365,22 +396,29 @@ pub struct Tether {
     pub width: f64,
 }
 
-/// Where the tether runs for a card at canvas (x, y) under the current pan.
-/// A card left of the sheet tethers from its right edge; right of it, from
-/// the sheet's right edge; a card overlapping the sheet collapses to zero
-/// width — drawn as nothing rather than branched around.
-pub fn tether(card_x: f64, card_y: f64, pan: (f64, f64)) -> Tether {
+/// Where the tether runs for a card at canvas (x, y) under the current pan,
+/// against the sheet frame the pane is drawing. A card left of the sheet
+/// tethers from its right edge; right of it, from the sheet's right edge; a
+/// card overlapping the sheet collapses to zero width — drawn as nothing
+/// rather than branched around, which is what a card behind the centred
+/// index card comes to.
+pub fn tether(
+    card_x: f64,
+    card_y: f64,
+    pan: (f64, f64),
+    sheet: SheetFrame,
+) -> Tether {
     let left_edge = card_x + pan.0;
     let right_edge = left_edge + CARD_WIDTH;
     let top = card_y + pan.1 + TETHER_DROP;
-    if right_edge <= SHEET_LEFT {
+    if right_edge <= sheet.left {
         Tether {
             left: right_edge,
             top,
-            width: SHEET_LEFT - right_edge,
+            width: sheet.left - right_edge,
         }
     } else {
-        let sheet_right = SHEET_LEFT + SHEET_WIDTH;
+        let sheet_right = sheet.left + sheet.width;
         Tether {
             left: sheet_right,
             top,
@@ -734,22 +772,53 @@ mod tests {
     }
 
     #[test]
+    fn the_sheet_is_a_five_by_three_card_centred_in_the_pane() {
+        // a full-width window: the card stands at its own size, centred
+        let wide = sheet_frame((1920.0, 1080.0));
+        assert_eq!(
+            wide,
+            SheetFrame {
+                left: 510.0,
+                top: 270.0,
+                width: 900.0,
+                height: 540.0,
+            }
+        );
+        // and at the default viewport it still fits whole
+        assert_eq!(sheet_frame(DEFAULT_VIEWPORT).width, 900.0);
+        // a narrow window: the margin on both sides bounds the width, the
+        // proportions hold
+        let narrow = sheet_frame((720.0, 1080.0));
+        assert_eq!((narrow.width, narrow.height), (632.0, 379.2));
+        assert_eq!(narrow.left, 44.0);
+        // a short window: the height bounds it instead, same proportions
+        let short = sheet_frame((1920.0, 400.0));
+        assert_eq!((short.width, short.height), (520.0, 312.0));
+        assert_eq!(short.top, 44.0);
+        // a pane with no room at all draws no card rather than a negative
+        // one
+        assert_eq!(sheet_frame((40.0, 40.0)).width, 0.0);
+    }
+
+    #[test]
     fn a_card_left_of_the_sheet_tethers_from_its_right_edge() {
-        let drawn = tether(100.0, 200.0, (0.0, 0.0));
+        let sheet = sheet_frame(DEFAULT_VIEWPORT);
+        let drawn = tether(0.0, 200.0, (0.0, 0.0), sheet);
         assert_eq!(
             drawn,
             Tether {
-                left: 100.0 + CARD_WIDTH,
+                left: CARD_WIDTH,
                 top: 200.0 + TETHER_DROP,
-                width: SHEET_LEFT - (100.0 + CARD_WIDTH),
+                width: sheet.left - CARD_WIDTH,
             }
         );
     }
 
     #[test]
     fn the_pan_moves_the_tether_with_the_card() {
-        let still = tether(100.0, 200.0, (0.0, 0.0));
-        let panned = tether(100.0, 200.0, (40.0, -16.0));
+        let sheet = sheet_frame(DEFAULT_VIEWPORT);
+        let still = tether(-300.0, 200.0, (0.0, 0.0), sheet);
+        let panned = tether(-300.0, 200.0, (40.0, -16.0), sheet);
         assert_eq!(panned.left, still.left + 40.0);
         assert_eq!(panned.top, still.top - 16.0);
         // the sheet stands still while the card slides toward it
@@ -758,20 +827,23 @@ mod tests {
 
     #[test]
     fn a_card_right_of_the_sheet_tethers_from_the_sheets_edge() {
-        let drawn = tether(1200.0, 60.0, (0.0, 0.0));
-        assert_eq!(drawn.left, SHEET_LEFT + SHEET_WIDTH);
-        assert_eq!(drawn.width, 1200.0 - (SHEET_LEFT + SHEET_WIDTH));
+        let sheet = sheet_frame(DEFAULT_VIEWPORT);
+        let right = sheet.left + sheet.width;
+        let drawn = tether(1200.0, 60.0, (0.0, 0.0), sheet);
+        assert_eq!(drawn.left, right);
+        assert_eq!(drawn.width, 1200.0 - right);
         assert_eq!(drawn.top, 60.0 + TETHER_DROP);
     }
 
     #[test]
     fn a_card_overlapping_the_sheet_draws_no_tether() {
+        let sheet = sheet_frame(DEFAULT_VIEWPORT);
         // straddling the sheet's left edge
         let straddling =
-            tether(SHEET_LEFT - CARD_WIDTH / 2.0, 0.0, (0.0, 0.0));
+            tether(sheet.left - CARD_WIDTH / 2.0, 0.0, (0.0, 0.0), sheet);
         assert_eq!(straddling.width, 0.0);
         // and fully under it
-        let under = tether(SHEET_LEFT + 40.0, 0.0, (0.0, 0.0));
+        let under = tether(sheet.left + 40.0, 0.0, (0.0, 0.0), sheet);
         assert_eq!(under.width, 0.0);
     }
 

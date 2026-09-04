@@ -3372,7 +3372,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         .as_deref()
         .and_then(|open| placed.iter().find(|card| card.id == open))
         .map(|card| {
-            let line = table::tether(card.x, card.y, pan());
+            let line = table::tether(
+                card.x,
+                card.y,
+                pan(),
+                table::sheet_frame(viewport()),
+            );
             let seed = (card.id.clone(), card.x, card.y);
             // the raised copy is a `.table` child outside the panned
             // canvas, so its inline position carries the pan itself
@@ -4882,15 +4887,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     {raised_layer.unwrap_or_else(|| rsx! {})}
                     aside {
                         class: "sheet",
-                        // the panel's nominal geometry (left, width) is the
-                        // table's own consts, but a narrow window must
-                        // still be able to shrink it — `.sheet-column`'s
-                        // `min(529px, 100%)` (assets/theme.css) can only
-                        // shrink what is *inside* this box, so the box
-                        // itself needs the same ceiling or it runs past a
-                        // window narrower than SHEET_LEFT + SHEET_WIDTH
-                        // (item 8, adr/2026-08-css-draws-the-markup.md)
-                        style: "left: {table::SHEET_LEFT}px; width: {table::SHEET_WIDTH}px; max-width: calc(100vw - {table::SHEET_LEFT}px - 24px)",
+                        // the index card's whole frame, from the same
+                        // function the tether measures against, so the line
+                        // always meets the card it points at; the frame is
+                        // already bounded by the observed pane, which is
+                        // what a narrow window needs — no CSS ceiling on
+                        // top of it (adr/2026-09-the-sheet-is-an-index-card.md)
+                        style: {
+                            let frame = table::sheet_frame(viewport());
+                            format!(
+                                "left: {}px; top: {}px; width: {}px; height: {}px",
+                                frame.left, frame.top, frame.width, frame.height
+                            )
+                        },
                         // a press inside the sheet is the sheet's own (text
                         // selection, block clicks) — never the void's pan
                         onmousedown: move |event: MouseEvent| event.stop_propagation(),
@@ -7184,15 +7193,21 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="dim""#), "{html}");
         assert!(html.contains("raised"), "{html}");
-        // alpha at (32, 32): its right edge to the sheet's left edge
+        // alpha at (32, 32) stands under the centred index card: the tether
+        // collapses to nothing rather than pointing through it
+        // (adr/2026-09-the-sheet-is-an-index-card.md) — the tracking test
+        // below drags the card out into the margin and reads a real line
         assert!(
             html.contains(
-                r#"class="tether" style="left: 208px; top: 60px; width: 232px""#
+                r#"class="tether" style="left: 1090px; top: 60px; width: 0px""#
             ),
             "{html}"
         );
+        // the card itself: 900 × 540, centred in the 1280 × 800 default
         assert!(
-            html.contains(r#"style="left: 440px; width: 620px; max-width: calc(100vw - 440px - 24px)""#),
+            html.contains(
+                r#"style="left: 190px; top: 130px; width: 900px; height: 540px""#
+            ),
             "{html}"
         );
         // the origin card left the canvas for its raised copy — one alpha
@@ -7387,13 +7402,15 @@ mod tests {
         // document order above the dim: the raised card, then the aside
         let raised = listeners(&opened, "mousedown")[0];
 
-        // dragging the raised card drags the tether's card end
+        // dragging the raised card out into the margin left of the index
+        // card drags the tether's card end with it: alpha lands at
+        // (−168, 52), its right edge 8px from the pane's left edge
         mouse(&mut dom, "mousedown", raised, (0.0, 0.0));
-        mouse(&mut dom, "mousemove", pane, (10.0, 20.0));
-        mouse(&mut dom, "mouseup", pane, (10.0, 20.0));
+        mouse(&mut dom, "mousemove", pane, (-200.0, 20.0));
+        mouse(&mut dom, "mouseup", pane, (-200.0, 20.0));
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains("left: 218px; top: 80px; width: 222px"),
+            html.contains("left: 8px; top: 80px; width: 182px"),
             "the tether followed the drag: {html}"
         );
 
@@ -7403,11 +7420,13 @@ mod tests {
         mouse(&mut dom, "mouseup", pane, (190.0, 180.0));
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains("left: 208px; top: 60px; width: 232px"),
+            html.contains("left: -2px; top: 60px; width: 192px"),
             "the tether followed the pan: {html}"
         );
         assert!(
-            html.contains(r#"style="left: 440px; width: 620px; max-width: calc(100vw - 440px - 24px)""#),
+            html.contains(
+                r#"style="left: 190px; top: 130px; width: 900px; height: 540px""#
+            ),
             "the sheet stood still: {html}"
         );
     }
@@ -19382,16 +19401,17 @@ mod tests {
 
     /// The two editor hosts share one `blocks_view` closure over the one
     /// editor signal (adr/2026-08-sheet-reuses-the-one-editor.md) and are
-    /// reconciled onto one fluid reading-column width rule in
-    /// `assets/theme.css` (`.centre-column, .sheet-column { width:
-    /// min(529px, 100%); … }`) — this opens the identical note body
-    /// through both (`twin_vault`, the only way to reach the same content
-    /// from both hosts, since the logs pane is date-scoped and the table
-    /// only cards non-time notes) and checks the architecture actually
-    /// holds: the `note-blocks` subtree comes out byte for byte the same,
-    /// and each host wraps it in its own reading-column class exactly
-    /// once, so a regression that special-cases one host, or that drops
-    /// the shared width rule from either wrapper, fails loud.
+    /// each wrapped in its own reading column in `assets/theme.css` — the
+    /// logs' fluid `.centre-column`, the sheet's `.sheet-column` filling
+    /// the index card that already bounds it
+    /// (adr/2026-09-the-sheet-is-an-index-card.md) — this opens the
+    /// identical note body through both (`twin_vault`, the only way to
+    /// reach the same content from both hosts, since the logs pane is
+    /// date-scoped and the table only cards non-time notes) and checks the
+    /// architecture actually holds: the `note-blocks` subtree comes out
+    /// byte for byte the same, and each host wraps it in its own
+    /// reading-column class exactly once, so a regression that
+    /// special-cases one host, or that drops a wrapper, fails loud.
     #[test]
     fn the_logs_and_the_sheet_render_one_note_the_same_way() {
         let vault = twin_vault();
