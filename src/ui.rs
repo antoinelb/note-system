@@ -1235,12 +1235,35 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             if !editor.write().flush() {
                 return;
             }
+            // reached from the table, the pick carries the screen with it:
+            // the template still opens in the logs' centre pane, the one
+            // full-page surface the shared editor has
+            // (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md).
+            // A sheet open over the table holds that same editor, so it
+            // gets `select`'s bookkeeping first — the sheet onto Ctrl+B's
+            // log (Escape out of a template lands on the logs selection,
+            // so the visit log is the only way back to the sheet), then
+            // card and picker closed — and only then does the screen
+            // change, the order the table's own Ctrl+D follows
+            // (`open_daily` before `go_logs`). Not `go_logs`: its
+            // `close_sheet` would put the logs' selected note back into
+            // the editor the template is about to take. Cloned out first,
+            // `select`'s own idiom: the peek guard must drop before the
+            // body writes the signal back.
+            let sheeted = sheet.peek().clone();
+            if let Some(own) = sheeted {
+                history.with_mut(|stack| push_visit(stack, Visit::Sheet(own)));
+                picker.set(None);
+                sheet.set(None);
+            }
             close_templates.call(());
             editor.set(Editor::open(
                 root.join("templates").join(format!("{name}.typ")),
             ));
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
+            // a no-op on the logs, where the pane already stands
+            screen.set(Screen::Logs);
         }
     });
 
@@ -1567,6 +1590,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
         filter_picker.set(None);
         jump.set(None);
+        // the template picker now stands over this screen too, so it
+        // leaves the way it leaves the logs — go_table's mirror
+        // (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md)
+        template_picker.set(None);
         screen.set(Screen::Logs);
     });
     // Ctrl+B, a recent-notes picker over the visit log
@@ -3763,6 +3790,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !settings_open() =>
             {
@@ -3777,6 +3805,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !settings_open()
                     && !notices_open()
@@ -3796,6 +3825,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && picker.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !settings_open() =>
             {
@@ -3817,6 +3847,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !settings_open() =>
             {
@@ -3844,6 +3875,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !settings_open() =>
             {
@@ -3860,6 +3892,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !notices_open()
                     && !loops_open() =>
@@ -3877,6 +3910,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !finder_open()
                     && !settings_open() =>
@@ -3923,6 +3957,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && !event.modifiers().shift()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !finder_open()
                     && palette.peek().is_none()
@@ -3942,6 +3977,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && event.modifiers().shift()
                     && filter_picker.peek().is_none()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && !finder_open()
                     && palette.peek().is_none()
@@ -3956,6 +3992,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 if character == "o"
                     && event.modifiers().ctrl()
                     && jump.peek().is_none()
+                    && template_picker.peek().is_none()
                     && back.peek().is_none()
                     && filter_picker.peek().is_none()
                     && palette.peek().is_none()
@@ -4948,6 +4985,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         }
                     }
                 }
+                // the edit-template picker, the same command the logs
+                // answer: it floats in the palette's box but lives inside
+                // this branch like the finders below, so its chords bubble
+                // to the table pane the way they bubble to the logs pane
+                // (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md)
+                {template_view()}
                 // the finders float in the palette's box, but live inside
                 // the table branch: the screen switch unmounts them and
                 // go_logs clears their state
@@ -13050,7 +13093,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_the_table_closes_the_template_picker() {
+    fn a_screen_switch_closes_the_template_picker() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -13058,20 +13101,130 @@ mod tests {
             open_template_picker(&mut dom, keys[LOGS_KEYS]);
         // the chord bubbles through the overlay to the pane: the screen
         // switches and the picker, its input about to unmount, closes
-        press(
+        let mutations = press_for_mutations(
             &mut dom,
             picker_keys,
             Key::Character("1".into()),
             Modifiers::CONTROL,
         );
         assert!(picker_ids(&dom).is_empty());
+        let table_keys = listeners(&mutations, "keydown")[0];
+
+        // and the mirror: the picker the table now hosts leaves the same
+        // way (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md)
+        let (_input, picker_keys) = open_template_picker(&mut dom, table_keys);
+        assert!(!picker_ids(&dom).is_empty());
         press(
             &mut dom,
-            keys[LOGS_KEYS],
+            picker_keys,
             Key::Character("2".into()),
             Modifiers::CONTROL,
         );
-        assert!(picker_ids(&dom).is_empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(picker_ids(&dom).is_empty(), "{html}");
+        assert!(html.contains(r#"class="logs""#), "{html}");
+    }
+
+    /// The command is available on the table too, and its picker is
+    /// rendered inside that branch as well as the logs' so it stands over
+    /// either screen: a pick switches to the logs and opens the template
+    /// in the centre pane, the one full-page surface the shared editor has
+    /// (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md).
+    #[test]
+    fn the_table_picks_a_template_and_lands_on_the_logs() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let mutations = press_for_mutations(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        let table_keys = listeners(&mutations, "keydown")[0];
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="table""#));
+
+        let (_input, picker_keys) = open_template_picker(&mut dom, table_keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="table""#), "still the table: {html}");
+        assert_eq!(
+            picker_ids(&dom),
+            [
+                "capture", "concept", "daily", "seasonal", "template",
+                "weekly"
+            ]
+        );
+
+        // a key that beat the input's focus grab reaches the table pane
+        // and is relayed into the picker's query, never read as a chord
+        // there (adr/2026-09-overlay-keys-relay-before-focus-lands.md)
+        press(
+            &mut dom,
+            table_keys,
+            Key::Character("c".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"value="c""#), "{html}");
+        assert_eq!(picker_ids(&dom), ["capture", "concept"]);
+
+        // and Escape closes it where it stands, the logs' own gesture
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(picker_ids(&dom).is_empty(), "{html}");
+        assert!(html.contains(r#"class="table""#), "{html}");
+
+        let (input, picker_keys) = open_template_picker(&mut dom, table_keys);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="logs""#), "the screen came: {html}");
+        assert!(
+            html.contains(r#"<span class="crumb">templates</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="crumb">concept</span>"#),
+            "{html}"
+        );
+    }
+
+    /// A sheet holds the same one editor, so it gets `select`'s
+    /// bookkeeping — onto Ctrl+B's log, then closed — before the screen
+    /// changes, the order the table's own Ctrl+D follows
+    /// (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md).
+    #[test]
+    fn a_template_picked_over_a_sheet_takes_the_sheet_with_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, table_keys) =
+            table_targets_with_keys(&mut dom, &clicks);
+        open_sheet_on(&mut dom, pane, cards[0]);
+        assert!(dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
+
+        let (input, picker_keys) = open_template_picker(&mut dom, table_keys);
+        type_into(&mut dom, input, "daily");
+        let landed = press_for_mutations(
+            &mut dom,
+            picker_keys,
+            Key::Enter,
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "sheet gone: {html}");
+        assert!(html.contains(r#"class="logs""#), "the screen came: {html}");
+        assert!(
+            html.contains(r#"<span class="crumb">daily</span>"#),
+            "{html}"
+        );
+
+        // the sheet went onto the visit log on its way out: Escape out of
+        // a template lands on the logs selection, so Ctrl+B is the only
+        // way back to the card
+        let logs_keys = listeners(&landed, "keydown")[0];
+        let (_input, _picker_keys, _) = open_back_picker(&mut dom, logs_keys);
+        assert_eq!(picker_ids(&dom), ["alpha"]);
     }
 
     #[test]

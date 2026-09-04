@@ -1,5 +1,9 @@
 # Templates edit in the one editor, reached by a palette command
 
+> **Amended by `2026-09-edit-template-reaches-the-logs-from-the-table.md`.**
+> The command is no longer hidden on the table: the picker stands over that screen too, and a pick switches to the logs and opens the template there.
+> Everything else below still holds — the template still opens in the logs' centre pane, the sheet was still not generalized to hold paths.
+
 ## Context
 
 Templates are editable notes by design, but nothing in the app could open one: the editor's five open paths all derive from the logs selection or the index, and templates are never indexed (`scan_vault` walks only the category directories).

@@ -77,7 +77,9 @@ pub const COMMANDS: [Command; 34] = [
         chord: None,
     },
     // chordless: reshaping what every future note looks like is rare and
-    // deliberate (adr/2026-08-template-editing-in-the-one-editor.md)
+    // deliberate (adr/2026-08-template-editing-in-the-one-editor.md);
+    // available everywhere, the table included
+    // (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md)
     Command {
         id: CommandId::EditTemplate,
         label: "edit template",
@@ -338,10 +340,11 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::KeepMine | CommandId::TakeDisk => context.conflict,
         // nothing held, nothing to take back
         CommandId::Undo => context.undoable,
-        // the template opens in the logs' centre pane — the one full-page
-        // surface the shared editor has off the table
-        // (adr/2026-08-template-editing-in-the-one-editor.md)
-        CommandId::EditTemplate => !context.on_table,
+        // "edit template" is deliberately absent: the template still opens
+        // in the logs' centre pane, but the command reaches it from the
+        // table too — the picker stands over either screen and a pick
+        // carries the screen with it
+        // (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md)
         _ => true,
     }
 }
@@ -578,13 +581,17 @@ mod tests {
         assert_eq!(labels(&filter("export", AT_SHEET)), vec!["export pdf"]);
     }
 
+    /// The command reaches the one editor from every screen: on the table
+    /// a pick switches to the logs and opens it there
+    /// (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md).
     #[test]
-    fn edit_template_hides_on_the_table() {
-        assert_eq!(labels(&filter("template", AT_TABLE)), Vec::<&str>::new());
-        assert_eq!(
-            labels(&filter("template", READING)),
-            vec!["edit template"]
-        );
+    fn edit_template_stands_on_every_screen() {
+        for context in [READING, EDITING, AT_TABLE, AT_SHEET, AT_BODIES] {
+            assert_eq!(
+                labels(&filter("template", context)),
+                vec!["edit template"]
+            );
+        }
     }
 
     #[test]
