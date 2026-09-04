@@ -181,13 +181,35 @@ body {
 
 /* -- the one-line chrome: two icons, one number --------------------------- */
 
-/* mockup padding 10px 18px, normalized to multiples of 4 */
+/* mockup padding 10px 18px, normalized to multiples of 4. The 20px
+   min-height reserves the notice line's own line box in every state, so
+   the bare table's notice arriving or leaving never moves the canvas
+   under it (adr/2026-09-the-table-draws-the-notice-line.md); the 14px
+   icons stay centred in that taller row. */
 .chrome {
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 8px 16px;
+  min-height: 20px;
   color: var(--ink-muted);
+}
+
+/* the notice line in the chrome: the same node the logs and the sheet
+   render, given the header's metrics — the paragraph's own 1em margins
+   and its 16px padding both off (either would grow the header past the
+   20px reserved for it), one line box tall, and truncated rather than
+   wrapped, because a second line would shift the canvas too. The full
+   text stays readable in the palette's "notices" history. */
+.chrome .notice {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chrome svg {

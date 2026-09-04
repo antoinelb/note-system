@@ -83,6 +83,10 @@ the list, rather than closed over a note that never moved.
 **A broken index costs the typed half only.** The visit log is app state
 and needs no read, so the switcher still opens on it with the notice on
 the status line saying why the rest is empty.
+*(Amended 2026-09-04: on a bare table — the switcher's own screen, with
+no sheet open — there was no status line to say it on, so this promise
+was half kept. The chrome draws the line there now:
+`adr/2026-09-the-table-draws-the-notice-line.md`.)*
 
 **What goes.** Ctrl+B, its "recent notes" palette row and `Back`,
 `back_query`, `open_back`, `back_to`; the table's jump-to-card, its

@@ -3966,6 +3966,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             loops: loops.read().len(),
             filter: filter.read().as_ref().map(table::filter_label),
             liveness: status.read().liveness(),
+            // the bare table is the one screen with no reading column: the
+            // logs draw the line in their centre pane and a sheet draws it
+            // inside itself, so the chrome takes it exactly when neither
+            // does (adr/2026-09-the-table-draws-the-notice-line.md)
+            notice: if screen() == Screen::Table && sheet_open.is_none() {
+                notice.clone()
+            } else {
+                None
+            },
             // overlays never stack (adr/2026-08-settings-overlay.md): the
             // chrome sits above the floating overlays' box, so the ember
             // stays clickable while one is up and must go inert instead
@@ -5282,13 +5291,21 @@ fn point(event: &MouseEvent, scale: f64) -> (f64, f64) {
 /// (adr/2026-08-loops-list-overlay.md). The glyph is the one thing that
 /// never disappears: liveness is a fact in every state, rendered in the
 /// same place — a ring watching, filled otherwise, so the state survives
-/// greyscale (adr/2026-08-status-surface-owns-notices.md).
+/// greyscale (adr/2026-08-status-surface-owns-notices.md). It also holds
+/// the notice line for the one screen with no reading column to hold it:
+/// the bare table (adr/2026-09-the-table-draws-the-notice-line.md). The
+/// caller decides when — the logs' centre pane and the sheet draw their
+/// own — and passes `None` otherwise, so no screen ever shows two.
 #[component]
 fn Chrome(
     screen: Screen,
     loops: usize,
     filter: Option<String>,
     liveness: Liveness,
+    /// The status surface's one line when this chrome is the one drawing
+    /// it; the header reserves its height in every state, so it arriving
+    /// and leaving moves nothing under it (theme.css § chrome).
+    notice: Option<Notice>,
     on_ember: EventHandler<()>,
     on_table: EventHandler<()>,
     on_logs: EventHandler<()>,
@@ -5323,6 +5340,12 @@ fn Chrome(
             // (adr/2026-08-filter-overlay-ctrl-f.md)
             if let Some(label) = filter {
                 span { class: "filter-label", "{label}" }
+            }
+            // the same node the logs' centre column and the sheet render,
+            // class and text unchanged — only its metrics are the
+            // chrome's (adr/2026-09-the-table-draws-the-notice-line.md)
+            if let Some(shown) = notice {
+                p { class: "notice {shown.class()}", "{shown.text}" }
             }
             if loops > 0 {
                 span {
@@ -6651,6 +6674,7 @@ mod tests {
                 screen,
                 loops: 0,
                 liveness: Liveness::Watching,
+                notice: None,
                 on_ember: move |()| {},
                 on_table: move |()| {},
                 on_logs: move |()| {},
@@ -7787,6 +7811,95 @@ mod tests {
         assert!(
             html.contains(r#"class="sheet""#),
             "the sheet stands: {html}"
+        );
+    }
+
+    /// The bare table — no sheet, no reading column — drew no notice line
+    /// at all before this, so a failed index read behind the switcher's
+    /// typed rows left an empty list and no reason. The chrome draws it
+    /// (adr/2026-09-the-table-draws-the-notice-line.md), and the text
+    /// travels with the class: a hue alone says nothing.
+    #[test]
+    fn a_failed_index_read_on_the_bare_table_shows_the_notice() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_pane, _cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("notice-"), "the table opens clean: {html}");
+
+        replace_database_with_a_directory(vault.path());
+        open_switcher(&mut dom, keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">open note<"), "it opened anyway: {html}");
+        assert_eq!(
+            chrome_of(&html).matches("notice-warning").count(),
+            1,
+            "the chrome carries the one line: {html}"
+        );
+        assert!(
+            chrome_of(&html).contains("links: "),
+            "with its text, not just its class: {html}"
+        );
+    }
+
+    /// The gate is the notice's own, unchanged: the next good read
+    /// resolves it wherever it is drawn
+    /// (adr/2026-09-index-notices-resolve-on-a-good-lookup.md).
+    #[test]
+    fn the_bare_tables_notice_resolves_on_the_next_good_read() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_pane, _cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        replace_database_with_a_directory(vault.path());
+        let (_input, picker_keys, _) = open_switcher(&mut dom, keys);
+        assert!(dioxus_ssr::render(&dom).contains("notice-warning"));
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+
+        std::fs::remove_dir(vault.path().join(".index/index.db"))
+            .expect("the sabotage lifts");
+        open_switcher(&mut dom, keys);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("notice-"),
+            "the good lookup resolves it: {html}"
+        );
+        assert!(html.contains(r#"class="table""#), "{html}");
+    }
+
+    /// Two places that can draw the line, never both: a sheet opening over
+    /// the bare table takes the notice with it, so the reader sees one
+    /// message where they are looking and none behind it
+    /// (adr/2026-09-the-table-draws-the-notice-line.md).
+    #[test]
+    fn a_sheet_opening_over_the_table_takes_the_notice_line_with_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        replace_database_with_a_directory(vault.path());
+        let (_input, picker_keys, _) = open_switcher(&mut dom, keys);
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(html.matches("notice-warning").count(), 1, "{html}");
+        assert!(chrome_of(&html).contains("notice-warning"), "{html}");
+
+        // the sheet's own lookup fails the same way, and reports on the
+        // same source: still one notice, now inside the sheet
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"class="sheet""#), "{html}");
+        assert_eq!(
+            html.matches("notice-warning").count(),
+            1,
+            "one line, not two: {html}"
+        );
+        assert!(
+            !chrome_of(&html).contains("notice-"),
+            "the sheet took it over: {html}"
         );
     }
 
@@ -19307,6 +19420,17 @@ mod tests {
 
     /// Makes `Index::open` fail for every later read: the database path
     /// becomes a directory, which SQLite cannot open.
+    /// The chrome header's own markup, cut out of a rendered page: the
+    /// notice line lives in two places now, and "somewhere on the page"
+    /// cannot tell them apart
+    /// (adr/2026-09-the-table-draws-the-notice-line.md).
+    fn chrome_of(html: &str) -> &str {
+        html.split(r#"<header class="chrome">"#)
+            .nth(1)
+            .and_then(|rest| rest.split("</header>").next())
+            .expect("every screen mounts the chrome")
+    }
+
     fn replace_database_with_a_directory(vault: &Path) {
         let db = vault.join(".index/index.db");
         std::fs::remove_file(&db).expect("the database is removed");

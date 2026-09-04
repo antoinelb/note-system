@@ -166,15 +166,17 @@ e2e_click_at() {
 }
 
 # The chrome header (assets/theme.css .chrome: flex, 8px/16px padding,
-# 16px gap, align-items center) packs two 14x14 icons left to right, table
-# then logs, both centred on the header's own 14px-tall line box. Measured
-# once off an e2e_shot of a fresh window: table's icon spans x 16-30,
-# logs' spans x 46-60, both y 8-22 — the coordinates below are each
-# icon's centre.
+# 16px gap, align-items center, 20px min-height) packs two 14x14 icons
+# left to right, table then logs, both centred on the header's 20px-tall
+# content box — which is 20px, not 14px, because the header reserves the
+# notice line's own line box in every state
+# (adr/2026-09-the-table-draws-the-notice-line.md). Measured off an
+# e2e_shot of a fresh window: table's icon spans x 16-29, logs' spans
+# x 46-58, both y 12-24 — the coordinates below are each icon's centre.
 e2e_click_chrome() {
     case "$1" in
-        table) e2e_click_at 23 15 ;;
-        logs) e2e_click_at 53 15 ;;
+        table) e2e_click_at 23 18 ;;
+        logs) e2e_click_at 53 18 ;;
         *) e2e_fail "e2e_click_chrome: unknown icon '$1'" ;;
     esac
 }
