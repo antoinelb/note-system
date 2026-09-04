@@ -1,25 +1,11 @@
 #!/bin/sh
-# The course type and the due loops
-# (adr/2026-09-course-type-and-due-loops.md): Ctrl+N offers "course" as the
-# ninth permanent type and writes the note from its template, and a note
-# whose `due` day has gone by is an open loop whose line opens the note
-# that owes it. The vault and the index are the oracles.
+# The due loops (adr/2026-09-course-type-and-due-loops.md): a note whose
+# `due` day has gone by is an open loop whose line opens the note that
+# owes it. The vault and the index are the oracles.
 . "$(dirname "$0")/harness.sh"
 
 trap e2e_stop EXIT INT TERM
 e2e_start
-
-# the creator's two steps, each paced behind its focus grab
-# (create-then-follow.test.sh names the same trap)
-e2e_key_paced ctrl+n
-e2e_type_paced "course"
-e2e_key_paced Return
-e2e_type_paced "analyse numerique"
-e2e_key_paced Return
-e2e_file_appears "permanent/analyse-numerique.typ"
-e2e_note_holds "permanent/analyse-numerique.typ" 'type: "course"'
-e2e_index_holds \
-    "SELECT 1 FROM notes WHERE id = 'analyse-numerique' AND type = 'course';"
 
 # the fixture's devoir-1 is due 2026-07-20, four days before E2E_TODAY: an
 # overdue loop. The index carries the day the loops list judges against

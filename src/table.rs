@@ -162,7 +162,7 @@ pub struct FilterEntry {
     pub filter: Filter,
 }
 
-/// The overlay's full vocabulary: every tag, then the nine permanent
+/// The overlay's full vocabulary: every tag, then the eight permanent
 /// types — a closed list an empty query shows whole.
 pub fn filter_entries(tags: &[String]) -> Vec<FilterEntry> {
     tags.iter()
@@ -201,7 +201,7 @@ pub fn centre_on(card: &Card, zoom: Zoom, viewport: (f64, f64)) -> (f64, f64) {
 }
 
 /// The kind the card is drawn as. Presentation keys on the type: a capture
-/// that gained one of the nine permanent types is promoted on sight — hue,
+/// that gained one of the eight permanent types is promoted on sight — hue,
 /// full fill, type label — while the file stays in `capture/` and the index
 /// category stays honest (adr/2026-08-typed-capture-wears-its-hue.md).
 fn presented_kind(note: &TableNote) -> NoteCategory {
@@ -462,7 +462,7 @@ fn clip(from: &Card, to: &Card) -> Option<(f64, f64, f64, f64)> {
     ))
 }
 
-/// The 3px bar, keyed on the presented kind: nine permanent hues;
+/// The 3px bar, keyed on the presented kind: eight permanent hues;
 /// everything else — captures, unknown or time-scale types, no type at all
 /// — is the grey of visible debt, and generated notes keep their own dashed
 /// bar.
@@ -480,7 +480,6 @@ fn bar_class(kind: NoteCategory, note: &TableNote) -> &'static str {
                 Some(NoteType::Idea) => "bar-idea",
                 Some(NoteType::Personal) => "bar-personal",
                 Some(NoteType::Project) => "bar-project",
-                Some(NoteType::Course) => "bar-course",
                 Some(_) | None => "bar-untyped",
             }
         }
@@ -531,7 +530,6 @@ mod tests {
             (NoteType::Idea, "bar-idea"),
             (NoteType::Personal, "bar-personal"),
             (NoteType::Project, "bar-project"),
-            (NoteType::Course, "bar-course"),
         ];
         for (note_type, expected) in cases {
             let name = note_type.as_name().to_string();
@@ -983,16 +981,15 @@ mod tests {
     }
 
     #[test]
-    fn filter_entries_list_every_tag_then_the_nine_types() {
+    fn filter_entries_list_every_tag_then_the_eight_types() {
         let entries =
             filter_entries(&["method".to_string(), "zettel".to_string()]);
-        assert_eq!(entries.len(), 11);
+        assert_eq!(entries.len(), 10);
         assert_eq!(entries[0].label, "method");
         assert_eq!(entries[0].filter, Filter::Tag("method".to_string()));
         assert_eq!(entries[2].label, "person");
         assert_eq!(entries[2].filter, Filter::Type(NoteType::Person));
         assert_eq!(entries[9].filter, Filter::Type(NoteType::Project));
-        assert_eq!(entries[10].filter, Filter::Type(NoteType::Course));
     }
 
     #[test]

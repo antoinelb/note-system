@@ -42,7 +42,6 @@ pub enum NoteType {
     Idea,
     Personal,
     Project,
-    Course,
     Daily,
     Weekly,
     Seasonal,
@@ -61,7 +60,6 @@ impl NoteType {
             "idea" => NoteType::Idea,
             "personal" => NoteType::Personal,
             "project" => NoteType::Project,
-            "course" => NoteType::Course,
             "daily" => NoteType::Daily,
             "weekly" => NoteType::Weekly,
             "seasonal" => NoteType::Seasonal,
@@ -70,7 +68,7 @@ impl NoteType {
         }
     }
 
-    /// Whether this is one of the nine types a permanent note can carry —
+    /// Whether this is one of the eight types a permanent note can carry —
     /// the closed set the type bars, the create picker and the promotion
     /// treatment all key on (adr/2026-08-typed-capture-wears-its-hue.md).
     pub fn is_permanent(&self) -> bool {
@@ -84,7 +82,6 @@ impl NoteType {
                 | NoteType::Idea
                 | NoteType::Personal
                 | NoteType::Project
-                | NoteType::Course
         )
     }
 
@@ -98,7 +95,6 @@ impl NoteType {
             NoteType::Idea => "idea",
             NoteType::Personal => "personal",
             NoteType::Project => "project",
-            NoteType::Course => "course",
             NoteType::Daily => "daily",
             NoteType::Weekly => "weekly",
             NoteType::Seasonal => "seasonal",
@@ -215,7 +211,6 @@ mod tests {
             ("idea", NoteType::Idea),
             ("personal", NoteType::Personal),
             ("project", NoteType::Project),
-            ("course", NoteType::Course),
             ("daily", NoteType::Daily),
             ("weekly", NoteType::Weekly),
             ("seasonal", NoteType::Seasonal),

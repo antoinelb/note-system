@@ -15541,8 +15541,8 @@ mod tests {
         assert!(html.contains(">filter<"), "the head names it: {html}");
         assert_eq!(
             picker_ids(&dom).len(),
-            10,
-            "one tag, then the nine types: {html}"
+            9,
+            "one tag, then the eight types: {html}"
         );
         // arrows move the highlight; an unhandled key is absorbed; a
         // second Ctrl+F over the open overlay is inert
@@ -15556,7 +15556,7 @@ mod tests {
         );
         press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
         press(&mut dom, filter_keys, ctrl_f(), Modifiers::CONTROL);
-        assert_eq!(picker_ids(&dom).len(), 10, "still the one overlay");
+        assert_eq!(picker_ids(&dom).len(), 9, "still the one overlay");
 
         // a query no entry matches: enter guesses nothing, the overlay holds
         type_into(&mut dom, input, "xyzzy");
@@ -16437,7 +16437,7 @@ mod tests {
         assert!(html.contains(">new note<"), "still step one: {html}");
         assert_eq!(
             picker_ids(&dom),
-            vec!["source", "concept", "claim", "project", "course"]
+            vec!["source", "concept", "claim", "project"]
         );
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before, "the note behind never moved");
@@ -16610,8 +16610,7 @@ mod tests {
                 "claim",
                 "idea",
                 "personal",
-                "project",
-                "course"
+                "project"
             ]
         );
 
@@ -16621,7 +16620,7 @@ mod tests {
         press(&mut dom, keys[LOGS_KEYS], ctrl_n(), Modifiers::CONTROL);
         press(&mut dom, keys[LOGS_KEYS], ctrl_p(), Modifiers::CONTROL);
         press(&mut dom, creator_keys, ctrl_n(), Modifiers::CONTROL);
-        assert_eq!(picker_ids(&dom).len(), 9, "still the one overlay");
+        assert_eq!(picker_ids(&dom).len(), 8, "still the one overlay");
         assert!(!dioxus_ssr::render(&dom).contains("palette-label"));
 
         // arrows move the highlight and hold at both ends
@@ -16888,7 +16887,7 @@ mod tests {
         press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(">new note<"), "step 1 again: {html}");
-        assert_eq!(picker_ids(&dom).len(), 9, "the full list is back");
+        assert_eq!(picker_ids(&dom).len(), 8, "the full list is back");
 
         // second escape: closed
         press(&mut dom, creator_keys, Key::Escape, Modifiers::empty());
@@ -16967,7 +16966,7 @@ mod tests {
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(">new note<"), "the creator opened: {html}");
-        assert_eq!(picker_ids(&dom).len(), 9, "{html}");
+        assert_eq!(picker_ids(&dom).len(), 8, "{html}");
     }
 
     #[test]

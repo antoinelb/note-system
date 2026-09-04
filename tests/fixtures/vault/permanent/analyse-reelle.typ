@@ -2,7 +2,7 @@
 #show: note
 #meta(
   id: "analyse-reelle",
-  type: "course",
+  type: "project",
   created: "2026-07-20",
   tags: ("math",),
 )

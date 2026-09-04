@@ -1,5 +1,7 @@
 # `course` is the ninth permanent type, and `due` is a `#meta` field the loops list reads
 
+**Superseded in part by `2026-09-a-course-is-a-project.md`**: the `course` type is removed and a course is a `project`; the `due` field and its two loop families stand.
+
 ## Context
 
 The user is a university student, and the vault had no shape for a course: a course was a `project` by convention, a lecture a `source`, and the assignment deadlines that make up most of a term's debt lived in prose where nothing could count them.
