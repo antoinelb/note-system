@@ -285,7 +285,30 @@ fn build_spans(
     for (range, done) in checkbox_hits {
         spans = override_role(spans, range, Role::Checkbox { done });
     }
-    spans
+    marker_owns_its_gap(spans, source)
+}
+
+/// A marker owns the run of spaces after it — `"= "`, `"- "` — the way the
+/// quote's `"> "` already does, so an inactive block can hide the whole
+/// prefix by hiding one span; two adjacent marker spans (the quote
+/// override cutting a wider space leaf) fold into one for the same reason
+/// (adr/2026-09-inactive-blocks-hide-their-syntax.md).
+fn marker_owns_its_gap(spans: Vec<Span>, source: &str) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let gap = span.role == Role::Marker
+            || span.role == Role::Text
+                && source
+                    .get(span.range.clone())
+                    .is_some_and(|text| text.chars().all(|ch| ch == ' '));
+        match out.last_mut() {
+            Some(last) if gap && last.role == Role::Marker => {
+                last.range.end = span.range.end;
+            }
+            _ => out.push(span),
+        }
+    }
+    out
 }
 
 /// The role (and `Strong`/`Emph`/`Raw` delimiter flag) a leaf node's whole
@@ -652,6 +675,25 @@ mod tests {
         assert_eq!(markup.block, BlockRole::Item { indent: 0 });
         assert_tiles(&markup.spans, source.len());
         assert_eq!(markup.spans[0].role, Role::Marker);
+    }
+
+    /// The marker span swallows the spaces after it, and only spaces: a
+    /// tab, a non-space leaf, or nothing at all leaves the marker alone.
+    #[test]
+    fn a_marker_owns_the_gap_after_it() {
+        for (source, marker) in [
+            ("= Title", "= "),
+            ("-   item", "-   "),
+            ("-\titem", "-"),
+            ("- ", "- "),
+            (">  quoted", ">  "),
+        ] {
+            let markup = css(source);
+            let first = &markup.spans[0];
+            assert_eq!(first.role, Role::Marker, "{source:?}");
+            assert_eq!(&source[first.range.clone()], marker, "{source:?}");
+            assert_tiles(&markup.spans, source.len());
+        }
     }
 
     #[test]

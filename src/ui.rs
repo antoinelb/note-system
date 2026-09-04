@@ -10619,7 +10619,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<span class="mk-marker" data-start="0">=</span>"#
+                r#"<span class="mk-marker" data-start="0">= </span>"#
             ),
             "the heading marker keeps its role while active: {html}"
         );
@@ -10919,9 +10919,7 @@ mod tests {
         // active-pane test above does (adr/2026-08-css-draws-the-markup.md)
         assert!(
             html.contains(
-                r#"<span class="sel mk-marker" data-start="0">=</span>"#
-            ) && html.contains(
-                r#"<span class="sel mk-text" data-start="1"> </span>"#
+                r#"<span class="sel mk-marker" data-start="0">= </span>"#
             ) && html.contains(
                 r#"<span class="sel mk-text" data-start="2">2026-07-23</span>"#
             ),
@@ -12093,14 +12091,12 @@ mod tests {
         mouse(&mut dom, "mousemove", block, (41.0, 0.0));
         block_on(settle(&mut dom));
         // "= 202" tiles across the heading's own markup roles — the marker
-        // byte, the space after it and the digits each keep their own span
-        // even while every one of them is selected
+        // with its space, then the digits, each keep their own span even
+        // while every one of them is selected
         // (adr/2026-08-css-draws-the-markup.md)
         fn drags_across_the_prefix(html: &str) -> bool {
             html.contains(
-                r#"<span class="sel mk-marker" data-start="0">=</span>"#,
-            ) && html.contains(
-                r#"<span class="sel mk-text" data-start="1"> </span>"#,
+                r#"<span class="sel mk-marker" data-start="0">= </span>"#,
             ) && html.contains(
                 r#"<span class="sel mk-text" data-start="2">202</span>"#,
             )

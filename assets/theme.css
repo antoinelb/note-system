@@ -538,6 +538,51 @@ body {
   color: var(--markup-delim);
 }
 
+/* -- an inactive block hides its syntax ---------------------------------- */
+
+/* the DOM still tiles the source byte for byte — the hit probe and the
+   tiling property both read data-start — CSS only stops painting the
+   symbols: font-size 0 keeps each span in flow at zero width. Only
+   .block-css: the active and the selected block keep every symbol, the
+   line under the caret is the source
+   (adr/2026-09-inactive-blocks-hide-their-syntax.md) */
+.block-css .mk-marker,
+.block-css .mk-delim,
+.block-css .mk-checkbox {
+  font-size: 0;
+}
+
+/* a list item draws the template's bullet where the marker was.
+   ponytail: an enum's `1.` and a term's `/` get the bullet too — no note
+   in the vault writes either; split Role::Marker when one does */
+.block-css.mk-item .mk-marker::before {
+  content: "\2022  ";
+  font-size: var(--prose-size);
+}
+
+/* a checklist draws the template's task circle in the bullet's place
+   (adr/2026-07-checklist-rendering.md): the marker's bullet yields, the
+   first `[`/`]` span carries the circle, and a done item's rest is struck
+   in the muted ink — the same verdict the template's list.item rule
+   paints */
+.block-css.mk-item:has(.mk-checkbox) .mk-marker::before {
+  content: none;
+}
+
+.block-css .mk-marker + .mk-checkbox::before {
+  content: "\25CB ";
+  font-size: var(--prose-size);
+}
+
+.block-css .mk-marker + .mk-checkbox-done::before {
+  content: "\25CF ";
+}
+
+.block-css .mk-checkbox-done ~ span {
+  text-decoration: line-through;
+  color: var(--ink-muted);
+}
+
 /* -- block roles --------------------------------------------------------- */
 
 .mk-line {
