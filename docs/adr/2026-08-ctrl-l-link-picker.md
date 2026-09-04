@@ -1,5 +1,7 @@
 # Ctrl+L opens a link picker that owns its own query field
 
+> Amended by `2026-09-wiki-links-replace-the-l-call.md`: the link is `[[id]]` now, and typing `[[` opens this same picker — the "trigger character" rejection below rested on the uncontrolled textarea, which is gone.
+
 ## Context
 
 Phase 9's exit criterion is "you never type a full `#l("...")` by hand".

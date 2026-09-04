@@ -86,7 +86,6 @@
   }
 }
 
-#let l(id) = text(fill: palette.link, [#id])
 
 // The task circle: open = stroked outline, done = filled with a check
 // (adr/2026-07-checklist-rendering.md).
@@ -115,6 +114,14 @@
   show heading.where(level: 1): set text(
     size: base-size * (24 / 13.5) * 1pt,
     weight: 600,
+  )
+  // `[[id]]` is the stored link syntax, literal text to vanilla Typst the
+  // way `> ` is: the brackets come off and the id wears the link colour
+  // (adr/2026-09-wiki-links-replace-the-l-call.md).
+  // ponytail: fires inside raw text too; the app never indexes one there
+  show regex("\\[\\[[^\\[\\]]+\\]\\]"): it => text(
+    fill: palette.link,
+    it.text.slice(2, it.text.len() - 2),
   )
   // A quote in a note is always its own full-width block; the inline form
   // has no place in prose here, so every #quote is promoted before the

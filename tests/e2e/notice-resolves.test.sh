@@ -25,12 +25,12 @@ e2e_start
 # after missing-meta and missing-type) lands on atomic-notes' own sheet.
 # The sheet opens with the caret on its empty last line
 # (adr/2026-08-cursor-always-in-the-note.md); k climbs to "Compare with
-# #l("evergreen-notes")." and f-quotedbl lands on the call's opening
-# quote. Each motion crosses the sheet's own focus grab, so each is paced.
+# [[evergreen-notes]]." and f-bracketleft lands on the link's opening
+# bracket. Each motion crosses the sheet's own focus grab, so each is paced.
 e2e_caret_onto_the_link() {
     e2e_key_paced k
     e2e_key_paced f
-    e2e_key_paced quotedbl
+    e2e_key_paced bracketleft
 }
 
 e2e_key_paced ctrl+p

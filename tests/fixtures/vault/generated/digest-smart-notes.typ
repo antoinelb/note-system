@@ -9,4 +9,4 @@
 
 = Digest: How to Take Smart Notes
 
-Generated summary (example) of the book #l("smart-notes").
+Generated summary (example) of the book [[smart-notes]].

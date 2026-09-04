@@ -49,9 +49,22 @@ pub fn filter<'a>(
 }
 
 /// The text a completion writes into the buffer. One source, so the picker
-/// and its tests cannot disagree about the link's shape.
+/// and its tests cannot disagree about the link's shape
+/// (adr/2026-09-wiki-links-replace-the-l-call.md).
 pub fn format_link(id: &str) -> String {
-    format!("#l(\"{id}\")")
+    format!("[[{id}]]")
+}
+
+/// Whether the caret at `head` in `block_text` sits inside the empty
+/// `[[]]` the autopairs leave behind a second typed `[` — the moment the
+/// picker is summoned by typing rather than by Ctrl+L.
+pub fn typed_wiki_opening(block_text: &str, head: usize) -> bool {
+    block_text
+        .get(..head)
+        .is_some_and(|before| before.ends_with("[["))
+        && block_text
+            .get(head..)
+            .is_some_and(|after| after.starts_with("]]"))
 }
 
 /// One footer entry, either direction.
@@ -119,8 +132,8 @@ pub fn backlinks(
         .collect()
 }
 
-/// What a link under the caret leads to: a note, by the id an `#l` call
-/// names, or a resource — a file under the vault, a URL — by the
+/// What a link under the caret leads to: a note, by the id a `[[id]]`
+/// spells, or a resource — a file under the vault, a URL — by the
 /// destination of Typst's own `#link`, which the desktop's launcher opens
 /// and the index never counts as debt
 /// (`adr/2026-09-link-is-for-resources.md`).
@@ -141,22 +154,28 @@ pub fn resolve_resource(root: &std::path::Path, destination: &str) -> String {
     }
 }
 
-/// The `#l("...")` or `#link("...")` target the caret is standing in, for
+/// The `[[...]]` or `#link("...")` target the caret is standing in, for
 /// Ctrl+Enter (`adr/2026-08-ctrl-enter-opens-time-links.md`). `caret` is a
 /// byte offset into `block_text` — the active block's own source, the same
-/// slice the caret probe measures. A link with no string target leads
+/// slice the caret probe measures. A `#link` with no string target leads
 /// nowhere, exactly as the footer reads it.
 pub fn link_at(block_text: &str, caret: usize) -> Option<LinkTarget> {
     let root = typst_syntax::parse(block_text);
     // typst tokenizes the `#` as the call's left sibling rather than part of
     // it, so the caret sitting on it is outside the span by a byte. Probing
-    // one further lets the chord fire from the very start of the link, where
-    // Home leaves the caret on a line that opens with one.
-    target_at(&root, caret).or_else(|| target_at(&root, caret + 1))
+    // one further lets the chord fire from the very start of a `#link`,
+    // where Home leaves the caret on a line that opens with one — only
+    // from a `#`, so the byte before a `[[` stays outside it.
+    target_at(&root, caret).or_else(|| {
+        (block_text.as_bytes().get(caret) == Some(&b'#'))
+            .then(|| target_at(&root, caret + 1))
+            .flatten()
+    })
 }
 
-/// The link call whose span holds `caret`, walked from `root`. Both edges
-/// count as inside, so the caret just past a `)` still follows that link.
+/// The link whose span holds `caret`, walked from `root`. Both edges count
+/// as inside, so the caret just past a `]]` or a `)` still follows that
+/// link.
 fn target_at(
     root: &typst_syntax::SyntaxNode,
     caret: usize,
@@ -172,28 +191,55 @@ fn target_at(
         if caret < start || caret > start + node.len() {
             continue;
         }
+        if let Some(id) = wiki_link_holding(node, start, caret) {
+            return Some(LinkTarget::Note(id));
+        }
         if let Some(call) = node.cast::<ast::FuncCall>()
             && let ast::Expr::Ident(name) = call.callee()
         {
-            let target = match name.as_str() {
-                "l" => LinkTarget::Note,
-                "link" => LinkTarget::Resource,
-                _ => {
-                    push_children(&mut stack, start, node);
-                    continue;
-                }
-            };
+            if name.as_str() != "link" {
+                push_children(&mut stack, start, node);
+                continue;
+            }
             return crate::parse::extract_link_target(call)
-                .map(|id| target(id.0));
+                .map(|id| LinkTarget::Resource(id.0));
         }
         push_children(&mut stack, start, node);
     }
     None
 }
 
-/// The node's children with their own offsets, ordered so popping walks the
-/// text left to right — two links touching at the caret resolve to the first,
+/// The `[[id]]` among `node`'s children whose bytes hold `caret`, both
+/// edges included; two links touching at the caret resolve to the first,
 /// the way reading does.
+fn wiki_link_holding(
+    node: &typst_syntax::SyntaxNode,
+    start: usize,
+    caret: usize,
+) -> Option<String> {
+    let offsets: Vec<usize> = node
+        .children()
+        .scan(start, |offset, child| {
+            let at = *offset;
+            *offset += child.len();
+            Some(at)
+        })
+        .chain(std::iter::once(start + node.len()))
+        .collect();
+    crate::parse::wiki_links(node)
+        .into_iter()
+        .find(|link| {
+            let first = offsets.get(link.children.start).copied();
+            let past = offsets.get(link.children.end).copied();
+            first
+                .zip(past)
+                .is_some_and(|(first, past)| (first..=past).contains(&caret))
+        })
+        .map(|link| link.id)
+}
+
+/// The node's children with their own offsets, ordered so popping walks the
+/// text left to right.
 fn push_children<'a>(
     stack: &mut Vec<(usize, &'a typst_syntax::SyntaxNode)>,
     start: usize,
@@ -282,38 +328,48 @@ mod tests {
     }
 
     #[test]
-    fn a_completion_writes_a_plain_l_call() {
-        assert_eq!(format_link("atomic-notes"), "#l(\"atomic-notes\")");
+    fn a_completion_writes_a_wiki_link() {
+        assert_eq!(format_link("atomic-notes"), "[[atomic-notes]]");
+    }
+
+    #[test]
+    fn the_typed_opening_is_the_empty_pair_around_the_caret() {
+        assert!(typed_wiki_opening("Voir [[]]", 7));
+        assert!(!typed_wiki_opening("Voir [[]]", 6));
+        assert!(!typed_wiki_opening("Voir [[x]]", 7));
+        assert!(!typed_wiki_opening("Voir [[]", 7));
+        assert!(!typed_wiki_opening("[]", 1));
     }
 
     #[test]
     fn the_caret_finds_the_link_it_stands_in() {
-        // `#` at byte 5, the call itself spanning 6..18
-        let text = r#"Voir #l("luhmann") demain"#;
-        assert_eq!(link_at(text, 12), Some(note("luhmann")));
-        // from the '#' the link opens with, and from just past its ')'
+        // the link spans bytes 5..16
+        let text = "Voir [[luhmann]] demain";
+        assert_eq!(link_at(text, 9), Some(note("luhmann")));
+        // from the first '[' and from just past the last ']'
         assert_eq!(link_at(text, 5), Some(note("luhmann")));
-        assert_eq!(link_at(text, 18), Some(note("luhmann")));
+        assert_eq!(link_at(text, 16), Some(note("luhmann")));
         // a block that is nothing but a link, caret at its very start
-        assert_eq!(link_at(r#"#l("seul")"#, 0), Some(note("seul")));
+        assert_eq!(link_at("[[seul]]", 0), Some(note("seul")));
     }
 
     #[test]
     fn a_caret_outside_every_link_finds_nothing() {
-        let text = r#"Voir #l("luhmann") demain"#;
+        let text = "Voir [[luhmann]] demain";
         assert_eq!(link_at(text, 4), None);
-        assert_eq!(link_at(text, 19), None);
+        assert_eq!(link_at(text, 17), None);
         assert_eq!(link_at("prose sans lien", 3), None);
         assert_eq!(link_at("", 0), None);
+        assert_eq!(link_at("[[]]", 2), None);
     }
 
     #[test]
     fn the_caret_picks_the_link_it_is_in_not_its_neighbour() {
-        let text = r#"#l("a") et #l("bb")"#;
-        assert_eq!(link_at(text, 4), Some(note("a")));
-        assert_eq!(link_at(text, 15), Some(note("bb")));
+        let text = "[[a]] et [[bb]]";
+        assert_eq!(link_at(text, 3), Some(note("a")));
+        assert_eq!(link_at(text, 12), Some(note("bb")));
         // touching links resolve left to right, the way reading does
-        assert_eq!(link_at(r#"#l("a")#l("bb")"#, 7), Some(note("a")));
+        assert_eq!(link_at("[[a]][[bb]]", 5), Some(note("a")));
     }
 
     fn note(id: &str) -> LinkTarget {
@@ -330,14 +386,23 @@ mod tests {
                 "https://example.org/x.pdf".to_string()
             ))
         );
-        // a call that is neither `l` nor `link` is descended, not answered:
+        // a call that is not `link` is descended, not answered:
         // the link nested inside it is still found
         assert_eq!(
             link_at(r#"#emph[#link("/assets/a.pdf")[a]]"#, 14),
             Some(LinkTarget::Resource("/assets/a.pdf".to_string()))
         );
-        // a label destination is no string: nowhere, like `#l()`
+        // a label destination is no string: nowhere; so is no destination
         assert_eq!(link_at("#link(<intro>)[x]", 8), None);
+        assert_eq!(link_at("#link(fill: red)", 8), None);
+        // from the `#` the call opens with, which typst keeps outside it
+        assert_eq!(
+            link_at(text, 4),
+            Some(LinkTarget::Resource(
+                "https://example.org/x.pdf".to_string()
+            ))
+        );
+        assert_eq!(link_at("#emph[x]", 0), None);
     }
 
     #[test]
@@ -356,22 +421,13 @@ mod tests {
 
     #[test]
     fn a_link_nested_in_markup_is_still_under_the_caret() {
-        assert_eq!(
-            link_at(r#"Voir #emph[#l("nested")] ici"#, 16),
-            Some(note("nested"))
-        );
-    }
-
-    #[test]
-    fn a_link_with_no_string_target_leads_nowhere() {
-        assert_eq!(link_at("#l()", 2), None);
-        assert_eq!(link_at("#l(fill: red)", 5), None);
+        assert_eq!(link_at("Voir *[[nested]]* ici", 9), Some(note("nested")));
     }
 
     #[test]
     fn a_caret_past_multibyte_text_still_lands_in_the_link() {
         // "été" is 5 bytes, so the byte offset is not the character count
-        let text = r#"été #l("hiver")"#;
+        let text = "été [[hiver]]";
         assert_eq!(link_at(text, 9), Some(note("hiver")));
     }
 

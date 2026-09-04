@@ -9,8 +9,8 @@
 
 = 2026-07-21
 
-#l("2026-07-22")
+[[2026-07-22]]
 
 == Notes
 
-Read about the #l("zettelkasten").
+Read about the [[zettelkasten]].

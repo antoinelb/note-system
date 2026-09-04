@@ -7,7 +7,7 @@
 
 == Summary
 
-Semantic-zoom idea for the #l("note-system") canvas.
+Semantic-zoom idea for the [[note-system]] canvas.
 
 == Original
 

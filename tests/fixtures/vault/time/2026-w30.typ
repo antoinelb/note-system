@@ -9,4 +9,4 @@
 
 = Week 30
 
-Looking back at #l("2026-07-21"): the test vault got started.
+Looking back at [[2026-07-21]]: the test vault got started.

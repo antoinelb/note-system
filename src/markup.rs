@@ -7,7 +7,8 @@
 //!
 //! The verdict is read off the `typst-syntax` tree's node kinds alone,
 //! never off the source text — an explicit allow-list of markup kinds plus
-//! the three calls the app owns (`meta`, `l`, `quote`); anything else falls
+//! the three calls the app owns (`meta`, `link`, `quote`) plus the `[[id]]`
+//! run `parse::wiki_links` reads off sibling text leaves; anything else falls
 //! back to a compiled Typst widget. Once the verdict is CSS, building the
 //! spans and a block's structural role *may* read text — that is a
 //! rendering decision, not the verdict, and each place it happens says so.
@@ -40,7 +41,7 @@ pub enum Role {
 
 /// One byte-range slice of a block's markup, block-relative like every
 /// other range in `caret::Piece`. `delimiter` only carries meaning on
-/// `Strong`/`Emph`/`Raw`: the run's own `*`/`_`/backtick bytes keep the
+/// `Strong`/`Emph`/`Raw`/`Link`: the run's own `*`/`_`/backtick/`[[` bytes keep the
 /// run's role (so the run's rendered weight — bold, italic, mono — never
 /// breaks at the delimiter) but are flagged so a decoration pass can still
 /// dim them relative to the run's content.
@@ -130,7 +131,7 @@ fn allows_css(root: &SyntaxNode) -> bool {
 /// never appear anywhere else in the tree.
 fn kind_is_css_safe(kind: SyntaxKind) -> bool {
     // Deliberate exception, not part of the allow-list below: a half-typed
-    // `#l(` under the caret parses with an `Error` node, and rendering it
+    // `#meta(` under the caret parses with an `Error` node, and rendering it
     // as plain CSS text is what keeps the block from flashing a fallback
     // to a compiled-Typst error on every keystroke while it is incomplete.
     if kind == SyntaxKind::Error {
@@ -186,14 +187,14 @@ fn kind_is_css_safe(kind: SyntaxKind) -> bool {
 /// The role a recognised call's whole invocation renders with, or `None`
 /// for anything else — the callee-name half of the verdict, and (once the
 /// verdict is CSS) what `Role` a matched `#l`/`#link`/`#meta`/`#quote`
-/// gets. Typst's own `#link` wears the same role as `#l`: it is the link
-/// form for what is not a note (adr/2026-09-link-is-for-resources.md).
+/// gets. Typst's own `#link` wears the same role as a `[[id]]` run: it is
+/// the link form for what is not a note (adr/2026-09-link-is-for-resources.md).
 fn recognized_role(call: ast::FuncCall) -> Option<Role> {
     let ast::Expr::Ident(name) = call.callee() else {
         return None;
     };
     match name.as_str() {
-        "l" | "link" => Some(Role::Link),
+        "link" => Some(Role::Link),
         "meta" | "quote" => Some(Role::Meta),
         _ => None,
     }
@@ -342,12 +343,15 @@ fn children_role(kind: SyntaxKind, inherited: Role) -> Role {
     }
 }
 
-/// Pushes one container node's children onto the walk's stack, with two
+/// Pushes one container node's children onto the walk's stack, with three
 /// exceptions handled inline because they change what gets pushed rather
 /// than just a leaf's role: a `Hash` immediately followed by a recognised
-/// `FuncCall` (`#l(...)`, `#meta(...)`, `#quote(...)`) becomes one whole
+/// `FuncCall` (`#link(...)`, `#meta(...)`, `#quote(...)`) becomes one whole
 /// span over both and its children are never pushed — the call's own
-/// arguments are not rendered as separate spans; and a bullet `ListItem`
+/// arguments are not rendered as separate spans; a `[[id]]` run of text
+/// leaves (`parse::wiki_links`) becomes three `Link` spans, the bracket
+/// pairs flagged as delimiters so an inactive block hides them
+/// (adr/2026-09-wiki-links-replace-the-l-call.md); and a bullet `ListItem`
 /// whose body opens with `[ ]`/`[x]` records that range in `checkbox_hits`
 /// for `build_spans` to relabel afterward.
 fn push_children<'a>(
@@ -373,14 +377,32 @@ fn push_children<'a>(
         checkbox_hits.push((body_offset..body_offset + 3, done));
     }
 
+    let wiki = crate::parse::wiki_links(node);
     let mut frames = Vec::new();
-    let mut skip_next = false;
+    let mut skip_until = 0;
     for i in 0..child_data.len() {
-        if skip_next {
-            skip_next = false;
+        if i < skip_until {
             continue;
         }
         let (child_offset, child) = child_data[i];
+        if let Some(link) = wiki.iter().find(|link| link.children.start == i) {
+            let at = |index: usize| child_data[index].0;
+            let close = link.children.end - 2;
+            let end = at(close + 1) + child_data[close + 1].1.len();
+            for (range, delimiter) in [
+                (child_offset..at(i + 2), true),
+                (at(i + 2)..at(close), false),
+                (at(close)..end, true),
+            ] {
+                spans.push(Span {
+                    range,
+                    role: Role::Link,
+                    delimiter,
+                });
+            }
+            skip_until = link.children.end;
+            continue;
+        }
         if child.kind() == SyntaxKind::Hash
             && let Some(&(_, next)) = child_data.get(i + 1)
             && let Some(call) = next.cast::<ast::FuncCall>()
@@ -391,7 +413,7 @@ fn push_children<'a>(
                 role: call_role,
                 delimiter: false,
             });
-            skip_next = true;
+            skip_until = i + 2;
             continue;
         }
         frames.push((child_offset, child, role));
@@ -463,6 +485,7 @@ pub fn class(role: Role, delimiter: bool) -> &'static str {
         Role::Emph => "mk-emph",
         Role::Raw if delimiter => "mk-raw mk-delim",
         Role::Raw => "mk-raw",
+        Role::Link if delimiter => "mk-link mk-delim",
         Role::Link => "mk-link",
         Role::Meta => "mk-meta",
         Role::Marker => "mk-marker",
@@ -721,18 +744,50 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_link_is_css_and_spans_the_hash() {
-        let source = "See #l(\"target\") there";
+    fn a_wiki_link_is_css_with_its_brackets_as_delimiters() {
+        let source = "See [[target]] there";
         let markup = css(source);
         assert_tiles(&markup.spans, source.len());
-        let hash = source.find('#').expect("a hash");
-        let link_span = markup
+        let open = source.find("[[").expect("the opening pair");
+        let link: Vec<(&str, bool)> = markup
             .spans
             .iter()
-            .find(|s| s.range.start == hash)
-            .expect("a span starting at the hash");
-        assert_eq!(link_span.role, Role::Link);
-        assert_eq!(&source[link_span.range.clone()], "#l(\"target\")");
+            .filter(|s| s.role == Role::Link)
+            .map(|s| (&source[s.range.clone()], s.delimiter))
+            .collect();
+        assert_eq!(link, vec![("[[", true), ("target", false), ("]]", true)]);
+        assert_eq!(
+            markup
+                .spans
+                .iter()
+                .find(|s| s.range.start == open)
+                .map(|s| s.role),
+            Some(Role::Link)
+        );
+        // the delimiter class hides the brackets on an inactive block
+        assert_eq!(class(Role::Link, true), "mk-link mk-delim");
+    }
+
+    #[test]
+    fn a_wiki_link_inside_strong_keeps_the_link_role_and_tiles() {
+        let source = "*[[a_b]]* and `[[raw]]`";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
+        let roles: Vec<(&str, Role)> = markup
+            .spans
+            .iter()
+            .map(|s| (&source[s.range.clone()], s.role))
+            .collect();
+        assert!(roles.contains(&("a_b", Role::Link)), "{roles:?}");
+        assert!(roles.contains(&("[[raw]]", Role::Raw)), "{roles:?}");
+    }
+
+    #[test]
+    fn a_half_typed_wiki_link_is_plain_text() {
+        let source = "See [[tar there";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
+        assert!(markup.spans.iter().all(|s| s.role == Role::Text));
     }
 
     #[test]
@@ -899,7 +954,7 @@ mod tests {
 
     #[test]
     fn a_half_typed_call_stays_css() {
-        let source = "before #l( after";
+        let source = "before #meta( after";
         let markup = css(source);
         assert_tiles(&markup.spans, source.len());
     }
@@ -908,7 +963,7 @@ mod tests {
     fn a_stray_bracket_is_an_error_node_that_stays_css_plain_text() {
         // an unmatched `]` outside any recognised call is where the Error
         // exception actually earns its keep: nothing here short-circuits
-        // into one merged span the way `#l(` does, so the walk visits the
+        // into one merged span the way `#meta(` does, so the walk visits the
         // Error leaf itself
         let source = "before ]after";
         let markup = css(source);

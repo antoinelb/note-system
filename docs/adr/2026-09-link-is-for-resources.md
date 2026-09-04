@@ -1,5 +1,7 @@
 # `#link` is the link form for what is not a note, and it opens outside the app
 
+> Amended by `2026-09-wiki-links-replace-the-l-call.md`: the note link is spelled `[[id]]` now; everything here about `#link` stands.
+
 ## Context
 
 `#l("id")` is the one link the app knows: the parser indexes it, the footer lists it, `gf`, Ctrl+Enter and the palette follow it, and an id nothing owns is a dangling loop.

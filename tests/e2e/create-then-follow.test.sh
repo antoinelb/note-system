@@ -66,7 +66,7 @@ e2e_await e2e_insert_link_via_picker \
     || e2e_fail "time/$E2E_TODAY.typ never held the link"
 
 # the caret lands past the link the picker just spliced in — still inside
-# the #l(...) call (links.rs: link_at treats just-past-')' as inside)
+# the [[...]] (links.rs: link_at treats just-past-']]' as inside)
 e2e_key ctrl+Return
 
 # the sheet's textarea is a fresh mount grabbing focus through the same

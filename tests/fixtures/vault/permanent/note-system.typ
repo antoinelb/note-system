@@ -10,4 +10,4 @@
 = Note system
 
 Dioxus application replacing Obsidian and the manual typst zettelkasten.
-Built on #l("plain-files") and the #l("zettelkasten") model.
+Built on [[plain-files]] and the [[zettelkasten]] model.

@@ -9,4 +9,4 @@
 
 = Niklas Luhmann
 
-German sociologist, creator of the original #l("zettelkasten") on paper slips.
+German sociologist, creator of the original [[zettelkasten]] on paper slips.

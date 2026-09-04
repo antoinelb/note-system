@@ -239,7 +239,7 @@ mod tests {
                         \n\
                         = 2026-07-21\n\
                         \n\
-                        Read about the #l(\"zettelkasten\").\n";
+                        Read about the [[zettelkasten]].\n";
 
     fn assert_tiles(blocks: &[Block], len: usize) {
         assert_eq!(blocks[0].range.start, 0);
@@ -292,7 +292,7 @@ mod tests {
         // (adr/2026-08-cursor-always-in-the-note.md)
         assert_eq!(
             &NOTE[blocks[4].content()],
-            "Read about the #l(\"zettelkasten\").",
+            "Read about the [[zettelkasten]].",
         );
         assert_eq!(blocks[5].content(), blocks[5].range);
         assert!(blocks[5].content().is_empty());
@@ -485,7 +485,7 @@ mod tests {
         let blocks = segment(NOTE);
         let source = block_source(NOTE, &blocks[4]);
         assert!(
-            source.ends_with("Read about the #l(\"zettelkasten\").\n"),
+            source.ends_with("Read about the [[zettelkasten]].\n"),
             "{source}"
         );
     }

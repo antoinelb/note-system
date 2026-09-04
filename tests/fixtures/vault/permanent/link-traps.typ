@@ -8,8 +8,8 @@
 
 = Link traps
 
-The only real link in this note: #l("zettelkasten").
+The only real link in this note: [[zettelkasten]].
 
-// #l("in-comment") — inside a comment, does not count
-#let trap = "#l(\"in-string\")"
-In raw code: `#l("in-raw")`.
+// [[in-comment]] — inside a comment, does not count
+#let trap = "[[in-string]]"
+In raw code: `[[in-raw]]`.

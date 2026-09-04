@@ -404,7 +404,7 @@ fn write_note(
     let tags: String = tags.iter().map(|tag| format!("\"{tag}\", ")).collect();
     let body: String = links
         .iter()
-        .map(|link| format!("Voir #l(\"{link}\").\n"))
+        .map(|link| format!("Voir [[{link}]].\n"))
         .collect();
     std::fs::write(
         root.join(relative),

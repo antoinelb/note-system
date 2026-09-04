@@ -10,5 +10,5 @@
 
 = Atomic notes recombine better
 
-One note = one idea: that is what makes the #l("zettelkasten") generative.
-Compare with #l("evergreen-notes").
+One note = one idea: that is what makes the [[zettelkasten]] generative.
+Compare with [[evergreen-notes]].

@@ -21,8 +21,9 @@ pub struct ParsedNote {
     /// captures are ever asked, but every note is parsed the same way.
     pub summarized: bool,
     /// Whether the walk hit its node cap before the tree ended: whatever
-    /// lay beyond — links, even the `#meta` — was never seen, and the
-    /// index records that instead of staying silent
+    /// lay beyond — links, even the `#meta` — was never seen (a `[[id]]`
+    /// among a visited node's own children is the one read-ahead), and
+    /// the index records that instead of staying silent
     /// (adr/2026-08-anomalies-join-the-loops.md).
     pub truncated: bool,
 }
@@ -40,22 +41,20 @@ pub fn parse_note(source: &str) -> ParsedNote {
         let Some(node) = stack.pop() else { break };
         if let Some(call) = node.cast::<ast::FuncCall>()
             && let ast::Expr::Ident(name) = call.callee()
+            && name.as_str() == "meta"
         {
-            match name.as_str() {
-                "meta" => match &mut meta {
-                    MetaStatus::Missing => {
-                        meta = MetaStatus::Present(extract_meta(call))
-                    }
-                    MetaStatus::Present(m) => {
-                        m.anomalies.push(MetaAnomaly::DuplicateMeta)
-                    }
-                },
-                "l" => links.extend(
-                    extract_link_target(call).map(|target| Link { target }),
-                ),
-                _ => {}
+            match &mut meta {
+                MetaStatus::Missing => {
+                    meta = MetaStatus::Present(extract_meta(call))
+                }
+                MetaStatus::Present(m) => {
+                    m.anomalies.push(MetaAnomaly::DuplicateMeta)
+                }
             }
         }
+        links.extend(wiki_links(node).into_iter().map(|link| Link {
+            target: NoteId(link.id),
+        }));
         if title.is_none()
             && let Some(heading) = node.cast::<ast::Heading>()
         {
@@ -238,6 +237,80 @@ fn extract_due(meta: &mut Meta, named: ast::Named) {
     }
 }
 
+/// One `[[id]]` among a node's children: which children it spans (the two
+/// `[`, the id's leaves, the two `]`) and the id they spell. Typst's
+/// markup lexer emits each bracket as its own `Text` leaf and never folds
+/// one into a neighbouring word, so a wiki link is a run of sibling leaves
+/// rather than a node of its own — read off the tree's kinds and leaf
+/// texts, never off the source (adr/2026-09-wiki-links-replace-the-l-call.md).
+/// A raw block or a comment swallows its brackets into one leaf of another
+/// kind, which is what keeps `` `[[x]]` `` and `// [[x]]` out of the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WikiLink {
+    pub children: std::ops::Range<usize>,
+    pub id: String,
+}
+
+pub(crate) fn wiki_links(node: &SyntaxNode) -> Vec<WikiLink> {
+    let children: Vec<&SyntaxNode> = node.children().collect();
+    let mut found = Vec::new();
+    let mut from = 0;
+    for _ in 0..children.len() {
+        if from >= children.len() {
+            break;
+        }
+        match wiki_link_from(&children, from) {
+            Some(link) => {
+                from = link.children.end;
+                found.push(link);
+            }
+            None => from += 1,
+        }
+    }
+    found
+}
+
+/// The wiki link opening exactly at `children[start]`, if one does: `[`
+/// `[`, then one or more text leaves that are neither bracket (`a_b`
+/// lexes as `a` and `_b`, `x y` as one leaf — the id is their
+/// concatenation), then `]` `]`. An empty pair, `[[]]`, is no link.
+fn wiki_link_from(children: &[&SyntaxNode], start: usize) -> Option<WikiLink> {
+    if !is_text(children, start, "[") || !is_text(children, start + 1, "[") {
+        return None;
+    }
+    let mut id = String::new();
+    let mut end = start + 2;
+    for (index, child) in children.iter().enumerate().skip(start + 2) {
+        if child.kind() != SyntaxKind::Text || is_bracket(child) {
+            break;
+        }
+        id.push_str(child.leaf_text());
+        end = index + 1;
+    }
+    if id.is_empty()
+        || !is_text(children, end, "]")
+        || !is_text(children, end + 1, "]")
+    {
+        return None;
+    }
+    Some(WikiLink {
+        children: start..end + 2,
+        id,
+    })
+}
+
+fn is_text(children: &[&SyntaxNode], index: usize, text: &str) -> bool {
+    children.get(index).is_some_and(|child| {
+        child.kind() == SyntaxKind::Text && child.leaf_text() == text
+    })
+}
+
+fn is_bracket(child: &SyntaxNode) -> bool {
+    child.leaf_text() == "[" || child.leaf_text() == "]"
+}
+
+/// The first positional string of a `#link` call — its destination
+/// (adr/2026-09-link-is-for-resources.md).
 pub(crate) fn extract_link_target(call: ast::FuncCall) -> Option<NoteId> {
     for arg in call.args().items() {
         if let ast::Arg::Pos(expr) = arg {
@@ -304,9 +377,9 @@ mod tests {
     #[test]
     fn a_typst_link_is_not_a_note_link_and_never_dangles() {
         // `#link` is for resources (adr/2026-09-link-is-for-resources.md):
-        // only `#l` calls reach the links table
+        // only `[[id]]` runs reach the links table
         let parsed = parse_note(
-            r#"#link("https://example.org/x.pdf")[slides] and #l("a")"#,
+            r#"#link("https://example.org/x.pdf")[slides] and [[a]]"#,
         );
         assert_eq!(
             parsed.links,
@@ -431,21 +504,44 @@ mod tests {
     }
 
     #[test]
-    fn link_without_string_argument_links_nowhere() {
-        // first positional argument is the target; a non-string one is the
-        // user's mistake, not something to fish a later string out of
-        assert_eq!(parse_note("#l()").links, vec![]);
-        assert_eq!(parse_note(r#"#l(3, "x")"#).links, vec![]);
+    fn an_empty_or_half_pair_links_nowhere() {
+        assert_eq!(parse_note("[[]]").links, vec![]);
+        assert_eq!(parse_note("[[open").links, vec![]);
+        assert_eq!(parse_note("[x]] [y]").links, vec![]);
+        assert_eq!(parse_note("[[ ]]").links, vec![]);
     }
 
     #[test]
-    fn link_with_only_named_arguments_links_nowhere() {
-        assert_eq!(parse_note("#l(fill: red)").links, vec![]);
+    fn the_id_is_what_the_leaves_spell_between_the_brackets() {
+        // `_` opens emphasis to the lexer, so `a_b` arrives as two leaves;
+        // a space stays inside one — the id is the concatenation either way
+        let ids = |source: &str| -> Vec<String> {
+            parse_note(source)
+                .links
+                .into_iter()
+                .map(|link| link.target.0)
+                .collect()
+        };
+        assert_eq!(ids("[[a_b]]"), vec!["a_b"]);
+        assert_eq!(ids("[[x y]]"), vec!["x y"]);
+        assert_eq!(
+            ids("[[2026-07-22]] et [[été]]."),
+            vec!["2026-07-22", "été"]
+        );
+        assert_eq!(ids("[[a]][[b]]"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn brackets_in_raw_a_comment_or_a_content_block_are_no_link() {
+        assert_eq!(parse_note("`[[raw]]`").links, vec![]);
+        assert_eq!(parse_note("// [[comment]]").links, vec![]);
+        // `#link(...)[[y]]`: the outer pair is the call's content block
+        assert_eq!(parse_note(r#"#link("x")[[y]]"#).links, vec![]);
     }
 
     #[test]
     fn link_nested_in_other_markup_is_found() {
-        let parsed = parse_note(r#"Voir #emph[#l("nested")] ici."#);
+        let parsed = parse_note(r#"Voir *[[nested]]* ici."#);
         assert_eq!(
             parsed.links,
             vec![Link {
@@ -485,8 +581,10 @@ mod tests {
         // enough headings to exhaust the walk, with the link beyond the
         // cap: before adr/2026-08-anomalies-join-the-loops.md the loss
         // was silent
+        // nested, because a `[[id]]` among the root's own children is read
+        // when the root is, ahead of the walk
         let mut source = "= t\n\n".repeat(MAX_NODES / 2);
-        source.push_str("#l(\"perdu\")\n");
+        source.push_str("*[[perdu]]*\n");
         let parsed = parse_note(&source);
         assert!(parsed.truncated, "the walk gave up before the end");
         assert_eq!(parsed.links, vec![], "the far link was never seen");

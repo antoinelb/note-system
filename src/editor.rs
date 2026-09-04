@@ -1672,9 +1672,9 @@ mod tests {
     fn paste_and_the_ime_commit_never_pair() {
         // the regression that proves `insert_typed` is a separate door
         let (_dir, mut editor) = open_note("");
-        editor.insert_at_caret("#l(");
+        editor.insert_at_caret("#meta(");
         let (_, text) = editor.note().expect("still open");
-        assert_eq!(text, "#l(", "already-balanced text is not rebalanced");
+        assert_eq!(text, "#meta(", "already-balanced text is not rebalanced");
     }
 
     #[test]

@@ -9,8 +9,8 @@
 
 = 2026-07-23
 
-#l("2026-07-22")
+[[2026-07-22]]
 
 == Notes
 
-Finished the vault skeleton; details in #l("smart-notes").
+Finished the vault skeleton; details in [[smart-notes]].

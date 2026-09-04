@@ -2086,6 +2086,28 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // IME's commit below stay on `insert_at_caret`
                 // (adr/2026-08-autopairs-in-the-typing-path.md)
                 editor.write().insert_typed(&text);
+                // a second `[` summons the picker, Obsidian's gesture: the
+                // empty `[[]]` the pairs left is taken back out first, so
+                // Escape leaves the prose as it was and accepting writes
+                // the one link shape
+                // (adr/2026-09-wiki-links-replace-the-l-call.md)
+                let opened = (text == "[")
+                    .then(|| {
+                        let editor = editor.peek();
+                        let (_, head) = editor.caret_in_block();
+                        editor
+                            .caret()
+                            .zip(editor.active_source())
+                            .filter(|(_, source)| {
+                                links::typed_wiki_opening(source, head)
+                            })
+                            .map(|(caret, _)| caret.head)
+                    })
+                    .flatten();
+                if let Some(head) = opened {
+                    editor.write().splice(head - 2..head + 2, "", head - 2);
+                    open_picker.call(());
+                }
             }
             keymap::Action::NewLine => editor.write().insert_newline(),
             keymap::Action::Backspace => {
@@ -8032,7 +8054,7 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "accepting closes it: {html}");
         assert!(
-            source_of(&dom).contains(r#"= alpha#l("digest")"#),
+            source_of(&dom).contains(r#"= alpha[[digest]]"#),
             "spliced at the caret: {}",
             source_of(&dom)
         );
@@ -8099,7 +8121,7 @@ mod tests {
         .expect("the day is rewritten");
     }
 
-    /// The resource line's targets. It sits where the fixture's `#l` line
+    /// The resource line's targets. It sits where the fixture's `[[…]]` line
     /// sits, one click listener earlier: a `#link` is not a note link, so
     /// the footer under the note lists no outgoing row for it.
     fn activate_resource_link(
@@ -8171,12 +8193,12 @@ mod tests {
         assert!(!html.contains("open:"), "{html}");
     }
 
-    /// Beta's heading is `= beta\n#l("alpha")#l("2026-07-22")` — one link
+    /// Beta's heading is `= beta\n[[alpha]][[2026-07-22]]` — one link
     /// of each reach, for the follows that start inside a sheet.
     fn beta_with_both_links(vault: &Path) {
         std::fs::write(
             vault.join("permanent/beta.typ"),
-            format!("{}#l(\"alpha\")#l(\"2026-07-22\")\n", note("beta")),
+            format!("{}[[alpha]][[2026-07-22]]\n", note("beta")),
         )
         .expect("beta is written");
     }
@@ -8191,8 +8213,8 @@ mod tests {
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
         let (block, keys) = sheet_link_targets(&mut dom, &opened);
 
-        // inside `#l("alpha")`, just past "= beta\n"
-        place_caret(&mut dom, block, &hit, 10);
+        // inside `[[alpha]]`, the link line's own first bytes
+        place_caret(&mut dom, block, &hit, 4);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         // the raised card is now alpha's, on alpha's slot; beta went back
@@ -8212,7 +8234,7 @@ mod tests {
         let opened = open_sheet_on(&mut dom, pane, cards[1]);
         let (block, keys) = sheet_link_targets(&mut dom, &opened);
 
-        // inside `#l("2026-07-22")`
+        // inside `[[2026-07-22]]`
         place_caret(&mut dom, block, &hit, 22);
         let landed = press_for_mutations(
             &mut dom,
@@ -8244,7 +8266,7 @@ mod tests {
         let vault = temp_vault();
         std::fs::write(
             vault.path().join("permanent/gamma.typ"),
-            format!("{}#l(\"fantome\")\n", note("gamma")),
+            format!("{}[[fantome]]\n", note("gamma")),
         )
         .expect("gamma is written");
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
@@ -8255,7 +8277,7 @@ mod tests {
         // (adr/2026-08-per-line-block-segmentation.md)
         let (block, keys) = sheet_link_targets(&mut dom, &opened);
 
-        // inside `#l("fantome")`
+        // inside `[[fantome]]`
         place_caret(&mut dom, block, &hit, IN_LINK);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
@@ -8608,7 +8630,7 @@ mod tests {
              #show: note\n\
              #meta(id: \"2026-07-20\", type: \"daily\", \
              created: \"2026-07-20\")\n\
-             \n= 2026-07-20\n\n#l(\"fantome\")\n",
+             \n= 2026-07-20\n\n[[fantome]]\n",
         )
         .expect("the indebted day note is written");
         let (mut dom, clicks, _, _) =
@@ -8621,7 +8643,7 @@ mod tests {
 
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains(r#"class="sheet""#), "no sheet: {html}");
-        // the note's own body (its dangling #l call) only renders once
+        // the note's own body (its dangling wiki link) only renders once
         // the note is open in the logs editor — the rail row alone never
         // shows it, so this is the landing, not the listing
         assert!(
@@ -8687,7 +8709,7 @@ mod tests {
              #show: note\n\
              #meta(id: \"2026-07-20\", type: \"daily\", \
              created: \"2026-07-20\")\n\
-             \n= 2026-07-20\n\n#l(\"fantome\")\n",
+             \n= 2026-07-20\n\n[[fantome]]\n",
         )
         .expect("the indebted day note is written");
         let (mut dom, clicks, _, _) =
@@ -8978,7 +9000,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, mutations) =
             mounted_app(Some(vault.path().to_path_buf()), None);
-        // the heading block "= 2026-07-23\n#l(\"2026-07-22\")\n" ends in a
+        // the heading block "= 2026-07-23\n[[2026-07-22]]\n" ends in a
         // newline, so the caret's line is the empty last one: a source
         // line holding nothing but the drawn caret
         // (adr/2026-08-cursor-always-in-the-note.md)
@@ -9807,13 +9829,13 @@ mod tests {
         );
         block_on(settle(&mut dom));
         assert!(
-            !source_of(&dom).contains("#l"),
+            !source_of(&dom).contains("[["),
             "the line went: {}",
             source_of(&dom)
         );
         assert_eq!(
             *written.lock().expect("the write cell"),
-            vec!["#l(\"2026-07-22\")\n".to_string()],
+            vec!["[[2026-07-22]]\n".to_string()],
             "linewise, newline carried"
         );
 
@@ -13701,14 +13723,16 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "accepting closes it: {html}");
         assert!(
-            source_of(&dom).contains(r#"#l("2026-summer")#l("2026-07-22")"#),
+            source_of(&dom).contains(r#"[[2026-summer]][[2026-07-22]]"#),
             "spliced at the caret: {}",
             source_of(&dom)
         );
         // the caret lands past the link it just wrote: the box caret
         // wears the old link's first cluster
         assert!(
-            html.contains(r#"summer&#34;)</span><span class="caret-box""#),
+            html.contains(
+                r#">]]</span><span class="caret-box" data-start="15">[</span>"#
+            ),
             "{html}"
         );
     }
@@ -13728,8 +13752,50 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
         assert!(
-            source_of(&dom).starts_with(r#"#l("2026-07-21")"#),
+            source_of(&dom).starts_with(r#"[[2026-07-21]]"#),
             "the first row went in at the caret: {}",
+            source_of(&dom)
+        );
+    }
+
+    #[test]
+    fn a_second_typed_bracket_summons_the_picker_and_leaves_no_empty_pair() {
+        let vault = temp_vault();
+        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = activate_link(&mut dom, &clicks);
+        place_caret(&mut dom, block, &hit, 0);
+        let bracket = || Key::Character("[".into());
+        press(
+            &mut dom,
+            keys,
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, keys, bracket(), Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains("link-picker"),
+            "one bracket only pairs: {html}"
+        );
+        assert!(source_of(&dom).starts_with("[][["), "{}", source_of(&dom));
+
+        let mutations =
+            press_for_mutations(&mut dom, keys, bracket(), Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("link-picker"), "the second summons: {html}");
+        assert!(
+            source_of(&dom).starts_with("[[2026-07-22]]"),
+            "the empty pair is taken back out: {}",
+            source_of(&dom)
+        );
+        let input = listeners(&mutations, "input")[0];
+        let picker_keys = listeners(&mutations, "keydown")[0];
+        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        type_into(&mut dom, input, "summer");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        assert!(
+            source_of(&dom).starts_with("[[2026-summer]][[2026-07-22]]"),
+            "one link shape, whichever way the picker opened: {}",
             source_of(&dom)
         );
     }
@@ -13891,7 +13957,7 @@ mod tests {
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (block, keys) = activate_link(&mut dom, &clicks);
 
-        // inside the `#l("2026-07-22")` the link block's own text
+        // inside the `[[2026-07-22]]` the link block's own text
         place_caret(&mut dom, block, &hit, IN_LINK);
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
@@ -14065,7 +14131,7 @@ mod tests {
             vault.path().join("permanent/anonyme.typ"),
             "#import \"/templates/template.typ\": *\n\
              #show: note\n\
-             \n= anonyme\n#l(\"2026-07-23\")\n",
+             \n= anonyme\n[[2026-07-23]]\n",
         )
         .expect("the id-less note is written");
         let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
@@ -14085,7 +14151,7 @@ mod tests {
         // (adr/2026-08-per-line-block-segmentation.md): it loses its
         // outgoing link and gains a ghost one
         let (_, sink) = activate_link(&mut dom, &clicks);
-        retype(&mut dom, sink, "#l(\"fantôme\")");
+        retype(&mut dom, sink, "[[fantôme]]");
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-dangling\">fantôme"), "{html}");
@@ -14571,7 +14637,7 @@ mod tests {
         type_into(&mut dom, picker_input, "summer");
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         assert!(
-            source_of(&dom).contains(r#"#l("2026-summer")#l("2026-07-22")"#),
+            source_of(&dom).contains(r#"[[2026-summer]][[2026-07-22]]"#),
             "spliced at the caret: {}",
             source_of(&dom)
         );
@@ -16547,7 +16613,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_block(&mut dom, clicks[BLOCK_LINK + 1]);
         let before = source_of(&dom);
-        assert!(before.contains("#l"), "the link line is active: {before}");
+        assert!(before.contains("[["), "the link line is active: {before}");
         // dd, not x: the click leaves the caret past the line's end, where
         // x has nothing under it; dd cuts the line from anywhere. Two keys
         // also prove a leaked first d never completes into a cut
@@ -19128,7 +19194,7 @@ mod tests {
             ),
             (
                 "permanent/linky.typ",
-                format!("{}#l(\"ghost\")\n", note("linky")),
+                format!("{}[[ghost]]\n", note("linky")),
             ),
             (
                 "capture/capture-zettel.typ",
@@ -19181,7 +19247,6 @@ mod tests {
                 concat!(
                     "#let meta(id: none, type: none, created: none, ",
                     "tags: (), origin: none) = []\n",
-                    "#let l(id) = [#id]\n",
                     "#let note(doc) = doc\n",
                 )
                 .to_string(),
@@ -19286,7 +19351,7 @@ mod tests {
     /// Adds a link to the note's heading block — no blank line, so the block
     /// count the editor tests count on is unchanged.
     fn linking(note: String, target: &str) -> String {
-        format!("{note}#l(\"{target}\")\n")
+        format!("{note}[[{target}]]\n")
     }
 
     fn note(id: &str) -> String {
@@ -19328,7 +19393,6 @@ mod tests {
         let template = concat!(
             "#let meta(id: none, type: none, created: none, ",
             "tags: (), origin: none) = []\n",
-            "#let l(id) = [#id]\n",
             "#let note(doc) = doc\n",
         );
         let body = twin_body();

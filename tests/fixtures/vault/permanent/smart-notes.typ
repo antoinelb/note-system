@@ -9,4 +9,4 @@
 
 = How to Take Smart Notes
 
-Sönke Ahrens, 2017. Presents the method of #l("luhmann").
+Sönke Ahrens, 2017. Presents the method of [[luhmann]].

@@ -10,5 +10,5 @@
 
 = Devoir 1
 
-First assignment for #l("analyse-reelle"): the three limits and one proof by induction.
+First assignment for [[analyse-reelle]]: the three limits and one proof by induction.
 Not handed in yet, so it stays overdue on the open-loops list.

@@ -17,7 +17,7 @@ e2e_start
 e2e_index_holds "SELECT 1 FROM notes WHERE id = 'plain-files';"
 
 # an editor saving in place: plain-files.typ links nothing in the fixture
-printf '\nAppended from outside the app: #l("luhmann")\n' \
+printf '\nAppended from outside the app: [[luhmann]]\n' \
     >> "$E2E_DIR/vault/permanent/plain-files.typ"
 e2e_index_holds "SELECT 1 FROM links \
     WHERE source_path = 'permanent/plain-files.typ' AND target_id = 'luhmann';"

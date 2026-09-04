@@ -10,4 +10,4 @@
 
 = Plain files outlive applications
 
-A vault of text files is still readable in 20 years; that is the bet behind #l("note-system").
+A vault of text files is still readable in 20 years; that is the bet behind [[note-system]].

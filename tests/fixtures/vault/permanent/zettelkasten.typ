@@ -9,5 +9,5 @@
 
 = Zettelkasten
 
-A system of atomic notes linked to each other, popularised by #l("luhmann").
-The value comes from the links, not from isolated notes: see #l("atomic-notes").
+A system of atomic notes linked to each other, popularised by [[luhmann]].
+The value comes from the links, not from isolated notes: see [[atomic-notes]].

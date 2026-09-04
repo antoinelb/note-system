@@ -7316,7 +7316,7 @@ mod tests {
     /// adr/2026-08-gf-follows-the-link.md
     #[test]
     fn gf_asks_the_executor_to_follow_the_link_under_the_caret() {
-        let text = "voir #l(\"une-idee\")\n";
+        let text = "voir [[une-idee]]\n";
         let parsed = blocks::segment(text);
         let mut vim = normal();
         assert_eq!(
