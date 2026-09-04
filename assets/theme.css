@@ -391,13 +391,26 @@ body {
   overflow-x: auto;
 }
 
+/* The shared block box. Its vertical half is nothing at all — no margin,
+   no top or bottom padding — so one physical line occupies exactly one
+   line box, `var(--prose-size) * var(--prose-leading)`, whatever the
+   line's markup role is: prose, heading, list item, checklist, quote,
+   blank. A block used to carry `margin: 4px 0; padding: 8px`, which put
+   20px of air under every line and made a run of list items read as a
+   loose paragraph beside a run of quotes that had fallen through to the
+   compiled SVG and kept its own tight rhythm
+   (adr/2026-09-every-line-shares-the-quote-rhythm.md). The horizontal 8px
+   stays: it is the gutter the quote's rule and the item's bullet hang in.
+   The four rules that carry this box — .block-active, .block-pending
+   .pending-source, .block-selected, .block-css — must keep it identical,
+   or the caret entering or leaving a line would shift every line below. */
 .block-active {
   display: block;
   position: relative;
   width: 100%;
   box-sizing: border-box;
-  margin: 4px 0;
-  padding: 8px;
+  margin: 0;
+  padding: 0 8px;
   border: none;
   background: transparent;
   color: var(--ink-bright);
@@ -427,8 +440,8 @@ body {
 }
 
 .block-pending .pending-source {
-  margin: 4px 0;
-  padding: 8px;
+  margin: 0;
+  padding: 0 8px;
   color: var(--ink-muted);
   font: var(--prose-size) "Cormorant Garamond", serif;
   line-height: var(--prose-leading);
@@ -448,8 +461,8 @@ body {
    selection never shifts anything below it
    (adr/2026-08-visual-selection-drawn-across-lines.md) */
 .block-selected {
-  margin: 4px 0;
-  padding: 8px;
+  margin: 0;
+  padding: 0 8px;
   color: var(--ink-bright);
   font: var(--prose-size) "Cormorant Garamond", serif;
   line-height: var(--prose-leading);
@@ -463,8 +476,8 @@ body {
    gaining/losing the caret) never shifts anything below it
    (adr/2026-08-css-draws-the-markup.md) */
 .block-css {
-  margin: 4px 0;
-  padding: 8px;
+  margin: 0;
+  padding: 0 8px;
   color: var(--ink);
   font: var(--prose-size) "Cormorant Garamond", serif;
   line-height: var(--prose-leading);
@@ -506,7 +519,7 @@ body {
    the contract, this file only supplies colour, weight, style, family and
    left-padding). The block-role classes below (.mk-line, .mk-h1..6,
    .mk-item, .mk-quote) sit on the same shared block box named in the
-   comment above .block-active — margin: 4px 0; padding: 8px; the prose
+   comment above .block-active — margin: 0; padding: 0 8px; the prose
    font; line-height: var(--prose-leading) — so none of them may touch
    those four, or a line entering/leaving CSS rendering would shift
    everything below it; .mk-blank only sets colour for the same reason —

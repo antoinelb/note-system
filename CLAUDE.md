@@ -64,6 +64,7 @@ Four versions; v0, v1 and v2 are shipped and v3 has no code yet, its six open de
 ## Design
 
 All spacing should use multiples of 4 and be coherent — that is UI pixels; one indentation level in a note's *text* is two spaces, `caret::INDENT`, Typst's own nesting width (`adr/2026-08-tab-indents-in-every-mode.md`).
+Inside a note every block is exactly one line box tall: the shared block box (`.block-active`, `.block-pending .pending-source`, `.block-selected`, `.block-css`) carries no vertical margin and no vertical padding, only an 8px horizontal gutter, so a list item, a checklist item, a quote and a prose line all keep the same rhythm — active or inactive, blank or not (`adr/2026-09-every-line-shares-the-quote-rhythm.md`).
 
 All UI strings (labels, placeholders, error messages) are English; note content keeps its own language (`adr/2026-07-repo-language-english.md`).
 A line beginning `> ` is a block quote, stored literally and taught to vanilla Typst by a `show par:` rule in `templates/template.typ` — no editor-side rewrite (`adr/2026-08-greater-than-is-the-stored-quote.md`).
