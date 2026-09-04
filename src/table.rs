@@ -189,17 +189,6 @@ pub fn filter_rows<'entries>(
         .collect()
 }
 
-/// The pan that puts a card's nominal centre at the viewport centre at
-/// this zoom: pan = centre/s − card_centre
-/// (adr/2026-08-jump-ctrl-o-centres-viewport.md).
-pub fn centre_on(card: &Card, zoom: Zoom, viewport: (f64, f64)) -> (f64, f64) {
-    let scale = zoom.scale();
-    (
-        viewport.0 / 2.0 / scale - (card.x + CARD_WIDTH / 2.0),
-        viewport.1 / 2.0 / scale - (card.y + TETHER_DROP),
-    )
-}
-
 /// The kind the card is drawn as. Presentation keys on the type: a capture
 /// that gained one of the eight permanent types is promoted on sight — hue,
 /// full fill, type label — while the file stays in `capture/` and the index
@@ -1013,22 +1002,6 @@ mod tests {
         assert_eq!(
             filter_label(&Filter::Type(NoteType::Concept)),
             "type · concept"
-        );
-    }
-
-    #[test]
-    fn centre_on_puts_the_card_centre_mid_viewport_at_both_zooms() {
-        let card = placed_card("a", 32.0, 32.0);
-        let vp = (1280.0, 800.0);
-        // titles: pan = centre − card centre (88 + 32, 28 + 32)
-        assert_eq!(
-            centre_on(&card, Zoom::Titles, vp),
-            (640.0 - 120.0, 400.0 - 60.0)
-        );
-        // bodies: the viewport centre lives at centre/s in canvas units
-        assert_eq!(
-            centre_on(&card, Zoom::Bodies, vp),
-            (640.0 / 3.0 - 120.0, 400.0 / 3.0 - 60.0)
         );
     }
 

@@ -27,7 +27,7 @@ key belonged to an overlay:
   escape ladders and the chord arms own those whether or not an overlay
   is up, and the overlays' own Escape handlers stay the first rung.
 - **With a query-bearing overlay open** (palette, creator, link picker,
-  filter, jump, template, search, ex line, recent notes) a `Character`
+  filter, note switcher, template, search, ex line) a `Character`
   is pushed onto that overlay's query signal, `Backspace` pops one, any
   other key is dropped, and the answer is `true`.
 - **With a list overlay open** (loops, settings, notices) every bare key
@@ -50,11 +50,16 @@ carries a relayed letter races the focus grab, so a report from the
 field is read as a delta against what it may still be showing
 (`adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md`).
 
+*Amended 2026-09-04:* the jump overlay and the recent-notes picker have
+become one note switcher on Ctrl+O
+(`adr/2026-09-ctrl-o-is-the-one-note-switcher.md`); the roll-call above
+names it in their place, nine query inputs where there were ten.
+
 ## Known ceiling
 
 Enter, arrows and the rest are dropped, not forwarded — forwarding Enter
 means nine accept paths lifted out of nine `onkeydown` closures. A user
-who presses Ctrl+B then Enter inside the grab's window presses Enter
+who presses Ctrl+O then Enter inside the grab's window presses Enter
 again. The e2e scenario paces only its Return for this reason. Lift the
 accept paths into callbacks if that repeat ever shows up in a session
 report.

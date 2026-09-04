@@ -12,7 +12,6 @@
 pub enum CommandId {
     ToggleTheme,
     Quit,
-    Back,
     SearchText,
     InsertLink,
     FollowLink,
@@ -38,7 +37,7 @@ pub enum CommandId {
     FilterCards,
     FoldRail,
     FoldJump,
-    JumpToNote,
+    OpenNote,
     ArrangeCluster,
     Undo,
     EditTemplate,
@@ -60,7 +59,7 @@ pub struct Command {
 /// (`adr/2026-08-screen-switch-gesture.md`), alphabetized by label
 /// (`adr/2026-08-palette-order-and-overlay-placement.md`) — the order the
 /// palette shows it in.
-pub const COMMANDS: [Command; 34] = [
+pub const COMMANDS: [Command; 33] = [
     // chordless: layout is rare and deliberate — "at most a command"
     // (adr/2026-08-arrange-cluster-command.md)
     Command {
@@ -127,11 +126,6 @@ pub const COMMANDS: [Command; 34] = [
         label: "insert link",
         chord: Some("ctrl+l"),
     },
-    Command {
-        id: CommandId::JumpToNote,
-        label: "jump to note",
-        chord: Some("ctrl+o"),
-    },
     // the conflict's fork, chordless like delete: picking a side between
     // two authors earns a summon-and-name
     // (adr/2026-08-external-edit-conflict-commands.md)
@@ -177,6 +171,13 @@ pub const COMMANDS: [Command; 34] = [
         label: "open next weekly",
         chord: None,
     },
+    // the one note switcher: the visit log with no query, the whole
+    // vault with one (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
+    Command {
+        id: CommandId::OpenNote,
+        label: "open note",
+        chord: Some("ctrl+o"),
+    },
     Command {
         id: CommandId::PreviousDaily,
         label: "open previous daily",
@@ -206,13 +207,6 @@ pub const COMMANDS: [Command; 34] = [
         id: CommandId::Quit,
         label: "quit",
         chord: Some("ctrl+q"),
-    },
-    // the visit log's picker, Obsidian's Ctrl+O-style switcher
-    // (adr/2026-08-ctrl-b-recent-notes-picker.md)
-    Command {
-        id: CommandId::Back,
-        label: "recent notes",
-        chord: Some("ctrl+b"),
     },
     // the vault's text, not the table's cards: Ctrl+F stays the filter
     // (adr/2026-09-full-text-search-lives-in-the-index.md)
@@ -328,8 +322,9 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::DeleteNote => context.sheet_open,
         CommandId::ZoomToBodies => context.on_table && !context.at_bodies,
         CommandId::ZoomToTitles => context.on_table && context.at_bodies,
-        // the finders act on cards, which only the table shows
-        CommandId::FilterCards | CommandId::JumpToNote => context.on_table,
+        // the filter acts on cards, which only the table shows; the
+        // switcher stands on every screen
+        CommandId::FilterCards => context.on_table,
         // the panes are the logs'
         CommandId::FoldRail | CommandId::FoldJump => !context.on_table,
         // the arrange scopes to the open sheet's component
@@ -458,7 +453,6 @@ mod tests {
                         && *label != "arrange cluster"
                         && !label.starts_with("zoom")
                         && *label != "filter cards"
-                        && *label != "jump to note"
                         && *label != "keep mine"
                         && *label != "take disk"
                         && *label != "undo"
@@ -470,7 +464,7 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING));
-        assert_eq!(visible.len(), COMMANDS.len() - 12);
+        assert_eq!(visible.len(), COMMANDS.len() - 11);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
     }
@@ -511,10 +505,13 @@ mod tests {
     #[test]
     fn the_finders_hide_off_the_table() {
         assert_eq!(labels(&filter("filter", READING)), Vec::<&str>::new());
-        // "jump" now also names the fold row, which is the logs' own
+        // "jump" now names the fold row alone, which is the logs' own
         assert_eq!(labels(&filter("jump", READING)), vec!["fold jump panel"]);
         assert_eq!(labels(&filter("filter", AT_TABLE)), vec!["filter cards"]);
-        assert_eq!(labels(&filter("jump", AT_TABLE)), vec!["jump to note"]);
+        assert_eq!(labels(&filter("jump", AT_TABLE)), Vec::<&str>::new());
+        // the switcher is not a finder: it stands on both screens
+        assert_eq!(labels(&filter("open note", READING)), vec!["open note"]);
+        assert_eq!(labels(&filter("open note", AT_TABLE)), vec!["open note"]);
     }
 
     #[test]
@@ -631,11 +628,10 @@ mod tests {
                 "ctrl+2",
                 "ctrl+1",
                 "ctrl+l",
-                "ctrl+o",
                 "ctrl+n",
                 "ctrl+d",
+                "ctrl+o",
                 "ctrl+q",
-                "ctrl+b",
                 "ctrl+shift+f",
                 "ctrl+,",
                 "ctrl+=",

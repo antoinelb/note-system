@@ -1,5 +1,15 @@
 # Ctrl+B opens a recent-notes picker instead of jumping straight back
 
+> **Superseded in its gesture half, 2026-09-04**, by
+> `adr/2026-09-ctrl-o-is-the-one-note-switcher.md`: Ctrl+B and its "recent
+> notes" palette row are gone, and the overlay they opened is now the
+> empty-query half of the one Ctrl+O switcher, which also matches the
+> whole index once a character is typed and opens on an empty log instead
+> of no-opping. Everything below about the *log* still stands — what
+> pushes, the cap, the newest-first dedup, the exclusion of the place
+> currently showing, landing as a real visit, and `restoring_history`'s
+> one remaining user.
+
 ## Context
 
 `adr/2026-08-note-history-back.md` gave Ctrl+B Obsidian's Ctrl+O shape as a blind pop: one press, one jump to the top of the visit stack, with a `restoring_history` flag suppressing the landing's own push so repeated presses walked backward instead of oscillating.

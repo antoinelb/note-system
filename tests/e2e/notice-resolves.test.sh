@@ -81,10 +81,10 @@ e2e_key_paced Return
 e2e_file_appears "permanent/evergreen-notes.typ"
 e2e_index_holds "SELECT 1 FROM notes WHERE id = 'evergreen-notes';"
 
-# back to atomic-notes: the recent-notes picker still holds it from the
-# first visit, filtered down to the one match
+# back to atomic-notes: the switcher's typed query finds it in the index,
+# the one match (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
 e2e_key_paced Escape
-e2e_key_paced ctrl+b
+e2e_key_paced ctrl+o
 e2e_type_paced "atomic"
 e2e_key_paced Return
 e2e_caret_onto_the_link

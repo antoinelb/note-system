@@ -417,17 +417,18 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
     let mut rail_folded = use_signal(|| false);
     let mut jump_folded = use_signal(|| false);
-    // Ctrl+B's visit log: what `select` and `show_sheet` were showing right
-    // before they changed it, capped so the log stays bounded
+    // the visit log: what `select` and `show_sheet` were showing right
+    // before they changed it, capped so the log stays bounded — the
+    // switcher's empty-query list reads it
     // (adr/2026-08-note-history-back.md,
-    // adr/2026-08-ctrl-b-recent-notes-picker.md)
+    // adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
     let mut history = use_signal(Vec::<Visit>::new);
     // set around the one call that returns to a place already showing —
     // the template-editing Escape, which routes through `select` with the
     // selection already standing — so that return does not get pushed onto
-    // the log as a new visit. The Ctrl+B picker's own landings are real
-    // visits and push like any other
-    // (adr/2026-08-ctrl-b-recent-notes-picker.md).
+    // the log as a new visit. The switcher's own landings are real visits
+    // and push like any other
+    // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
     let mut restoring_history = use_signal(|| false);
     let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
     let mut month = use_signal(|| today.first_of_month());
@@ -525,17 +526,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut filter_picker = use_signal(|| None::<FilterPicker>);
     let mut filter_query = use_signal(String::new);
     let mut filter_highlighted = use_signal(|| 0usize);
-    // the Ctrl+O jump overlay (adr/2026-08-jump-ctrl-o-centres-viewport.md)
-    let mut jump = use_signal(|| None::<Jump>);
-    let mut jump_query = use_signal(String::new);
-    let mut jump_highlighted = use_signal(|| 0usize);
-    // the Ctrl+B recent-notes picker, floating over either screen
-    // (adr/2026-08-ctrl-b-recent-notes-picker.md)
-    let mut back = use_signal(|| None::<Back>);
-    let mut back_query = use_signal(String::new);
-    let mut back_highlighted = use_signal(|| 0usize);
-    // the Ctrl+Shift+F finder over the vault's text, the recent-notes
-    // picker's twin (adr/2026-09-full-text-search-lives-in-the-index.md)
+    // the Ctrl+O note switcher, the one picker that opens a note from
+    // anywhere (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
+    let mut switcher = use_signal(|| None::<Switcher>);
+    let mut switcher_query = use_signal(String::new);
+    let mut switcher_highlighted = use_signal(|| 0usize);
+    // the Ctrl+Shift+F finder over the vault's text, the switcher's
+    // twin (adr/2026-09-full-text-search-lives-in-the-index.md)
     let mut finder_open = use_signal(|| false);
     let mut finder_query = use_signal(String::new);
     let mut finder_highlighted = use_signal(|| 0usize);
@@ -862,7 +859,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             if !editor.write().flush() {
                 return;
             }
-            // Ctrl+B's back stack: what stood here a moment ago, before
+            // the visit log: what stood here a moment ago, before
             // this selection replaces it — unless this call is itself a
             // landing on a popped visit, in which case pushing would put
             // it straight back (adr/2026-08-note-history-back.md)
@@ -925,10 +922,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             if !editor.write().flush() {
                 return;
             }
-            // Ctrl+B's visit log, the same push `select` makes —
+            // the visit log, the same push `select` makes —
             // unconditional here: the one suppressed return (the
             // template-editing Escape) routes through `select`, never
-            // through a sheet (adr/2026-08-ctrl-b-recent-notes-picker.md)
+            // through a sheet (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
             let visit = match sheet.peek().clone() {
                 Some(own) => Visit::Sheet(own),
                 None => Visit::Logs(selected.peek().clone()),
@@ -998,7 +995,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let open_id = use_callback(move |id: String| {
         if let Some(scale) = links::scale_of(&id, &notes.peek()) {
             // a time link followed from a sheet lands on the logs.
-            // `select` runs first: it records the sheet on Ctrl+B's log
+            // `select` runs first: it records the sheet on the visit log
             // and closes it itself — closing here first made the log
             // record the logs selection the sheet stood over instead of
             // the sheet. The screen only switches once the sheet really
@@ -1241,55 +1238,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             ));
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
-        }
-    });
-
-    // the jump overlay's opening half: completions narrowed to notes with
-    // cards — the table never hosts the rest
-    // (adr/2026-08-jump-ctrl-o-centres-viewport.md)
-    let open_jump = use_callback({
-        let root = root.clone();
-        move |()| match completions(&root) {
-            Ok(entries) => {
-                if status.peek().has(Source::Index) {
-                    status.write().resolve(Source::Index);
-                }
-                let carded: Vec<links::Completion> = entries
-                    .into_iter()
-                    .filter(|entry| {
-                        table_notes
-                            .peek()
-                            .iter()
-                            .any(|note| note.id == entry.id)
-                    })
-                    .collect();
-                jump_query.set(String::new());
-                shown.set(Shown::opened(""));
-                jump_highlighted.set(0);
-                jump.set(Some(Jump { entries: carded }));
-            }
-            Err(msg) => status.write().report(Notice::index(msg)),
-        }
-    });
-    let close_jump = use_callback(move |()| jump.set(None));
-    let jump_to = use_callback({
-        let fallback = fallback.clone();
-        move |id: String| {
-            close_jump.call(());
-            // re-derived, so a fallback-slot card jumps to where it stands
-            let placed = table::cards(
-                &table_notes.peek(),
-                &positions.peek(),
-                &mut fallback.borrow_mut(),
-                &edges.peek(),
-                filter.peek().as_ref(),
-                today,
-            );
-            if let Some(card) = placed.iter().find(|card| card.id == id) {
-                let landed =
-                    table::centre_on(card, *zoom.peek(), *viewport.peek());
-                pan.set(landed);
-            }
         }
     });
 
@@ -1566,33 +1514,48 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             close_sheet.call(());
         }
         filter_picker.set(None);
-        jump.set(None);
         screen.set(Screen::Logs);
     });
-    // Ctrl+B, a recent-notes picker over the visit log
-    // (adr/2026-08-ctrl-b-recent-notes-picker.md): the log's distinct
-    // notes newest first, the place currently showing left out. An empty
-    // list is a silent no-op — there is nowhere behind the first note.
-    let open_back = use_callback(move |()| {
-        let current = match sheet.peek().clone() {
-            Some(own) => Visit::Sheet(own),
-            None => Visit::Logs(selected.peek().clone()),
-        };
-        let mut entries: Vec<Visit> = Vec::new();
-        for visit in history.peek().iter().rev() {
-            if *visit != current && !entries.contains(visit) {
-                entries.push(visit.clone());
-            }
+    // Ctrl+O, the one note switcher, opening over every screen
+    // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md). Its two halves are
+    // frozen at open, the `Picker` idiom: where you have been — the visit
+    // log's distinct notes, newest first — and everywhere you could go,
+    // every note the index knows. Both leave out the note currently
+    // showing. Unlike the picker it replaces, an empty log is not a
+    // no-op: the switcher opens so the query can be typed.
+    let open_switcher = use_callback({
+        let root = root.clone();
+        move |()| {
+            let own = match sheet.peek().clone() {
+                Some(own) => own,
+                None => selected.peek().1.clone(),
+            };
+            // an index that will not open costs the typed half only: the
+            // visit log is app state, and where you have been stays
+            // reachable while the notice says why the rest is not
+            let entries: Vec<links::Completion> = match completions(&root) {
+                Ok(entries) => {
+                    if status.peek().has(Source::Index) {
+                        status.write().resolve(Source::Index);
+                    }
+                    entries
+                        .into_iter()
+                        .filter(|entry| entry.id != own)
+                        .collect()
+                }
+                Err(msg) => {
+                    status.write().report(Notice::index(msg));
+                    Vec::new()
+                }
+            };
+            let recent = recent_notes(&history.peek(), &own, &entries);
+            switcher_query.set(String::new());
+            shown.set(Shown::opened(""));
+            switcher_highlighted.set(0);
+            switcher.set(Some(Switcher { recent, entries }));
         }
-        if entries.is_empty() {
-            return;
-        }
-        back_query.set(String::new());
-        shown.set(Shown::opened(""));
-        back_highlighted.set(0);
-        back.set(Some(Back { entries }));
     });
-    let close_back = use_callback(move |()| back.set(None));
+    let close_switcher = use_callback(move |()| switcher.set(None));
     // the finder: opens empty, searches on every keystroke — the index is
     // local and the vault small, so the answer lands inside the keystroke
     // — and lands a hit the way a loop line lands, by path
@@ -1621,22 +1584,36 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             finder_query.set(query);
         }
     });
-    // landing is a real visit, pushed like any other — no pop, no push
-    // suppression: the log records where you came from, so the picker can
-    // bounce. `select` reads the sheet for its push *before* closing it,
-    // so it runs first and the screen hygiene follows; leading with
-    // `go_logs` is what made the log record a sheet already closed
-    let back_to = use_callback(move |visit: Visit| {
-        close_back.call(());
-        match visit {
-            Visit::Logs(sel) => {
-                select.call(sel);
-                go_logs.call(());
+    // the landing, following the category rule a loop line follows
+    // (adr/2026-09-loop-lines-open-their-notes.md): a time note lands on
+    // the logs, where its rail, calendar and crumbs are, and everything
+    // else opens the sheet the table hosts. The verdict is read off what
+    // the app already holds rather than a second index read — every row
+    // came from `completions`, and `table_notes` is exactly the notes
+    // outside `time/` that have an id, so "no card claims this id" *is*
+    // the leading directory's answer. A time file whose stem no scale can
+    // parse falls through to the sheet, the one surface that shows any
+    // file, exactly as `open_loop` lets it.
+    //
+    // Landing is a real visit, pushed like any other by `select` and
+    // `show_sheet` — no pop, no push suppression, so the switcher can
+    // bounce. The picker closes only once the landing really happened:
+    // both seams flush the buffer they are leaving first, and a refused
+    // flush must leave the user looking at the list, not at a note that
+    // never moved (`open_id`'s own guard).
+    let switch_to = use_callback(move |id: String| {
+        let carded = table_notes.peek().iter().any(|note| note.id == id);
+        if !carded && let Some(scale) = logs::scale_of_id(&id) {
+            select.call((scale, id.clone()));
+            if sheet.peek().is_none() && selected.peek().1 == id {
+                screen.set(Screen::Logs);
+                switcher.set(None);
             }
-            Visit::Sheet(id) => {
-                go_table.call(());
-                open_sheet.call(id);
-            }
+            return;
+        }
+        open_sheet.call(id.clone());
+        if sheet.peek().as_deref() == Some(id.as_str()) {
+            switcher.set(None);
         }
     });
 
@@ -1670,11 +1647,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 || creator.read().is_some()
                 || picker.read().is_some()
                 || filter_picker.read().is_some()
-                || jump.read().is_some()
+                || switcher.read().is_some()
                 || template_picker.read().is_some()
                 || search_prompt()
                 || ex_prompt()
-                || back.read().is_some()
                 || finder_open()
                 || listing
                 // absent from this list, closing either overlay left the
@@ -1736,11 +1712,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             (creator.read().is_some(), creator_query),
             (picker.read().is_some(), query),
             (filter_picker.read().is_some(), filter_query),
-            (jump.read().is_some(), jump_query),
+            (switcher.read().is_some(), switcher_query),
             (template_picker.read().is_some(), template_query),
             (search_prompt(), search_query),
             (ex_prompt(), ex_query),
-            (back.read().is_some(), back_query),
             (finder_open(), finder_query),
         ]
         .into_iter()
@@ -1973,7 +1948,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     root_commands.toggle_theme.call(());
                 }
                 palette::CommandId::Quit => root_commands.quit.call(()),
-                palette::CommandId::Back => open_back.call(()),
                 palette::CommandId::SearchText => open_finder.call(()),
                 // the caret commands run against the caret the palette
                 // opened over — app state nothing could have moved; the
@@ -2023,7 +1997,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 palette::CommandId::FoldJump => {
                     fold_pane.call(keymap::Fold::Jump);
                 }
-                palette::CommandId::JumpToNote => open_jump.call(()),
+                palette::CommandId::OpenNote => open_switcher.call(()),
                 palette::CommandId::ArrangeCluster => {
                     arrange_cluster.call(());
                 }
@@ -3475,7 +3449,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && event.modifiers().ctrl()
                         && picker.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !settings_open()
                         && editor.peek().active().is_some() =>
                 {
@@ -3495,7 +3469,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !settings_open() =>
                 {
                     event.prevent_default();
@@ -3513,7 +3487,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !settings_open()
                         && !notices_open()
                         && !loops_open() =>
@@ -3532,7 +3506,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && palette.peek().is_none()
                         && picker.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !settings_open() =>
                 {
                     // the webview's own Ctrl+N would open a window
@@ -3552,7 +3526,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !settings_open() =>
                 {
                     // the webview's own Ctrl+D would open a bookmark dialog
@@ -3568,7 +3542,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !notices_open()
                         && !loops_open() =>
                 {
@@ -3583,7 +3557,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         .is_some()
                         && palette.peek().is_none()
                         && creator.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !finder_open()
                         && !settings_open() =>
                 {
@@ -3595,22 +3569,25 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             .unwrap_or(keymap::Fold::Rail),
                     );
                 }
-                // Ctrl+B, the back history's chord
-                // (adr/2026-08-note-history-back.md), guarded like every
-                // other overlay-aware chord here: overlays never stack
+                // Ctrl+O, the note switcher — the same chord the table
+                // answers, because the switcher belongs to no screen
+                // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md);
+                // guarded like every other overlay-aware chord here:
+                // overlays never stack
                 Key::Character(ref character)
-                    if character == "b"
+                    if character == "o"
                         && event.modifiers().ctrl()
                         && palette.peek().is_none()
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !finder_open()
                         && !settings_open() =>
                 {
+                    // the webview owns Ctrl+O as an open dialog
                     event.prevent_default();
-                    open_back.call(());
+                    open_switcher.call(());
                 }
                 // Ctrl+Shift+F, the finder over the vault's text; the
                 // shifted key arrives upper-case
@@ -3623,7 +3600,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
-                        && back.peek().is_none()
+                        && switcher.peek().is_none()
                         && !finder_open()
                         && !settings_open() =>
                 {
@@ -3735,8 +3712,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && picker.peek().is_none()
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !settings_open() =>
             {
                 event.prevent_default();
@@ -3749,8 +3725,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && picker.peek().is_none()
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !settings_open()
                     && !notices_open()
                     && !loops_open() =>
@@ -3768,8 +3743,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && palette.peek().is_none()
                     && picker.peek().is_none()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !settings_open() =>
             {
                 // the webview's own Ctrl+N would open a window
@@ -3789,14 +3763,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && picker.peek().is_none()
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !settings_open() =>
             {
                 // the webview's own Ctrl+D would open a bookmark dialog
                 event.prevent_default();
                 // `select` first: with a sheet open it records the sheet
-                // on Ctrl+B's log before closing it — `go_logs` leading
+                // on the visit log before closing it — `go_logs` leading
                 // closed the sheet and made the log record the logs
                 // selection underneath instead
                 open_daily.call(());
@@ -3816,8 +3789,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && picker.peek().is_none()
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !settings_open() =>
             {
                 event.prevent_default();
@@ -3832,30 +3804,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && picker.peek().is_none()
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !notices_open()
                     && !loops_open() =>
             {
                 event.prevent_default();
                 open_settings.call(());
-            }
-            // Ctrl+B, the back history's chord, the logs arm's twin
-            // (adr/2026-08-note-history-back.md)
-            Key::Character(ref character)
-                if character == "b"
-                    && event.modifiers().ctrl()
-                    && palette.peek().is_none()
-                    && picker.peek().is_none()
-                    && creator.peek().is_none()
-                    && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
-                    && !finder_open()
-                    && !settings_open() =>
-            {
-                event.prevent_default();
-                open_back.call(());
             }
             Key::Character(ref character)
                 if character == "1" && event.modifiers().ctrl() =>
@@ -3887,16 +3841,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 event.prevent_default();
                 zoom_to.call(table::Zoom::Titles);
             }
-            // the finders, table-only, guarded like every overlay chord
-            // (adr/2026-08-filter-overlay-ctrl-f.md,
-            // adr/2026-08-jump-ctrl-o-centres-viewport.md)
+            // the card filter, table-only, guarded like every overlay
+            // chord (adr/2026-08-filter-overlay-ctrl-f.md)
             Key::Character(ref character)
                 if character == "f"
                     && event.modifiers().ctrl()
                     && !event.modifiers().shift()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !finder_open()
                     && palette.peek().is_none()
                     && creator.peek().is_none()
@@ -3914,8 +3866,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     && event.modifiers().ctrl()
                     && event.modifiers().shift()
                     && filter_picker.peek().is_none()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && !finder_open()
                     && palette.peek().is_none()
                     && creator.peek().is_none()
@@ -3925,20 +3876,22 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 event.prevent_default();
                 open_finder.call(());
             }
+            // Ctrl+O, the note switcher, the logs arm's twin
+            // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
             Key::Character(ref character)
                 if character == "o"
                     && event.modifiers().ctrl()
-                    && jump.peek().is_none()
-                    && back.peek().is_none()
+                    && switcher.peek().is_none()
                     && filter_picker.peek().is_none()
                     && palette.peek().is_none()
                     && creator.peek().is_none()
                     && picker.peek().is_none()
+                    && !finder_open()
                     && !settings_open() =>
             {
                 // the webview owns Ctrl+O as an open dialog
                 event.prevent_default();
-                open_jump.call(());
+                open_switcher.call(());
             }
             _ => {}
         }
@@ -4299,52 +4252,49 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 }
             }
         }
-        // the Ctrl+B recent-notes picker, the settings overlay's sibling:
-        // rendered at the top level so it floats over either screen, in
-        // the jump overlay's grammar — query, arrows, Enter, Escape
-        // (adr/2026-08-ctrl-b-recent-notes-picker.md)
+        // the note switcher, the settings overlay's sibling: rendered at
+        // the top level so it floats over every screen, in the pickers'
+        // one grammar — query, arrows, Enter, Escape, clickable rows
+        // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
         {
-            match back() {
+            match switcher() {
                 Some(frozen) => {
-                    let filter = back_query.read().to_lowercase();
-                    let rows: Vec<(String, Visit)> = frozen
-                        .entries
-                        .iter()
-                        .filter(|visit| {
-                            visit.id().to_lowercase().contains(&filter)
-                        })
-                        .map(|visit| (visit.id().to_string(), visit.clone()))
-                        .collect();
+                    let empty_query = switcher_query.read().is_empty();
+                    let rows: Vec<links::Completion> =
+                        switcher_rows(&frozen, &switcher_query.read())
+                            .into_iter()
+                            .cloned()
+                            .collect();
                     let keys_rows = rows.clone();
                     rsx! {
                     div { class: "command-palette",
-                        div { class: "palette-head type-label", "recent notes" }
+                        div { class: "palette-head type-label", "open note" }
                         input {
                             class: "picker-query",
-                            value: "{back_query}",
+                            value: "{switcher_query}",
                             placeholder: "note…",
                             onmounted: move |event| async move {
                                 let _ = event.set_focus(true).await;
                             },
                             oninput: move |event| {
-                                back_query.set(typed.call((back_query, event.value())));
-                                back_highlighted.set(0);
+                                switcher_query.set(typed.call((switcher_query, event.value())));
+                                switcher_highlighted.set(0);
                             },
                             onkeydown: move |event: KeyboardEvent| {
                                 let key = event.key();
                                 let last = keys_rows.len().saturating_sub(1);
                                 match key {
-                                    Key::Escape => close_back.call(()),
+                                    Key::Escape => close_switcher.call(()),
                                     Key::Enter => {
-                                        if let Some((_, visit)) = keys_rows.get(back_highlighted()) {
-                                            back_to.call(visit.clone());
+                                        if let Some(entry) = keys_rows.get(switcher_highlighted()) {
+                                            switch_to.call(entry.id.clone());
                                         }
                                     }
                                     Key::ArrowDown => {
-                                        back_highlighted.set((back_highlighted() + 1).min(last));
+                                        switcher_highlighted.set((switcher_highlighted() + 1).min(last));
                                     }
                                     Key::ArrowUp => {
-                                        back_highlighted.set(back_highlighted().saturating_sub(1));
+                                        switcher_highlighted.set(switcher_highlighted().saturating_sub(1));
                                     }
                                     _ => {}
                                 }
@@ -4353,19 +4303,27 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 }
                             },
                         }
+                        // an empty list says which emptiness it is: a vault
+                        // never navigated has no recent notes, a query can
+                        // simply match none
                         if rows.is_empty() {
-                            div { class: "picker-empty", "no matching note" }
+                            div { class: "picker-empty",
+                                if empty_query { "no note visited yet" } else { "no matching note" }
+                            }
                         }
-                        for (rank, (label, visit)) in rows.into_iter().enumerate() {
+                        for (rank, entry) in rows.into_iter().enumerate() {
                             div {
-                                key: "{label}",
+                                key: "{entry.id}",
                                 class: "picker-row",
-                                class: if rank == back_highlighted() { "selected" },
+                                class: if rank == switcher_highlighted() { "selected" },
                                 onclick: {
-                                    let visit = visit.clone();
-                                    move |_| back_to.call(visit.clone())
+                                    let id = entry.id.clone();
+                                    move |_| switch_to.call(id.clone())
                                 },
-                                span { class: "picker-id", "{label}" }
+                                span { class: "picker-id", "{entry.id}" }
+                                if let Some(title) = entry.title {
+                                    span { class: "picker-title", "{title}" }
+                                }
                             }
                         }
                     }
@@ -5002,76 +4960,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         None => rsx! {},
                     }
                 }
-                {
-                    match jump() {
-                        Some(frozen) => {
-                            let rows: Vec<links::Completion> =
-                                links::filter(&frozen.entries, &jump_query.read())
-                                    .into_iter()
-                                    .cloned()
-                                    .collect();
-                            let keys_rows = rows.clone();
-                            rsx! {
-                            div { class: "command-palette",
-                                div { class: "palette-head type-label", "jump" }
-                                input {
-                                    class: "picker-query",
-                                    value: "{jump_query}",
-                                    placeholder: "note…",
-                                    onmounted: move |event| async move {
-                                        let _ = event.set_focus(true).await;
-                                    },
-                                    oninput: move |event| {
-                                        jump_query.set(typed.call((jump_query, event.value())));
-                                        jump_highlighted.set(0);
-                                    },
-                                    onkeydown: move |event: KeyboardEvent| {
-                                        let key = event.key();
-                                        let last = keys_rows.len().saturating_sub(1);
-                                        match key {
-                                            Key::Escape => close_jump.call(()),
-                                            Key::Enter => {
-                                                if let Some(entry) = keys_rows.get(jump_highlighted()) {
-                                                    jump_to.call(entry.id.clone());
-                                                }
-                                            }
-                                            Key::ArrowDown => {
-                                                jump_highlighted.set((jump_highlighted() + 1).min(last));
-                                            }
-                                            Key::ArrowUp => {
-                                                jump_highlighted.set(jump_highlighted().saturating_sub(1));
-                                            }
-                                            _ => {}
-                                        }
-                                        if !event.modifiers().ctrl() {
-                                            event.stop_propagation();
-                                        }
-                                    },
-                                }
-                                if rows.is_empty() {
-                                    div { class: "picker-empty", "no matching note" }
-                                }
-                                for (rank, entry) in rows.into_iter().enumerate() {
-                                    div {
-                                        key: "{entry.id}",
-                                        class: "picker-row",
-                                        class: if rank == jump_highlighted() { "selected" },
-                                        onclick: {
-                                            let id = entry.id.clone();
-                                            move |_| jump_to.call(id.clone())
-                                        },
-                                        span { class: "picker-id", "{entry.id}" }
-                                        if let Some(title) = entry.title {
-                                            span { class: "picker-title", "{title}" }
-                                        }
-                                    }
-                                }
-                            }
-                            }
-                        }
-                        None => rsx! {},
-                    }
-                }
             }
         }
     }
@@ -5250,8 +5138,8 @@ enum Screen {
     Logs,
 }
 
-/// One entry in Ctrl+B's back history: what was showing right before it was
-/// left, either a logs selection or an open sheet
+/// One entry in the visit log: what was showing right before it was left,
+/// either a logs selection or an open sheet
 /// (adr/2026-08-note-history-back.md).
 #[derive(Clone, PartialEq, Debug)]
 enum Visit {
@@ -5260,8 +5148,8 @@ enum Visit {
 }
 
 impl Visit {
-    /// The note id the picker's row shows: a visit is a note either way
-    /// (adr/2026-08-ctrl-b-recent-notes-picker.md).
+    /// The note id the switcher's row shows: a visit is a note either way
+    /// (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
     fn id(&self) -> &str {
         match self {
             Visit::Logs((_, id)) => id,
@@ -5270,7 +5158,7 @@ impl Visit {
     }
 }
 
-/// Ctrl+B's stack cap: a bounded log, not an unbounded one
+/// The visit log's cap: a bounded log, not an unbounded one
 /// (adr/2026-08-note-history-back.md).
 const HISTORY_CAP: usize = 64;
 
@@ -5931,19 +5819,58 @@ struct FilterPicker {
     entries: Vec<table::FilterEntry>,
 }
 
-/// The open Ctrl+B picker's fixed half — the `Picker` idiom over the
-/// visit log: distinct visits newest first, the current location excluded,
-/// frozen at open (adr/2026-08-ctrl-b-recent-notes-picker.md).
+/// The open switcher's fixed half — the `Picker` idiom over two lists,
+/// both frozen at open and both without the note currently showing:
+/// `recent` is where you have been, `entries` everywhere you could go
+/// (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
 #[derive(Clone, PartialEq)]
-struct Back {
-    entries: Vec<Visit>,
+struct Switcher {
+    recent: Vec<links::Completion>,
+    entries: Vec<links::Completion>,
 }
 
-/// The open jump overlay's fixed half — the `Picker` idiom without an
-/// anchor (adr/2026-08-jump-ctrl-o-centres-viewport.md).
-#[derive(Clone, PartialEq)]
-struct Jump {
-    entries: Vec<links::Completion>,
+/// What the switcher lists: with no query, the visit log — a switcher
+/// opened and dismissed with Enter is a back button, which is what the
+/// picker it replaces was for. With one, every note in the vault, matched
+/// by id and title and capped exactly as the Ctrl+L picker matches, so
+/// one rule covers both places a note is named
+/// (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
+fn switcher_rows<'a>(
+    frozen: &'a Switcher,
+    query: &str,
+) -> Vec<&'a links::Completion> {
+    if query.is_empty() {
+        return frozen.recent.iter().collect();
+    }
+    links::filter(&frozen.entries, query)
+}
+
+/// The visit log read as a list of notes: each distinct id, newest visit
+/// first, `own` — the note currently showing — left out. A visit is a note
+/// either way, so the log's two surfaces fold into one row per note rather
+/// than one per surface. The title is the index's own, when the vault
+/// still holds a row for that id: a note visited and since deleted keeps
+/// its row here, because the log is app state and answers with no read.
+fn recent_notes(
+    history: &[Visit],
+    own: &str,
+    entries: &[links::Completion],
+) -> Vec<links::Completion> {
+    let mut rows: Vec<links::Completion> = Vec::new();
+    for visit in history.iter().rev() {
+        let id = visit.id();
+        if id == own || rows.iter().any(|row| row.id == id) {
+            continue;
+        }
+        rows.push(match entries.iter().find(|entry| entry.id == id) {
+            Some(entry) => entry.clone(),
+            None => links::Completion {
+                id: id.to_string(),
+                title: None,
+            },
+        });
+    }
+    rows
 }
 
 /// The edit-template overlay's frozen half: the directory listing at the
@@ -7744,8 +7671,12 @@ mod tests {
         );
     }
 
+    /// The switcher's own index read is a notice source like every
+    /// other, resolving on the next good read
+    /// (adr/2026-09-index-notices-resolve-on-a-good-lookup.md). The
+    /// broken read costs the typed half alone: the overlay still opens.
     #[test]
-    fn jump_to_note_resolves_a_standing_index_notice() {
+    fn the_switcher_resolves_a_standing_index_notice() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -7753,20 +7684,18 @@ mod tests {
         open_sheet_on(&mut dom, pane, cards[0]);
 
         replace_database_with_a_directory(vault.path());
-        let (input, palette_keys) = open_palette(&mut dom, keys);
-        type_into(&mut dom, input, "jump to note");
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let (_input, picker_keys, _) = open_switcher(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains("notice-warning"),
             "the failed lookup reports: {html}"
         );
+        assert!(html.contains(">open note<"), "it opened anyway: {html}");
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
 
         std::fs::remove_dir(vault.path().join(".index/index.db"))
             .expect("the sabotage lifts");
-        let (input, palette_keys) = open_palette(&mut dom, keys);
-        type_into(&mut dom, input, "jump to note");
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        open_switcher(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
         assert!(
             !html.contains("notice-warning"),
@@ -8229,9 +8158,9 @@ mod tests {
         );
 
         // regression (final review): `select` pushes the sheet it closes,
-        // so Ctrl+B's log names beta, not the logs selection it stood over
+        // so the visit log names beta, not the logs selection it stood over
         let logs_keys = listeners(&landed, "keydown")[0];
-        let (_input, _picker_keys, _) = open_back_picker(&mut dom, logs_keys);
+        let (_input, _picker_keys, _) = open_switcher(&mut dom, logs_keys);
         assert_eq!(
             picker_ids(&dom),
             ["beta", "2026-07-23"],
@@ -12866,14 +12795,14 @@ mod tests {
     fn escaping_out_of_a_template_does_not_push_a_history_visit() {
         // regression: the Escape-from-template return routes through
         // `select` with the selection already standing, which must not
-        // count as a Ctrl+B visit (adr/2026-08-note-history-back.md) —
-        // otherwise Ctrl+B would land on the very note it is already
+        // count as a visit (adr/2026-08-note-history-back.md) —
+        // otherwise the switcher would land on the very note it is already
         // showing instead of walking back to the one real visit underneath.
         //
         // a self-referential entry (the note pointing at itself) is
         // invisible if the prior selection is the same note the test starts
         // on, so this first walks to a *distinct* prior note (23 -> 21):
-        // a wrongly-pushed self-visit would satisfy one Ctrl+B by landing
+        // a wrongly-pushed self-visit would satisfy one switch by landing
         // back on 21 (a no-op), while the correct behaviour walks past it
         // to the one true visit, landing on 23.
         let vault = temp_vault();
@@ -12902,7 +12831,7 @@ mod tests {
         );
 
         let (_input, _picker_keys, _) =
-            open_back_picker(&mut dom, keys[LOGS_KEYS]);
+            open_switcher(&mut dom, keys[LOGS_KEYS]);
         assert_eq!(
             picker_ids(&dom),
             ["2026-07-23"],
@@ -14188,20 +14117,20 @@ mod tests {
                 "open next daily",
                 "open next season",
                 "open next weekly",
+                "open note",
                 "open previous daily",
                 "open previous season",
                 "open previous weekly",
                 "open season",
                 "open weekly",
                 "quit",
-                "recent notes",
                 "search text",
                 "settings",
                 "toggle theme",
             ],
             "alphabetized; the note opened editing, so the caret commands \
              stand; the screen already stood on is not offered, and no \
-             sheet backs a delete; recent notes always stands"
+             sheet backs a delete; open note always stands"
         );
 
         type_into(&mut dom, input, "THEME");
@@ -15635,29 +15564,153 @@ mod tests {
         );
     }
 
-    // -- Ctrl+B: the recent-notes picker over the visit log
-    //    (adr/2026-08-ctrl-b-recent-notes-picker.md) ------------------------
+    // -- Ctrl+O: the one note switcher
+    //    (adr/2026-09-ctrl-o-is-the-one-note-switcher.md) -------------------
 
+    /// An empty visit log is not a no-op the way the picker this
+    /// replaces made it: the
+    /// switcher opens on nothing so the query can be typed, and says
+    /// which emptiness it is.
     #[test]
-    fn ctrl_b_is_a_silent_no_op_with_an_empty_history() {
+    fn the_switcher_opens_on_an_empty_visit_log() {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let before = dioxus_ssr::render(&dom);
 
-        press(
-            &mut dom,
-            keys[LOGS_KEYS],
-            Key::Character("b".into()),
-            Modifiers::CONTROL,
+        let (input, _picker_keys, _) =
+            open_switcher(&mut dom, keys[LOGS_KEYS]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">open note<"), "the switcher opened: {html}");
+        assert_eq!(picker_ids(&dom), Vec::<String>::new());
+        assert!(html.contains("no note visited yet"), "{html}");
+
+        // and a query reaches the whole vault from that same empty list —
+        // the day showing is left out, every other note is offered
+        type_into(&mut dom, input, "2026");
+        assert_eq!(
+            picker_ids(&dom),
+            ["2026-07-21", "2026-07-22", "2026-summer", "2026-w30"],
+            "the current selection is not among its own destinations"
+        );
+    }
+
+    /// The typed half is the whole index, not the table's cards: a time
+    /// note and a capture are both switchable, which the jump overlay's
+    /// card restriction refused.
+    #[test]
+    fn a_typed_query_matches_every_note_by_id_and_title() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        click(&mut dom, clicks[RAIL_DAY_21]);
+
+        let (input, picker_keys, _) = open_switcher(&mut dom, keys[LOGS_KEYS]);
+        // the empty query is the log alone
+        assert_eq!(picker_ids(&dom), ["2026-07-23"]);
+
+        type_into(&mut dom, input, "a");
+        assert_eq!(
+            picker_ids(&dom),
+            ["alpha", "capture-idea"],
+            "a permanent note and a capture, both by id"
         );
 
-        let after = dioxus_ssr::render(&dom);
-        assert_eq!(before, after, "nowhere behind the first note");
+        // and the time notes the jump overlay could never offer, the day
+        // showing still left out of its own list
+        type_into(&mut dom, input, "2026-0");
+        assert_eq!(picker_ids(&dom), ["2026-07-22", "2026-07-23"]);
+
+        // a query nothing matches leaves the other message, and enter
+        // over it does nothing
+        type_into(&mut dom, input, "xyzzy");
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no matching note"), "{html}");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">open note<"), "still open: {html}");
+        assert!(
+            html.contains("cal-day has-note selected\">21"),
+            "nothing landed: {html}"
+        );
+    }
+
+    /// The pure row rule under the two halves, without a VirtualDom.
+    #[test]
+    fn switcher_rows_read_the_log_empty_and_the_index_typed() {
+        let entries: Vec<links::Completion> = ["alpha", "beta"]
+            .into_iter()
+            .map(|id| links::Completion {
+                id: id.to_string(),
+                title: None,
+            })
+            .collect();
+        let frozen = Switcher {
+            recent: vec![links::Completion {
+                id: "beta".to_string(),
+                title: Some("Beta".to_string()),
+            }],
+            entries,
+        };
+        assert_eq!(
+            switcher_rows(&frozen, "")
+                .into_iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            ["beta"],
+            "no query: where you have been"
+        );
+        assert_eq!(
+            switcher_rows(&frozen, "a")
+                .into_iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"],
+            "a query: everywhere you could go"
+        );
+    }
+
+    /// The log read as notes: newest first, one row per note whichever
+    /// surface it was visited on, the note showing left out, and the
+    /// index's title carried when it has one.
+    #[test]
+    fn recent_notes_folds_the_log_by_note_and_drops_the_current_one() {
+        let entries = vec![links::Completion {
+            id: "alpha".to_string(),
+            title: Some("Alpha".to_string()),
+        }];
+        let history = vec![
+            Visit::Logs((NoteType::Daily, "2026-07-21".to_string())),
+            Visit::Sheet("alpha".to_string()),
+            Visit::Logs((NoteType::Daily, "2026-07-21".to_string())),
+            Visit::Sheet("beta".to_string()),
+        ];
+
+        assert_eq!(
+            recent_notes(&history, "beta", &entries),
+            vec![
+                links::Completion {
+                    id: "2026-07-21".to_string(),
+                    title: None,
+                },
+                links::Completion {
+                    id: "alpha".to_string(),
+                    title: Some("Alpha".to_string()),
+                },
+            ],
+            "newest first, deduplicated by note, the current one dropped"
+        );
+
+        // the same note reached through both surfaces is one row, and
+        // excluding by id drops it whichever surface shows it now
+        let both = vec![
+            Visit::Sheet("alpha".to_string()),
+            Visit::Logs((NoteType::Daily, "alpha".to_string())),
+        ];
+        assert!(recent_notes(&both, "alpha", &entries).is_empty());
     }
 
     #[test]
-    fn ctrl_b_opens_the_picker_and_enter_lands_on_the_visit() {
+    fn ctrl_o_opens_the_switcher_and_enter_lands_on_the_visit() {
         let vault = temp_vault();
         let (mut dom, clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -15668,14 +15721,14 @@ mod tests {
 
         click(&mut dom, clicks[RAIL_DAY_21]);
         let (_input, picker_keys, _) =
-            open_back_picker(&mut dom, keys[LOGS_KEYS]);
+            open_switcher(&mut dom, keys[LOGS_KEYS]);
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("recent notes"), "the picker opened: {html}");
+        assert!(html.contains(">open note<"), "the switcher opened: {html}");
         assert_eq!(picker_ids(&dom), ["2026-07-23"]);
 
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("recent notes"), "the picker closed: {html}");
+        assert!(!html.contains(">open note<"), "the switcher closed: {html}");
         assert!(
             html.contains("cal-day has-note selected\">23"),
             "enter landed on the visit: {html}"
@@ -15684,7 +15737,7 @@ mod tests {
         // the landing was a real visit: the note just left is now the
         // log's newest entry, so the picker can bounce
         let (_input, picker_keys, _) =
-            open_back_picker(&mut dom, keys[LOGS_KEYS]);
+            open_switcher(&mut dom, keys[LOGS_KEYS]);
         assert_eq!(picker_ids(&dom), ["2026-07-21"]);
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         assert!(
@@ -15695,7 +15748,8 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_lists_distinct_visits_newest_first_and_skips_the_current() {
+    fn the_switcher_lists_distinct_visits_newest_first_and_skips_the_current()
+    {
         let vault = temp_vault();
         let (mut dom, clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -15708,7 +15762,7 @@ mod tests {
         click(&mut dom, clicks[RAIL_DAY_22]);
 
         let (_input, picker_keys, _) =
-            open_back_picker(&mut dom, keys[LOGS_KEYS]);
+            open_switcher(&mut dom, keys[LOGS_KEYS]);
         assert_eq!(picker_ids(&dom), ["2026-07-21", "2026-07-23"]);
 
         // the arrows move the highlight; enter takes the second row
@@ -15722,15 +15776,14 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_query_filters_and_escape_closes() {
+    fn the_switcher_query_leaves_the_log_for_the_whole_vault() {
         let vault = temp_vault();
         let (mut dom, clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[RAIL_DAY_21]);
         click(&mut dom, clicks[RAIL_DAY_22]);
 
-        let (input, picker_keys, _) =
-            open_back_picker(&mut dom, keys[LOGS_KEYS]);
+        let (input, picker_keys, _) = open_switcher(&mut dom, keys[LOGS_KEYS]);
         assert_eq!(picker_ids(&dom), ["2026-07-21", "2026-07-23"]);
 
         // the arrows clamp at both ends of the list
@@ -15738,8 +15791,10 @@ mod tests {
         press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
 
-        type_into(&mut dom, input, "23");
-        assert_eq!(picker_ids(&dom), ["2026-07-23"]);
+        // a query leaves the log behind and matches the whole index —
+        // 2026-07-22 is the day showing and stays out of its own list
+        type_into(&mut dom, input, "2026-07-2");
+        assert_eq!(picker_ids(&dom), ["2026-07-21", "2026-07-23"]);
 
         // an overlay is up: the summoning chords refuse to stack another
         press(&mut dom, picker_keys, ctrl_p(), Modifiers::CONTROL);
@@ -15760,9 +15815,45 @@ mod tests {
 
         press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("recent notes"), "escape closed it: {html}");
+        assert!(!html.contains(">open note<"), "escape closed it: {html}");
         assert!(
             html.contains("cal-day has-note selected\">22"),
+            "the selection never moved: {html}"
+        );
+    }
+
+    /// The flush discipline: the buffer being left reaches disk before
+    /// the note is replaced, and a refusal leaves the switcher up over
+    /// the list it was showing rather than closed over a note that never
+    /// moved (adr/2026-09-ctrl-o-is-the-one-note-switcher.md). Both
+    /// branches refuse the same way — `show_sheet`'s flush and
+    /// `select`'s.
+    #[test]
+    fn a_refused_flush_keeps_the_switcher_open() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // the logs hold today's note and its directory refuses every
+        // write, so the flush the landing runs cannot land
+        lock_dir(&vault.path().join("time"), true);
+
+        // the sheet branch: alpha has a card, so the landing is
+        // `show_sheet`'s, and its flush guard returns before the sheet
+        let (input, picker_keys, _) = open_switcher(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "alpha");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">open note<"), "the switcher stands: {html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
+
+        // the time branch: the same refusal one seam over, in `select`
+        type_into(&mut dom, input, "2026-07-21");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        lock_dir(&vault.path().join("time"), false);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">open note<"), "the switcher stands: {html}");
+        assert!(
+            html.contains("cal-day has-note selected\">23"),
             "the selection never moved: {html}"
         );
     }
@@ -15780,7 +15871,7 @@ mod tests {
         open_sheet_on(&mut dom, pane, cards[0]);
         assert!(dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
 
-        let (_input, _picker_keys, rows) = open_back_picker(&mut dom, keys);
+        let (_input, _picker_keys, rows) = open_switcher(&mut dom, keys);
         assert_eq!(picker_ids(&dom), ["2026-07-21", "2026-07-23"]);
 
         // a click on a row lands the same way enter does
@@ -15795,22 +15886,22 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_runs_recent_notes() {
+    fn the_palette_runs_open_note() {
         let vault = temp_vault();
         let (mut dom, clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         click(&mut dom, clicks[RAIL_DAY_21]);
 
         let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
-        type_into(&mut dom, input, "recent notes");
+        type_into(&mut dom, input, "open note");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("recent notes"), "the picker opened: {html}");
+        assert!(html.contains(">open note<"), "the switcher opened: {html}");
         assert_eq!(picker_ids(&dom), ["2026-07-23"]);
     }
 
     #[test]
-    fn a_sheet_visit_reopens_from_the_picker() {
+    fn a_sheet_visit_reopens_from_the_switcher() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -15828,7 +15919,7 @@ mod tests {
             "the sheet closed under the direct select"
         );
 
-        let (_input, picker_keys, _) = open_back_picker(&mut dom, keys);
+        let (_input, picker_keys, _) = open_switcher(&mut dom, keys);
         assert_eq!(picker_ids(&dom), ["alpha"]);
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
@@ -15866,7 +15957,7 @@ mod tests {
         // the remounted logs pane's own keydown is in the landing's
         // mutations — the pane registers before the sink
         let logs_keys = listeners(&landed, "keydown")[0];
-        let (_input, _picker_keys, _) = open_back_picker(&mut dom, logs_keys);
+        let (_input, _picker_keys, _) = open_switcher(&mut dom, logs_keys);
         assert_eq!(
             picker_ids(&dom),
             ["alpha"],
@@ -15897,84 +15988,69 @@ mod tests {
         );
     }
 
+    /// From the table the switcher opens the note rather than panning to
+    /// its card, and a time note lands on the logs the way a loop line
+    /// does — the destination the jump overlay had no way to reach
+    /// (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
     #[test]
-    fn ctrl_o_jump_pans_the_card_to_centre_at_the_current_zoom() {
+    fn the_switcher_opens_from_the_table_and_lands_by_category() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
 
-        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
-        assert!(dioxus_ssr::render(&dom).contains(">jump<"));
+        let (input, picker_keys, _) = open_switcher(&mut dom, keys);
+        assert!(dioxus_ssr::render(&dom).contains(">open note<"));
         type_into(&mut dom, input, "alpha");
-        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        assert_eq!(picker_ids(&dom), ["alpha"]);
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(">jump<"), "the overlay closed: {html}");
-        // alpha's slot (32, 32): pan = (640−120, 400−60)
+        assert!(!html.contains(">open note<"), "the switcher closed: {html}");
         assert!(
-            html.contains("translate(520px, 340px)"),
-            "centred at titles zoom: {html}"
+            html.contains(r#"class="sheet""#),
+            "the sheet opened: {html}"
         );
 
-        // the same jump at body zoom centres in canvas units
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
-        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
-        type_into(&mut dom, input, "alpha");
-        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        // and a time note from the same sheet lands on the logs, the loops
+        // list's own category rule
+        let (input, picker_keys, _) = open_switcher(&mut dom, keys);
+        type_into(&mut dom, input, "2026-07-21");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("scale(3)"), "no zoom change: {html}");
+        assert!(!html.contains(">open note<"), "{html}");
+        assert!(html.contains(r#"class="logs""#), "on the logs: {html}");
+        assert!(!html.contains(r#"class="sheet""#), "{html}");
         assert!(
-            html.contains("translate(93.333") && html.contains(", 73.333"),
-            "centre/s − card centre: {html}"
+            html.contains("cal-day has-note selected\">21"),
+            "the day is selected: {html}"
         );
     }
 
+    /// The switcher absorbs the keys every overlay absorbs, and refuses
+    /// to stack a second copy of itself. (A row's own click lands in
+    /// `a_logs_visit_clicked_from_a_sheet_lands_and_closes_it`.)
     #[test]
-    fn jump_offers_only_notes_with_cards() {
+    fn the_switcher_absorbs_stray_keys_and_never_stacks() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
 
-        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
-        assert_eq!(
-            picker_ids(&dom),
-            vec!["alpha", "capture-idea", "digest"],
-            "time notes have no card to jump to"
-        );
-        // a time id finds nothing, and enter over nothing goes nowhere
-        type_into(&mut dom, input, "2026");
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("no matching note"), "{html}");
-        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
-        assert!(dioxus_ssr::render(&dom).contains(">jump<"), "still open");
-        // arrows and stray keys are absorbed like every overlay's
-        press(&mut dom, jump_keys, Key::ArrowDown, Modifiers::empty());
-        press(&mut dom, jump_keys, Key::ArrowUp, Modifiers::empty());
+        let (_input, picker_keys, _) = open_switcher(&mut dom, keys);
+        press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
         press(
             &mut dom,
-            jump_keys,
+            picker_keys,
             Key::Character("x".into()),
             Modifiers::empty(),
         );
         press(&mut dom, keys, ctrl_o(), Modifiers::CONTROL);
-        press(&mut dom, jump_keys, ctrl_o(), Modifiers::CONTROL);
-        assert!(dioxus_ssr::render(&dom).contains(">jump<"));
-    }
+        press(&mut dom, picker_keys, ctrl_o(), Modifiers::CONTROL);
+        assert!(dioxus_ssr::render(&dom).contains(">open note<"));
 
-    #[test]
-    fn clicking_a_jump_row_jumps_too() {
-        let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
-        let mutations =
-            press_for_mutations(&mut dom, keys, ctrl_o(), Modifiers::CONTROL);
-        let rows = listeners(&mutations, "click");
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
-        // alpha is the first row
-        click(&mut dom, rows[0]);
-        assert!(dioxus_ssr::render(&dom).contains("translate(520px, 340px)"));
+        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">open note<"));
     }
 
     #[test]
@@ -15995,9 +16071,9 @@ mod tests {
         let (_, filter_keys) = open_overlay(&mut dom, table_keys, ctrl_f());
         press(&mut dom, filter_keys, Key::Escape, Modifiers::empty());
         assert!(!dioxus_ssr::render(&dom).contains(">filter<"));
-        let (_, jump_keys) = open_overlay(&mut dom, table_keys, ctrl_o());
-        press(&mut dom, jump_keys, Key::Escape, Modifiers::empty());
-        assert!(!dioxus_ssr::render(&dom).contains(">jump<"));
+        let (_, switcher_keys) = open_overlay(&mut dom, table_keys, ctrl_o());
+        press(&mut dom, switcher_keys, Key::Escape, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains(">open note<"));
     }
 
     #[test]
@@ -16017,25 +16093,35 @@ mod tests {
         press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
         assert!(!dioxus_ssr::render(&dom).contains(">filter<"));
 
-        // the database gone entirely: both finders decline to open
+        // the database gone entirely: the filter declines to open at all
         replace_database_with_a_directory(vault.path());
         press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
+        assert!(!dioxus_ssr::render(&dom).contains(">filter<"));
+
+        // the switcher still opens — its recent half is app state and
+        // needs no read — and only its typed half is empty; the notice
+        // itself is asserted where a notice line is drawn, in
+        // `the_switcher_resolves_a_standing_index_notice`
+        // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md)
         press(&mut dom, keys, ctrl_o(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(">filter<"), "{html}");
-        assert!(!html.contains(">jump<"), "{html}");
+        assert!(html.contains(">open note<"), "{html}");
+        assert_eq!(picker_ids(&dom), Vec::<String>::new());
     }
 
+    /// The rows are frozen at open, so one can name a note the vault has
+    /// since lost: the landing reports through the sheet's own lookup
+    /// rather than going silent, and the switcher closes over it.
     #[test]
-    fn a_jump_whose_card_left_meanwhile_pans_nowhere() {
+    fn a_row_whose_note_left_meanwhile_reports_and_closes() {
         let vault = temp_vault();
         let (mut dom, clicks, sender) =
             watched_app(Some(vault.path().to_path_buf()));
         let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
-        let (input, jump_keys) = open_overlay(&mut dom, keys, ctrl_o());
+        let (input, picker_keys, _) = open_switcher(&mut dom, keys);
         type_into(&mut dom, input, "alpha");
 
-        // the card leaves while the overlay holds its frozen entries
+        // the note leaves while the overlay holds its frozen entries
         std::fs::remove_file(vault.path().join("permanent/alpha.typ"))
             .expect("the note is deleted");
         feed_batch(
@@ -16045,12 +16131,12 @@ mod tests {
                 "permanent/alpha.typ",
             ))],
         );
-        press(&mut dom, jump_keys, Key::Enter, Modifiers::empty());
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(">jump<"), "the overlay still closed: {html}");
+        assert!(!html.contains(">open note<"), "the switcher closed: {html}");
         assert!(
-            html.contains("translate(0px, 0px)"),
-            "nowhere to pan to: {html}"
+            html.contains("notice-warning"),
+            "the failed lookup reports: {html}"
         );
     }
 
@@ -16069,9 +16155,9 @@ mod tests {
         press(&mut dom, filter_keys, Key::Escape, Modifiers::empty());
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
 
-        // and the jump the same way
-        let (_, jump_keys) = open_overlay(&mut dom, block_keys, ctrl_o());
-        press(&mut dom, jump_keys, Key::Escape, Modifiers::empty());
+        // and the switcher the same way
+        let (_, switcher_keys) = open_overlay(&mut dom, block_keys, ctrl_o());
+        press(&mut dom, switcher_keys, Key::Escape, Modifiers::empty());
         assert!(dioxus_ssr::render(&dom).contains("block-active"));
         press(
             &mut dom,
@@ -16100,13 +16186,14 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(">filter<"), "the overlay opened: {html}");
 
-        // the screen round trip clears it; then the jump runs the same way
+        // the screen round trip clears it; then the switcher runs the
+        // same way, from the table as from the logs
         click(&mut dom, clicks[CHROME_LOGS]);
         let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
         let (input, palette_keys) = open_palette(&mut dom, keys);
-        type_into(&mut dom, input, "jump");
+        type_into(&mut dom, input, "open note");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        assert!(dioxus_ssr::render(&dom).contains(">jump<"));
+        assert!(dioxus_ssr::render(&dom).contains(">open note<"));
     }
 
     // -- semantic zoom: titles ⇄ bodies ---------------------------------------
@@ -18613,10 +18700,6 @@ mod tests {
         )
     }
 
-    /// Opens the Ctrl+B recent-notes picker and returns its input's
-    /// (input, keydown) targets plus its rows' click targets in list order
-    /// — `open_palette`'s shape over the visit log
-    /// (adr/2026-08-ctrl-b-recent-notes-picker.md).
     /// Opens the finder with Ctrl+Shift+F from `keys` and returns its
     /// (input, keydown) targets; the rows come with the hits, after typing.
     fn open_finder(
@@ -18814,16 +18897,16 @@ mod tests {
         assert!(dioxus_ssr::render(&dom).contains(">search text<"));
     }
 
-    fn open_back_picker(
+    /// Opens the Ctrl+O note switcher and returns its input's (input,
+    /// keydown) targets plus its rows' click targets in list order —
+    /// `open_palette`'s shape over the one switcher
+    /// (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
+    fn open_switcher(
         dom: &mut VirtualDom,
         keys: ElementId,
     ) -> (ElementId, ElementId, Vec<ElementId>) {
-        let mutations = press_for_mutations(
-            dom,
-            keys,
-            Key::Character("b".into()),
-            Modifiers::CONTROL,
-        );
+        let mutations =
+            press_for_mutations(dom, keys, ctrl_o(), Modifiers::CONTROL);
         let inputs = listeners(&mutations, "input");
         let keydowns = listeners(&mutations, "keydown");
         let rows = listeners(&mutations, "click");

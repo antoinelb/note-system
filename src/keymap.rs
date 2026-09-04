@@ -39,7 +39,7 @@ pub enum Action {
 /// The one translation: `Some` means the widget owns the key (prevent the
 /// default, stop the bubble, apply); `None` means the key is not the
 /// widget's and bubbles exactly as the textarea let it — Escape to the
-/// pane, every app chord (Ctrl+P/L/N/T/Q/1/2, Ctrl+Enter, Ctrl+Shift+V) to
+/// pane, every app chord (Ctrl+P/L/N/O/T/Q/1/2, Ctrl+Enter, Ctrl+Shift+V) to
 /// its handler.
 /// The two temporal panes a chord can fold
 /// (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md).
