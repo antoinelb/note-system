@@ -20,6 +20,11 @@ pulled the rendered text away from the source line above or below it.
   caps the reading measure at 529px (the compiled page's own width) and
   centres it, and `.centre` itself gains `overflow-x: auto` so a window
   narrower than that scrolls sideways instead of shrinking the type.
+  (Amended twice: the column went fluid below its cap in
+  `adr/2026-08-css-draws-the-markup.md`, so a narrow window shrinks the
+  column rather than scrolling; and the logs' cap is 720px since
+  `adr/2026-09-the-logs-column-is-720px.md`. The clause this ADR is about
+  — the *type* never shrinks to fit — stands in both.)
 - **One token, read twice.** `--prose-size: 18px` and `--prose-leading:
   1.5` live on `:root` in `assets/theme.css`; `.block-active`, `.block-
   pending .pending-source`, `.block-selected .selected-source`, and the
