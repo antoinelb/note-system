@@ -11,8 +11,11 @@
 // matching palette column; vanilla typst (make check-vault, exports) gets
 // the paper look (adr/2026-07-note-rendering-theme-input.md). Colour
 // literals live here because templates cannot consume the app's CSS
-// variables (adr/2026-07-theme-attribute-on-app-root.md); the dark column
-// mirrors assets/theme.css.
+// variables (adr/2026-07-theme-attribute-on-app-root.md); the light and
+// dark columns mirror assets/theme.css, so they follow the user's Obsidian
+// vault too (adr/2026-09-theme-colours-follow-the-obsidian-vault.md) —
+// `hairline` is that file's --hairline-strong. The paper column is print,
+// not a screen the vault theme reaches, and keeps its own ink.
 // The in-app columns keep bare margins because the app renders per-block
 // fragments that stack in a pane with its own padding — the source
 // textarea and the rendered text share a left edge; paper keeps real page
@@ -30,20 +33,20 @@
   light: (
     page: none,
     margin: 6pt,
-    ink: rgb("#45415a"),
-    muted: rgb("#8b87a0"),
-    hairline: rgb("#d0cdda"),
-    link: rgb("#6b5fa8"),
-    done: rgb("#4a8a6a"),
+    ink: rgb("#1b1c22"),
+    muted: rgb("#545664"),
+    hairline: rgb("#dbddec"),
+    link: rgb("#5569ec"),
+    done: rgb("#4c9452"),
   ),
   dark: (
     page: none,
     margin: 6pt,
-    ink: rgb("#c9c4dd"),
-    muted: rgb("#6f6a8c"),
-    hairline: rgb("#332c52"),
-    link: rgb("#8f84c9"),
-    done: rgb("#6fb08c"),
+    ink: rgb("#e0def4"),
+    muted: rgb("#908caa"),
+    hairline: rgb("#524c67"),
+    link: rgb("#c4a7e7"),
+    done: rgb("#87d37c"),
   ),
 ).at(sys.inputs.at("theme", default: "paper"))
 

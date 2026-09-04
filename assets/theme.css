@@ -17,24 +17,38 @@
   --prose-leading: 1.5;
 }
 
+/* The ground, the ink, the borders and the accent are the user's own
+   Obsidian vault resolved to literals — the Border theme's `.theme-dark`
+   plus the Style Settings overrides the vault stores, which is Rosé Pine
+   Moon (adr/2026-09-theme-colours-follow-the-obsidian-vault.md). `--bg` is
+   Obsidian's --background-primary, the surface the user actually writes
+   on; the raised surfaces take --background-secondary, so a card and the
+   sheet sit *under* the ground the way the light theme has always done.
+   The eight --type-* hues, the --ember and the --dim-opacity are the
+   shipped design's own and stay (adr/2026-08-shipped-ui-is-the-spec.md). */
 .app {
-  --bg: #0d0b18;
-  --border: #2a2545;
-  --ink: #c9c4dd;
-  --ink-bright: #e4e0f2;
-  --ink-muted: #6f6a8c;
-  --ink-faint: #4a4566;
-  --ink-faintest: #332c52;
-  --hairline: #1b1730;
-  --hairline-strong: #332c52;
+  --bg: #2a273f;
+  --border: #4c4660;
+  --ink: #e0def4;
+  /* Obsidian's ink scale tops out at --text-normal, so bright and plain
+     ink are one value here as they already are in the light theme below:
+     every selected state carries weight as well as hue
+     (AIR INP-3), and the vault turns the active-line highlight off. */
+  --ink-bright: #e0def4;
+  --ink-muted: #908caa;
+  --ink-faint: #6e6a86;
+  --ink-faintest: #555555;
+  --hairline: #45405a;
+  --hairline-strong: #524c67;
+  /* the one warm element: no Obsidian role answers to it, so it stays */
   --ember: #d9b06a;
   /* the table: card fills, the eight
      type hues — six drawn in the wireframes, organisation and personal
      derived from turn 1's reference hues by the same mute
      (adr/2026-08-light-table-colours-derived.md) */
-  --card-fill: #151226;
-  --card-capture-fill: rgba(16, 14, 30, 0.8);
-  --card-generated-edge: #443d6b;
+  --card-fill: #232136;
+  --card-capture-fill: rgba(42, 39, 63, 0.8);
+  --card-generated-edge: #6e6a86;
   --type-person: #a0765f;
   --type-organisation: #9f8960;
   --type-source: #83875e;
@@ -43,61 +57,68 @@
   --type-idea: #6a76a8;
   --type-personal: #896ea6;
   --type-project: #9a7d95;
-  --bar-untyped: #4a4566;
-  --bar-generated: #6f6a8c;
-  --star-bright: #3d3660;
-  --star-dim: #332c52;
+  --bar-untyped: #6e6a86;
+  --bar-generated: #908caa;
+  --star-bright: #544a5c;
+  --star-dim: #45405a;
   /* real link edges, solid; the node dots where an edge
      meets a card are the --selection role below */
-  --edge: #332c52;
+  --edge: #544a5c;
   /* the writing sheet: fill, glow,
      the selection border the raised card and the tether share — one
      wireframe role ("edge node dots / selection border"), one variable */
-  --sheet-fill: #171331;
-  --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.18);
-  --selection: #5c538a;
+  --sheet-fill: #232136;
+  --sheet-glow: 0 0 100px rgba(196, 167, 231, 0.18);
+  --selection: #c4a7e7;
   /* the drawn text selection in the active block: the selection role's
      hue, translucent so the source stays readable under it
      (adr/2026-08-caret-on-editor-note-bytes.md) */
-  --select-fill: rgba(92, 83, 138, 0.35);
+  --select-fill: rgba(196, 167, 231, 0.25);
   /* markup roles rendered as CSS spans (src/markup.rs's Role/BlockRole,
      read through `class`/`block_class` — those class names are the
      contract, this file only supplies the colours): --markup-link,
      --markup-checkbox-done and --markup-quote-rule are pinned to
      templates/template.typ's palette.link/done/muted for this theme, so a
      CSS-drawn block and its compiled-SVG neighbour do not look like two
-     different documents; the rest alias this file's own ink scale, which
-     already carries the "hue kept, value inverted" light derivation. */
+     different documents; the rest alias this file's own ink scale. The
+     heading stays on the ink scale because the vault gives every heading
+     level a hue of its own and one token cannot carry six
+     (adr/2026-09-theme-colours-follow-the-obsidian-vault.md). */
   --markup-heading: var(--ink-bright);
   --markup-marker: var(--ink-muted);
   --markup-delim: var(--ink-faint);
-  --markup-link: #8f84c9;
+  --markup-link: #c4a7e7;
   --markup-meta: var(--ink-muted);
   --markup-raw: var(--ink);
-  --markup-checkbox: var(--ink-muted);
-  --markup-checkbox-done: #6fb08c;
+  --markup-checkbox: var(--ink-faint);
+  --markup-checkbox-done: #87d37c;
   --markup-quote-rule: var(--ink-muted);
   /* multiplies var(--bg), which already swaps per theme */
   --dim-opacity: 0.4;
 }
 
+/* the light siblings, taken the same way from the same vault: the Border
+   theme's `.theme-light`, which Style Settings leaves alone, so its accent
+   is the theme's own hsl(232, 80%, 64%) rather than the dark side's
+   Rosé Pine iris (adr/2026-09-theme-colours-follow-the-obsidian-vault.md) */
 .app[data-theme="light"] {
-  --bg: #f5f4f9;
-  --border: #dbd8e6;
-  --ink: #45415a;
-  --ink-bright: #45415a;
-  --ink-muted: #8b87a0;
-  --ink-faint: #a5a1b8;
-  --ink-faintest: #d5d2e0;
-  --hairline: #e5e2ee;
-  --hairline-strong: #d0cdda;
+  --bg: #ffffff;
+  --border: #e1e3f0;
+  --ink: #1b1c22;
+  --ink-bright: #1b1c22;
+  --ink-muted: #545664;
+  --ink-faint: #9e9fa9;
+  --ink-faintest: #bdbdbd;
+  --hairline: #e7e8f3;
+  --hairline-strong: #dbddec;
   --ember: #b08a4a;
-  /* the light siblings the deck left undrawn, derived one rule for all:
-     hue kept, value inverted against the light ground; bars gain chroma
-     because 3px needs it on light (adr/2026-08-light-table-colours-derived.md) */
-  --card-fill: #eae9f2;
-  --card-capture-fill: rgba(241, 239, 247, 0.8);
-  --card-generated-edge: #aaa4cb;
+  /* the fills follow the vault; the eight type hues below are still the
+     deck's own light siblings, derived one rule for all: hue kept, value
+     inverted against the light ground, bars gaining chroma because 3px
+     needs it on light (adr/2026-08-light-table-colours-derived.md) */
+  --card-fill: #f9f9fa;
+  --card-capture-fill: rgba(255, 255, 255, 0.8);
+  --card-generated-edge: #9e9fa9;
   --type-person: #a36b4d;
   --type-organisation: #a3854d;
   --type-source: #8e9550;
@@ -106,32 +127,34 @@
   --type-idea: #4d5ea3;
   --type-personal: #76549c;
   --type-project: #97598c;
-  --bar-untyped: #a5a1b8;
-  --bar-generated: #8b87a0;
-  --star-bright: #c8c4de;
-  --star-dim: #d4d1e6;
-  /* the light sibling the deck left undrawn: same constellation lines "in
-     silverpoint" (turn 4c) — hue kept, value inverted */
-  --edge: #cdc9e0;
-  /* the sheet's light siblings, same derivation: hue kept, value inverted
-     against the light ground; the glow deepens a touch because a pale
-     shadow vanishes on a pale ground */
-  --sheet-fill: #edebf5;
-  --sheet-glow: 0 0 100px rgba(92, 83, 138, 0.25);
-  --selection: #6f64ab;
-  --select-fill: rgba(111, 100, 171, 0.25);
+  --bar-untyped: #9e9fa9;
+  --bar-generated: #545664;
+  --star-bright: #d4d4d4;
+  --star-dim: #e0e0e0;
+  /* the constellation lines "in silverpoint" (turn 4c), now the vault's
+     own neutral ramp at the step that holds the old contrast */
+  --edge: #d4d4d4;
+  /* the sheet: the vault's raised surface, and a glow that keeps its own
+     alpha — a pale shadow vanishes on a pale ground */
+  --sheet-fill: #f9f9fa;
+  --sheet-glow: 0 0 100px rgba(90, 109, 237, 0.25);
+  --selection: #5a6ded;
+  --select-fill: rgba(90, 109, 237, 0.25);
   /* the light siblings of the markup-role group above, same derivation:
      --markup-link and --markup-checkbox-done pinned to
      templates/template.typ's light palette.link/done, the rest aliasing
-     this theme's own ink scale */
+     this theme's own ink scale. Both are the vault's own hue dropped far
+     enough down the lightness axis to clear AIR INP-2 on a white ground —
+     the accent at 64% reads 4.33:1 and the green at 60% reads 2.30:1,
+     which a link and a done box cannot ship at. */
   --markup-heading: var(--ink-bright);
   --markup-marker: var(--ink-muted);
   --markup-delim: var(--ink-faint);
-  --markup-link: #6b5fa8;
+  --markup-link: #5569ec;
   --markup-meta: var(--ink-muted);
   --markup-raw: var(--ink);
-  --markup-checkbox: var(--ink-muted);
-  --markup-checkbox-done: #4a8a6a;
+  --markup-checkbox: var(--ink-faint);
+  --markup-checkbox-done: #4c9452;
   --markup-quote-rule: var(--ink-muted);
   --dim-opacity: 0.4;
 }
