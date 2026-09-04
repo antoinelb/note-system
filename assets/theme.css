@@ -298,25 +298,24 @@ body {
   padding: 24px 32px;
 }
 
-/* the reading column: the compiled page's own width (14cm ≈ 529px,
-   template.typ § note()) as a cap, fluid below it, centred in whatever room
-   the host gives — the logs' `.centre` and the sheet's content box share
-   this exact rule so a note wraps at the same measure on both screens
-   wherever the window can afford the full 529px, and below that the column
-   shrinks with its host instead of scrolling sideways. The two hosts carry
-   different chrome — the logs spend 209px on the rail and 281px on the
-   jump, the sheet 440px of left offset — so once a window is too narrow to
-   give both of them 529px the two measures part company: measured in
-   headless Chromium, 529/529 at a 1920px viewport but 406 (logs) against
-   432 (sheet) at 960px. Equalising them below that point would mean capping
-   both to whichever host is narrower, which is a magic number that also
-   wastes ~100px on the sheet at full width; being fully visible wins over
-   being identical when the window is cramped. Going fluid is what CSS
-   rendering makes free:
-   rewrapping prose costs nothing once no SVG has to agree with it, and this
-   does not reopen adr/2026-08-one-font-size-for-source-and-render.md — that
-   ADR rejected shrinking the *type* to fit a narrow pane, not the column. */
-.centre-column,
+/* the reading column: a cap, fluid below it, centred in whatever room the
+   host gives it — below the cap the column shrinks with its host rather
+   than scrolling sideways, which is what CSS rendering makes free
+   (rewrapping prose costs nothing once no SVG has to agree with it). The
+   two hosts no longer share one cap: the logs read at 720px
+   (adr/2026-09-the-logs-column-is-720px.md), the sheet still at the
+   compiled page's own width (14cm ≈ 529px, template.typ § note()). Around
+   the logs' column sit 177px of rail (176 + its hairline), 281px of jump
+   (248 + 32 of padding + its hairline) and `.centre`'s own 64px of
+   padding, so 1242px is the window width below which the logs column
+   starts giving room back. None of this reopens
+   adr/2026-08-one-font-size-for-source-and-render.md — that ADR rejected
+   shrinking the *type* to fit a narrow pane, not the column. */
+.centre-column {
+  width: min(720px, 100%);
+  margin: 0 auto;
+}
+
 .sheet-column {
   width: min(529px, 100%);
   margin: 0 auto;

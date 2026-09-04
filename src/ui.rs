@@ -19445,10 +19445,11 @@ mod tests {
     }
 
     /// The two editor hosts share one `blocks_view` closure over the one
-    /// editor signal (adr/2026-08-sheet-reuses-the-one-editor.md) and are
-    /// reconciled onto one fluid reading-column width rule in
-    /// `assets/theme.css` (`.centre-column, .sheet-column { width:
-    /// min(529px, 100%); … }`) — this opens the identical note body
+    /// editor signal (adr/2026-08-sheet-reuses-the-one-editor.md) and each
+    /// wraps it in its own fluid reading column in `assets/theme.css` —
+    /// `.centre-column` capped at 720px
+    /// (adr/2026-09-the-logs-column-is-720px.md), `.sheet-column` at the
+    /// compiled page's 529px — this opens the identical note body
     /// through both (`twin_vault`, the only way to reach the same content
     /// from both hosts, since the logs pane is date-scoped and the table
     /// only cards non-time notes) and checks the architecture actually

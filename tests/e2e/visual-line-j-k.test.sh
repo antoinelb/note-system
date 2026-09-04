@@ -3,7 +3,7 @@
 # (adr/2026-08-visual-line-j-k-through-a-geometry-seam.md): the one
 # behaviour in the app that lives in `launch::LINE_WALK`, a script only a
 # real webview runs. A single physical line long enough to wrap at the
-# logs column (min(529px, 100%)) is typed into the day note; j from its
+# logs column (min(720px, 100%)) is typed into the day note; j from its
 # start must land inside that same line, one drawn row down, and k from
 # there back up onto the first row — a physical-line j at the note's last
 # line is a no-op and would leave both markers at the line's start.
