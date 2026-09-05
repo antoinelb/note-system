@@ -99,6 +99,24 @@ pub fn model(source: &str) -> Draw {
     Draw::Css(Markup { block, spans })
 }
 
+/// The degenerate model: one `Text` span over the whole block, no
+/// structural role. It is what a block draws with when the source itself is
+/// the rendering — a template's `#let`/`#import`/`#show`/`#meta` lines,
+/// which are code and compile to a blank page
+/// (`adr/2026-09-a-template-draws-as-source.md`). It lives here beside
+/// `model` because the invariant it has to keep is this module's: every
+/// byte of the block in exactly one span, ascending, no gaps.
+pub fn plain(source: &str) -> Markup {
+    Markup {
+        block: BlockRole::Plain,
+        spans: vec![Span {
+            range: 0..source.len(),
+            role: Role::Text,
+            delimiter: false,
+        }],
+    }
+}
+
 /// The verdict walk: every node's kind must be on the allow-list below, and
 /// every `FuncCall` node's callee must be one of the three calls the app
 /// owns — checked on every node the tree holds, not just the top-level

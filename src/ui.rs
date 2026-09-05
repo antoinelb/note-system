@@ -5671,6 +5671,14 @@ fn block_panes(
     linewise: bool,
 ) -> Option<Vec<Pane>> {
     let (file, text) = editor.note()?;
+    // a template is code, and code compiles to a blank page: the compiled
+    // fallback would draw nothing while every autosave of it cleared the
+    // fragment caches (a `VaultChange::Template`), dropping every one of
+    // those widgets to dimmed source and back once per quiet window — the
+    // flash. A template's non-markup block draws its own source instead, so
+    // there is nothing left on screen for that clear to disturb
+    // (adr/2026-09-a-template-draws-as-source.md)
+    let template = open_template(editor, root).is_some();
     let blocks = editor.blocks();
     // `blocks::segment` never returns an empty vec, and every mutator
     // (`activate`, `restore`, `resize`) keeps `active` in bounds for it —
@@ -5727,19 +5735,23 @@ fn block_panes(
             panes.push(selected_pane(text, block, &sel));
             continue;
         }
-        panes.push(
-            match markup::model(text.get(block.content()).unwrap_or("")) {
-                markup::Draw::Css(markup) => Pane::Css {
-                    start: block.range.start,
-                    block: markup.block,
-                    spans: markup.spans,
-                    text: text.get(block.content()).unwrap_or("").to_string(),
-                },
-                markup::Draw::Typst => block_pane(
-                    text, block, index, file, root, theme, cache, queued,
-                ),
+        let content = text.get(block.content()).unwrap_or("");
+        let drawn = match markup::model(content) {
+            markup::Draw::Css(markup) => Some(markup),
+            markup::Draw::Typst if template => Some(markup::plain(content)),
+            markup::Draw::Typst => None,
+        };
+        panes.push(match drawn {
+            Some(markup) => Pane::Css {
+                start: block.range.start,
+                block: markup.block,
+                spans: markup.spans,
+                text: content.to_string(),
             },
-        );
+            None => block_pane(
+                text, block, index, file, root, theme, cache, queued,
+            ),
+        });
     }
     Some(panes)
 }
@@ -9626,6 +9638,96 @@ mod tests {
         );
     }
 
+    /// The same blocks, in a note and in a template. A note's preamble is
+    /// code the markup model does not own, so it draws through the
+    /// compiled fallback and takes a cache entry; the identical preamble
+    /// inside `templates/` draws its own source and takes none — which is
+    /// what leaves a template's autosave (a `VaultChange::Template`, which
+    /// clears both caches) nothing on screen to blank
+    /// (adr/2026-09-a-template-draws-as-source.md).
+    #[test]
+    fn a_templates_code_blocks_draw_as_source_and_compile_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let text = "#import \"/templates/template.typ\": *\n\
+                    #show: note\n\
+                    #meta(id: \"{{id}}\", type: \"daily\")\n\
+                    \n= {{id}}\n\
+                    \n== Notes\n";
+        for category in ["permanent", "templates"] {
+            std::fs::create_dir_all(dir.path().join(category))
+                .expect("the directory is created");
+        }
+        std::fs::write(dir.path().join("permanent/daily.typ"), text)
+            .expect("the fixture note is writable");
+        std::fs::write(dir.path().join("templates/daily.typ"), text)
+            .expect("the fixture template is writable");
+
+        let mut note_cache = FragmentCache::default();
+        let note_panes = block_panes(
+            &Editor::open(dir.path().join("permanent/daily.typ")),
+            dir.path(),
+            RenderTheme::Paper(DEFAULT_SIZE),
+            &mut note_cache,
+            true,
+            false,
+        )
+        .expect("an open note always answers panes");
+        assert!(
+            note_panes
+                .iter()
+                .any(|pane| matches!(pane, Pane::Pending { .. })),
+            "outside templates/ the preamble is a compiled fallback block"
+        );
+        assert_ne!(
+            format!("{note_cache:?}"),
+            format!("{:?}", FragmentCache::default()),
+            "and it took a fragment cache entry"
+        );
+
+        let mut template_cache = FragmentCache::default();
+        let template_panes = block_panes(
+            &Editor::open(dir.path().join("templates/daily.typ")),
+            dir.path(),
+            RenderTheme::Paper(DEFAULT_SIZE),
+            &mut template_cache,
+            true,
+            false,
+        )
+        .expect("an open template always answers panes");
+        let Some(Pane::Css {
+            block,
+            spans,
+            text: drawn,
+            ..
+        }) = template_panes.first()
+        else {
+            panic!("the template's preamble draws as source");
+        };
+        assert_eq!(*block, markup::BlockRole::Plain);
+        assert!(drawn.starts_with("#import"), "{drawn}");
+        assert_eq!(
+            spans,
+            &markup::plain(drawn).spans,
+            "one text span tiles the whole block"
+        );
+        // the markup blocks a template also holds keep their own roles
+        assert!(
+            template_panes.iter().any(|pane| matches!(
+                pane,
+                Pane::Css {
+                    block: markup::BlockRole::Heading(1),
+                    ..
+                }
+            )),
+            "`= {{{{id}}}}` is still a heading"
+        );
+        assert_eq!(
+            format!("{template_cache:?}"),
+            format!("{:?}", FragmentCache::default()),
+            "nothing in a template ever reaches the compiled fallback"
+        );
+    }
+
     #[test]
     fn typing_updates_the_buffer_and_escape_writes_it() {
         let vault = temp_vault();
@@ -13061,12 +13163,12 @@ mod tests {
         // the template's own source stands in the pane, placeholders and
         // all — the note's own trailing empty line opens active
         // (adr/2026-08-cursor-always-in-the-note.md); every block wakes on
-        // its own click now (adr/2026-08-css-draws-the-markup.md) — the
-        // preamble's own key survives from the note that was showing
-        // before, so it needs no fresh listener here, leaving the blank
-        // line above the heading as the first click and the heading the
-        // second
-        activate_block(&mut dom, listeners(&opened, "click")[1]);
+        // its own click now (adr/2026-08-css-draws-the-markup.md), and a
+        // template's preamble is a CSS pane where the note's was a
+        // compiled one (adr/2026-09-a-template-draws-as-source.md), so it
+        // mounts a fresh listener of its own: preamble, blank line,
+        // heading
+        activate_block(&mut dom, listeners(&opened, "click")[2]);
         assert!(source_of(&dom).contains("{{title}}"), "{}", source_of(&dom));
 
         // escape hands the pane back to the selected note
@@ -13163,10 +13265,10 @@ mod tests {
         // the chosen template opens with its own trailing empty line
         // awake (adr/2026-08-cursor-always-in-the-note.md); every block
         // above it wakes on its own click now
-        // (adr/2026-08-css-draws-the-markup.md) — the preamble's own
-        // key survives from the note that was showing before, so the
-        // blank line above the heading is the first click, the heading
-        // itself the second
+        // (adr/2026-08-css-draws-the-markup.md), and a template's
+        // preamble draws as a CSS pane where the note's was a compiled
+        // one (adr/2026-09-a-template-draws-as-source.md), so it mounts
+        // its own listener: preamble, blank line, heading
         let woken = press_for_mutations(
             &mut dom,
             picker_keys,
@@ -13174,7 +13276,7 @@ mod tests {
             Modifiers::empty(),
         );
         let (_, sink) =
-            activate_block(&mut dom, listeners(&woken, "click")[1]);
+            activate_block(&mut dom, listeners(&woken, "click")[2]);
         retype(&mut dom, sink, "= le modèle refait");
         block_on(settle(&mut dom));
         let text =
@@ -13767,6 +13869,49 @@ mod tests {
         held.work(&mut dom);
         let again = dioxus_ssr::render(&dom);
         assert!(!again.contains("pending-source"), "{again}");
+    }
+
+    /// The same touch with a template in the editor rather than a note. A
+    /// template's own autosave fires exactly this change, and the clear it
+    /// causes used to blank every compiled block in it — the flash the user
+    /// saw while typing in a template. Nothing in a template is compiled
+    /// now, so the clear has nothing on screen to take
+    /// (adr/2026-09-a-template-draws-as-source.md).
+    #[test]
+    fn a_template_touch_blanks_nothing_while_a_template_is_open() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, held, sender) =
+            scripted_app_with_keys(Some(vault.path().to_path_buf()));
+        held.work(&mut dom);
+
+        let (input, picker_keys) =
+            open_template_picker(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "daily");
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        held.work(&mut dom);
+
+        let open = dioxus_ssr::render(&dom);
+        assert!(
+            open.contains(r#"<span class="crumb">templates</span>"#),
+            "{open}"
+        );
+        assert!(
+            open.contains("#import"),
+            "the preamble draws its own source: {open}"
+        );
+        assert!(
+            !open.contains("block-svg"),
+            "no block in a template is compiled: {open}"
+        );
+
+        // the autosave's own change, arriving through the watcher
+        feed_batch(&mut dom, &sender, vec![watch::VaultChange::Template]);
+        let touched = dioxus_ssr::render(&dom);
+        assert!(
+            !touched.contains("pending-source"),
+            "the clear blanks nothing: {touched}"
+        );
+        assert!(touched.contains("#import"), "{touched}");
     }
 
     #[test]

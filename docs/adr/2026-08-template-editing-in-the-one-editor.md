@@ -3,6 +3,11 @@
 > **Amended by `2026-09-edit-template-reaches-the-logs-from-the-table.md`.**
 > The command is no longer hidden on the table: the picker stands over that screen too, and a pick switches to the logs and opens the template there.
 > Everything else below still holds — the template still opens in the logs' centre pane, the sheet was still not generalized to hold paths.
+>
+> **Amended by `2026-09-a-template-draws-as-source.md`.**
+> The last Decision paragraph's "churny once per 500 ms quiet window, accepted as the price of correctness" is withdrawn.
+> The clear still fires on every autosave; a template's code blocks no longer draw through the compiler at all, so it invalidates nothing that is on screen.
+> The observation that "its non-import blocks render near-empty pages" is what that ADR acts on.
 
 ## Context
 
