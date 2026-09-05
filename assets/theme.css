@@ -775,11 +775,15 @@ body {
 }
 
 /* the invisible keyboard socket: WebKitGTK attaches its IME only to
-   editable elements (adr/2026-08-hidden-ime-sink.md) */
+   editable elements (adr/2026-08-hidden-ime-sink.md). Fixed, not placed
+   at the active block: it lives beside the blocks now, never remounting
+   with one, and `focus()` scrolls its target into view — fixed means the
+   caret's own mount is the only thing that ever scrolls the pane
+   (adr/2026-09-the-sink-outlives-the-active-block.md) */
 .ime-sink {
-  position: absolute;
-  left: 8px;
-  bottom: 0;
+  position: fixed;
+  left: 0;
+  top: 0;
   width: 1px;
   height: 1px;
   opacity: 0;

@@ -2391,6 +2391,106 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // the block panes, one closure both screens mount: the logs centre pane
     // and the writing sheet show the one editor through the one widget
     // (adr/2026-08-sheet-reuses-the-one-editor.md)
+    // the sink's reading of a keystroke, one callback so the panes can
+    // read a key the same way when it reaches them instead of the sink:
+    // typed while a block was awake but before the sink's focus grab had
+    // landed — a note just mounted, an overlay just closed — the key used
+    // to fall through the pane's own arms and be dropped, the grammar
+    // never hearing it (adr/2026-09-the-sink-outlives-the-active-block.md)
+    let sink_keys = use_callback({
+        let goal = goal.clone();
+        move |event: KeyboardEvent| {
+            // never touch a composing keystroke: the
+            // IME owns it, and an open preview means
+            // the IME owns it whatever isComposing
+            // says (the spike saw both)
+            let owned = *composing.peek();
+            if owned == Composing::Closing {
+                composing.set(Composing::No);
+            }
+            if event.data().is_composing()
+                || event.key() == Key::Dead
+                || owned != Composing::No
+            {
+                // stopped, or the pane would read what the sink declined
+                event.stop_propagation();
+                return;
+            }
+            // typed at an overlay that had not yet
+            // taken the focus: relayed into it, and
+            // stopped here so the pane does not
+            // relay it a second time
+            if relay.call((event.key(), event.modifiers())) {
+                event.stop_propagation();
+                return;
+            }
+            // the pane folds are the logs' and normal
+            // mode's: insert mode keeps every alt
+            // character typeable (AltGr), and the
+            // grammar would swallow the chord inert
+            // before the pane saw it
+            // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
+            if vim.peek().mode == vim::Mode::Normal
+                && *screen.peek() == Screen::Logs
+                && let Some(fold) =
+                    keymap::fold(&event.key(), event.modifiers())
+            {
+                event.prevent_default();
+                event.stop_propagation();
+                fold_pane.call(fold);
+                return;
+            }
+            // the grammar speaks first (editor.rs
+            // names this slot); Pass hands the key to
+            // the phase-0 keymap unchanged
+            let outcome = grammar.call((event.key(), event.modifiers()));
+            match outcome {
+                vim::Outcome::Acts(acts) => {
+                    event.prevent_default();
+                    // shift+Escape leaves the note and
+                    // keeps travelling: the table pane
+                    // closes the sheet behind it
+                    // (adr/2026-08-shift-escape-leaves-the-note.md)
+                    let leaving = event.key() == Key::Escape
+                        && event.modifiers().shift();
+                    if !leaving {
+                        event.stop_propagation();
+                    }
+                    apply_vim.call(acts);
+                }
+                // unbound normal-mode keys are inert:
+                // consumed, never inserted — but a key
+                // the grammar swallows is still another
+                // key, and the goal column lives only
+                // across a j/k run, so it forgets too.
+                // The one exception is a count still
+                // accumulating: vim's curswant survives
+                // one, so the 2 of 2j does not throw
+                // away the column the j before it set.
+                vim::Outcome::Swallow => {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    if !vim.peek().counting() {
+                        goal.set(goal.get().forgotten());
+                    }
+                }
+                vim::Outcome::Pass => {
+                    // not the grammar's: Escape and the
+                    // app chords bubble as they always did
+                    if let Some(action) =
+                        keymap::action(&event.key(), event.modifiers())
+                    {
+                        // ours: keep the default out of the
+                        // sink and the key off the pane
+                        event.prevent_default();
+                        event.stop_propagation();
+                        apply_action.call(action);
+                    }
+                }
+            }
+        }
+    });
+
     let blocks_view = {
         let root = root.clone();
         let feed = feed.clone();
@@ -2661,157 +2761,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     }
                                                 }
                                             }
-                                            // the invisible keyboard socket: WebKitGTK
-                                            // attaches its IME only to editable elements,
-                                            // so French dead keys compose here while the
-                                            // app owns everything drawn
-                                            // (adr/2026-08-hidden-ime-sink.md)
-                                            input {
-                                                class: "ime-sink",
-                                                onmounted: {
-                                                    let sink = sink.clone();
-                                                    move |event: Event<MountedData>| {
-                                                        sink.borrow_mut().replace(event.data());
-                                                        async move {
-                                                            let _ = event.set_focus(true).await;
-                                                        }
-                                                    }
-                                                },
-                                                onkeydown: {
-                                                    let goal = goal.clone();
-                                                    move |event: KeyboardEvent| {
-                                                    // never touch a composing keystroke: the
-                                                    // IME owns it, and an open preview means
-                                                    // the IME owns it whatever isComposing
-                                                    // says (the spike saw both)
-                                                    let owned = *composing.peek();
-                                                    if owned == Composing::Closing {
-                                                        composing.set(Composing::No);
-                                                    }
-                                                    if event.data().is_composing()
-                                                        || event.key() == Key::Dead
-                                                        || owned != Composing::No
-                                                    {
-                                                        return;
-                                                    }
-                                                    // typed at an overlay that had not yet
-                                                    // taken the focus: relayed into it, and
-                                                    // stopped here so the pane does not
-                                                    // relay it a second time
-                                                    if relay.call((event.key(), event.modifiers())) {
-                                                        event.stop_propagation();
-                                                        return;
-                                                    }
-                                                    // the pane folds are the logs' and normal
-                                                    // mode's: insert mode keeps every alt
-                                                    // character typeable (AltGr), and the
-                                                    // grammar would swallow the chord inert
-                                                    // before the pane saw it
-                                                    // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
-                                                    if vim.peek().mode == vim::Mode::Normal
-                                                        && *screen.peek() == Screen::Logs
-                                                        && let Some(fold) = keymap::fold(&event.key(), event.modifiers())
-                                                    {
-                                                        event.prevent_default();
-                                                        event.stop_propagation();
-                                                        fold_pane.call(fold);
-                                                        return;
-                                                    }
-                                                    // the grammar speaks first (editor.rs
-                                                    // names this slot); Pass hands the key to
-                                                    // the phase-0 keymap unchanged
-                                                    let outcome = grammar
-                                                        .call((event.key(), event.modifiers()));
-                                                    match outcome {
-                                                        vim::Outcome::Acts(acts) => {
-                                                            event.prevent_default();
-                                                            // shift+Escape leaves the note and
-                                                            // keeps travelling: the table pane
-                                                            // closes the sheet behind it
-                                                            // (adr/2026-08-shift-escape-leaves-the-note.md)
-                                                            let leaving = event.key() == Key::Escape
-                                                                && event.modifiers().shift();
-                                                            if !leaving {
-                                                                event.stop_propagation();
-                                                            }
-                                                            apply_vim.call(acts);
-                                                        }
-                                                        // unbound normal-mode keys are inert:
-                                                        // consumed, never inserted — but a key
-                                                        // the grammar swallows is still another
-                                                        // key, and the goal column lives only
-                                                        // across a j/k run, so it forgets too.
-                                                        // The one exception is a count still
-                                                        // accumulating: vim's curswant survives
-                                                        // one, so the 2 of 2j does not throw
-                                                        // away the column the j before it set.
-                                                        vim::Outcome::Swallow => {
-                                                            event.prevent_default();
-                                                            event.stop_propagation();
-                                                            if !vim.peek().counting() {
-                                                                goal.set(goal.get().forgotten());
-                                                            }
-                                                        }
-                                                        vim::Outcome::Pass => {
-                                                            // not the grammar's: Escape and the
-                                                            // app chords bubble as they always did
-                                                            if let Some(action) = keymap::action(&event.key(), event.modifiers()) {
-                                                                // ours: keep the default out of the
-                                                                // sink and the key off the pane
-                                                                event.prevent_default();
-                                                                event.stop_propagation();
-                                                                apply_action.call(action);
-                                                            }
-                                                        }
-                                                    }
-                                                }},
-                                                oncompositionstart: move |_| {
-                                                    composing.set(Composing::Open);
-                                                    // the IME writes; normal mode does not
-                                                    if vim.peek().mode == vim::Mode::Insert {
-                                                        preview.set(Some(String::new()));
-                                                    }
-                                                },
-                                                oncompositionupdate: move |event: Event<CompositionData>| {
-                                                    if vim.peek().mode == vim::Mode::Insert {
-                                                        preview.set(Some(event.data().data()));
-                                                    }
-                                                },
-                                                oncompositionend: move |event: Event<CompositionData>| {
-                                                    // WebKitGTK can fire an empty end before
-                                                    // the real one (the spike's transcript), so
-                                                    // the early end commits nothing
-                                                    preview.set(None);
-                                                    let committed = event.data().data();
-                                                    if committed.is_empty() {
-                                                        composing.set(Composing::Closing);
-                                                        return;
-                                                    }
-                                                    composing.set(Composing::No);
-                                                    if vim.peek().mode == vim::Mode::Insert {
-                                                        editor.write().insert_at_caret(&committed);
-                                                        return;
-                                                    }
-                                                    // outside insert the composition wrote
-                                                    // nothing, so its commit is the only way a
-                                                    // dead key ever reaches the grammar — ^ is
-                                                    // dead on a French layout, and ^ is a
-                                                    // motion. One cluster is one keystroke;
-                                                    // anything longer is a real IME's and stays
-                                                    // discarded whole
-                                                    // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
-                                                    if caret::next_cluster(&committed, 0)
-                                                        != committed.len()
-                                                    {
-                                                        return;
-                                                    }
-                                                    if let vim::Outcome::Acts(acts) = grammar
-                                                        .call((Key::Character(committed), Modifiers::empty()))
-                                                    {
-                                                        apply_vim.call(acts);
-                                                    }
-                                                },
-                                            }
                                         }
                                     }
                                 }
@@ -3038,6 +2987,75 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 }
                             }
                         }
+                    }
+                    // the invisible keyboard socket: WebKitGTK
+                    // attaches its IME only to editable elements,
+                    // so French dead keys compose here while the
+                    // app owns everything drawn
+                    // (adr/2026-08-hidden-ime-sink.md). A sibling of
+                    // the blocks, not a child of the active one: keyed
+                    // inside `.block-active` it remounted on every wake,
+                    // and the keys typed before the fresh mount's focus
+                    // grab landed fell on <body> and were lost
+                    // (adr/2026-09-the-sink-outlives-the-active-block.md)
+                    input {
+                        class: "ime-sink",
+                        onmounted: {
+                            let sink = sink.clone();
+                            move |event: Event<MountedData>| {
+                                sink.borrow_mut().replace(event.data());
+                                async move {
+                                    let _ = event.set_focus(true).await;
+                                }
+                            }
+                        },
+                        onkeydown: move |event: KeyboardEvent| sink_keys.call(event),
+                        oncompositionstart: move |_| {
+                            composing.set(Composing::Open);
+                            // the IME writes; normal mode does not
+                            if vim.peek().mode == vim::Mode::Insert {
+                                preview.set(Some(String::new()));
+                            }
+                        },
+                        oncompositionupdate: move |event: Event<CompositionData>| {
+                            if vim.peek().mode == vim::Mode::Insert {
+                                preview.set(Some(event.data().data()));
+                            }
+                        },
+                        oncompositionend: move |event: Event<CompositionData>| {
+                            // WebKitGTK can fire an empty end before
+                            // the real one (the spike's transcript), so
+                            // the early end commits nothing
+                            preview.set(None);
+                            let committed = event.data().data();
+                            if committed.is_empty() {
+                                composing.set(Composing::Closing);
+                                return;
+                            }
+                            composing.set(Composing::No);
+                            if vim.peek().mode == vim::Mode::Insert {
+                                editor.write().insert_at_caret(&committed);
+                                return;
+                            }
+                            // outside insert the composition wrote
+                            // nothing, so its commit is the only way a
+                            // dead key ever reaches the grammar — ^ is
+                            // dead on a French layout, and ^ is a
+                            // motion. One cluster is one keystroke;
+                            // anything longer is a real IME's and stays
+                            // discarded whole
+                            // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
+                            if caret::next_cluster(&committed, 0)
+                                != committed.len()
+                            {
+                                return;
+                            }
+                            if let vim::Outcome::Acts(acts) = grammar
+                                .call((Key::Character(committed), Modifiers::empty()))
+                            {
+                                apply_vim.call(acts);
+                            }
+                        },
                     }
                 }
             })
@@ -3702,6 +3720,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         select.call((scale, id));
                     }
                 }
+                // a bare key over an awake block was typed before the
+                // sink's focus grab landed: read it as the sink would, so
+                // the first letter after a note mounts is never lost.
+                // Escape and Enter keep the pane's own rungs above — the
+                // known ceiling, as with the overlay relay
+                // (adr/2026-09-the-sink-outlives-the-active-block.md)
+                _ if editor.peek().active().is_some()
+                    && !event.modifiers().intersects(
+                        Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
+                    ) =>
+                {
+                    sink_keys.call(event)
+                }
                 _ => {}
             }
         }
@@ -3955,6 +3986,18 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // the webview owns Ctrl+O as an open dialog
                 event.prevent_default();
                 open_switcher.call(());
+            }
+            // the sheet's block is awake and the key beat the sink's focus
+            // grab: the logs pane's arm, gated on the sheet because the
+            // bare table hosts no sink for the editor it may still hold
+            // (adr/2026-09-the-sink-outlives-the-active-block.md)
+            _ if sheet.peek().is_some()
+                && editor.peek().active().is_some()
+                && !event.modifiers().intersects(
+                    Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
+                ) =>
+            {
+                sink_keys.call(event)
             }
             _ => {}
         }
@@ -9705,9 +9748,7 @@ mod tests {
         // switching to a different block flushes the edit before the new
         // source mounts — every block wakes on its own click now, the
         // preamble's directly (adr/2026-08-css-draws-the-markup.md)
-        let landed = click_for_mutations(&mut dom, clicks[BLOCK_PREAMBLE]);
-        let preamble_keys = listeners(&landed, "keydown")[0];
-        assert_ne!(preamble_keys, sink, "the source moved to a fresh widget");
+        click(&mut dom, clicks[BLOCK_PREAMBLE]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "the preamble source: {html}");
         let saved =
@@ -9727,13 +9768,7 @@ mod tests {
         // from there slides into the preamble
         // (adr/2026-08-per-line-block-segmentation.md)
         place_caret(&mut dom, block, &hit, 0);
-        let slid = press_for_mutations(
-            &mut dom,
-            keys,
-            Key::ArrowUp,
-            Modifiers::empty(),
-        );
-        let keys = listeners(&slid, "keydown")[0];
+        press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         press(&mut dom, keys, Key::ArrowUp, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("#import"), "the preamble source: {html}");
@@ -9858,6 +9893,105 @@ mod tests {
     }
 
     #[test]
+    fn a_wake_leaves_the_sink_mounted_and_the_next_key_lands_on_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // o wakes a fresh block below the heading. The sink is a sibling
+        // of the blocks, not the active one's child, so the wake mounts
+        // no fresh sink — no listener of its in the mutations — and the
+        // focus it holds is never lost between the wake and a grab
+        // (adr/2026-09-the-sink-outlives-the-active-block.md)
+        let woken = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("o".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            listeners(&woken, "compositionstart").is_empty()
+                && listeners(&woken, "keydown").is_empty(),
+            "the wake mounted a fresh sink"
+        );
+        assert_eq!(sink_target(), sink, "the one sink is still the one");
+        // the letter that used to fall on <body> lands on the new line
+        type_keys(&mut dom, sink, "s");
+        assert_eq!(source_of(&dom), "= 2026-07-23\ns");
+
+        // Escape, then gg: a wake by motion, same sink, same proof
+        press(&mut dom, sink, Key::Escape, Modifiers::empty());
+        for _ in 0..2 {
+            press(
+                &mut dom,
+                sink,
+                Key::Character("g".into()),
+                Modifiers::empty(),
+            );
+        }
+        assert_eq!(sink_target(), sink, "gg remounted the sink");
+        assert!(source_of(&dom).contains("#import"), "{}", source_of(&dom));
+    }
+
+    #[test]
+    fn a_bare_key_at_the_logs_pane_over_an_awake_block_is_read_as_the_sink_would()
+     {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        activate_heading(&mut dom, &clicks);
+
+        // i then s reach the pane, not the sink: typed before the sink's
+        // focus grab landed. The grammar hears both — insert mode, then
+        // the letter — instead of the pane dropping them
+        // (adr/2026-09-the-sink-outlives-the-active-block.md)
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("i".into()),
+            Modifiers::empty(),
+        );
+        type_keys(&mut dom, keys[LOGS_KEYS], "s");
+        assert_eq!(source_of(&dom), "= 2026-07-23s");
+
+        // a chord at the pane is the pane's, never the sink's reading: the
+        // grammar is not asked twice for what bubbles by design
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("z".into()),
+            Modifiers::CONTROL,
+        );
+        assert_eq!(
+            source_of(&dom),
+            "= 2026-07-23s",
+            "the chord typed nothing"
+        );
+    }
+
+    #[test]
+    fn a_bare_key_at_the_table_pane_over_an_open_sheet_is_read_as_the_sink_would()
+     {
+        let vault = temp_vault();
+        let (mut dom, clicks, _) = hit_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        sheet_heading_targets(&mut dom, &opened);
+
+        // the sheet's block is awake; A then a letter at the table pane
+        // land in the note the way the sink would read them
+        press(
+            &mut dom,
+            pane,
+            Key::Character("A".into()),
+            Modifiers::empty(),
+        );
+        type_keys(&mut dom, pane, "!");
+        assert_eq!(source_of(&dom), "= alpha!");
+    }
+
+    #[test]
     fn gg_and_g_carry_the_caret_across_blocks() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
@@ -9872,7 +10006,7 @@ mod tests {
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("g".into()),
@@ -9886,11 +10020,9 @@ mod tests {
         );
         assert!(html.contains(r#"class="caret-box""#), "{html}");
 
-        // the widget remounted with the woken block: G goes to its fresh
-        // sink and comes back to the note's own last line — a genuinely
-        // empty one now that every line is its own block
+        // G from the woken block comes back to the note's own last line —
+        // a genuinely empty one now that every line is its own block
         // (adr/2026-08-per-line-block-segmentation.md)
-        let sink = listeners(&woken, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -10053,13 +10185,12 @@ mod tests {
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let sink = listeners(&woken, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -10170,14 +10301,12 @@ mod tests {
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        // gg woke another block: the widget remounted with a fresh sink
-        let sink = listeners(&woken, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -10249,7 +10378,7 @@ mod tests {
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
         assert!(source_of(&dom).contains("songe"));
 
-        let undone = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("u".into()),
@@ -10268,7 +10397,6 @@ mod tests {
             "one press undid the session"
         );
 
-        let sink = listeners(&undone, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -10295,13 +10423,12 @@ mod tests {
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let sink = listeners(&woken, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -10817,21 +10944,16 @@ mod tests {
             Key::Character("V".into()),
             Modifiers::empty(),
         );
-        let mut sink = sink;
         // three j's: past the link line and onto the checklist item, then
         // off it again onto "after" — the checklist line is covered but
         // never the active widget
         for _ in 0..3 {
-            let woken = press_for_mutations(
+            press(
                 &mut dom,
                 sink,
                 Key::Character("j".into()),
                 Modifiers::empty(),
             );
-            sink = listeners(&woken, "keydown")
-                .first()
-                .copied()
-                .unwrap_or(sink);
         }
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -11094,21 +11216,16 @@ mod tests {
             Key::Character("V".into()),
             Modifiers::empty(),
         );
-        let mut sink = sink;
         // four j's: past the link line and the blank line, over the
         // equation, and onto "after" — the equation is now fully covered
         // but never the active widget
         for _ in 0..4 {
-            let woken = press_for_mutations(
+            press(
                 &mut dom,
                 sink,
                 Key::Character("j".into()),
                 Modifiers::empty(),
             );
-            sink = listeners(&woken, "keydown")
-                .first()
-                .copied()
-                .unwrap_or(sink);
         }
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -11178,16 +11295,12 @@ mod tests {
         // (adr/2026-08-cursor-always-in-the-note.md) — the anchor V leaves
         // there
         let (_, sink) = activate_link(&mut dom, &clicks);
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("j".into()),
             Modifiers::empty(),
         );
-        let sink = listeners(&woken, "keydown")
-            .first()
-            .copied()
-            .unwrap_or(sink);
         press(
             &mut dom,
             sink,
@@ -11196,16 +11309,12 @@ mod tests {
         );
         // two ups: past the link line and onto the heading, the anchor left
         // two blocks behind on the note's own last line
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("k".into()),
             Modifiers::empty(),
         );
-        let sink = listeners(&woken, "keydown")
-            .first()
-            .copied()
-            .unwrap_or(sink);
         press(
             &mut dom,
             sink,
@@ -11335,16 +11444,12 @@ mod tests {
         // the crossing mounts a fresh widget for the line entered — the
         // link line — and d must land on its own listener, not the
         // heading's now-stale one
-        let crossed = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("j".into()),
             Modifiers::empty(),
         );
-        let sink = listeners(&crossed, "keydown")
-            .first()
-            .copied()
-            .unwrap_or(sink);
         press(
             &mut dom,
             sink,
@@ -11386,7 +11491,7 @@ mod tests {
             Key::Character("V".into()),
             Modifiers::empty(),
         );
-        let crossed = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("j".into()),
@@ -11395,12 +11500,6 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="block-selected mk-h1""#), "{html}");
 
-        // the crossing mounted a fresh widget for the link line; its own
-        // keydown listener is what Escape must land on now
-        let sink = listeners(&crossed, "keydown")
-            .first()
-            .copied()
-            .unwrap_or(sink);
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(
@@ -11436,13 +11535,12 @@ mod tests {
                 Key::Character("g".into()),
                 Modifiers::empty(),
             );
-            let woken = press_for_mutations(
+            press(
                 &mut dom,
                 sink,
                 Key::Character("g".into()),
                 Modifiers::empty(),
             );
-            let sink = listeners(&woken, "keydown")[0];
             for key in second.chars() {
                 press(
                     &mut dom,
@@ -11900,21 +11998,15 @@ mod tests {
             Modifiers::empty(),
         );
         block_on(settle(&mut dom));
-        let landed = click_for_mutations(&mut dom, clicks[BLOCK_BLANK]);
-        let blank_keys = listeners(&landed, "keydown")[0];
-        let activated = press_for_mutations(
-            &mut dom,
-            blank_keys,
-            Key::ArrowUp,
-            Modifiers::empty(),
-        );
+        click(&mut dom, clicks[BLOCK_BLANK]);
+        let blank_keys = sink;
+        press(&mut dom, blank_keys, Key::ArrowUp, Modifiers::empty());
         block_on(settle(&mut dom));
         assert!(
             source_of(&dom).contains("#import"),
             "the preamble block is the active one now: {}",
             source_of(&dom)
         );
-        let sink = listeners(&activated, "keydown")[0];
         press(
             &mut dom,
             sink,
@@ -12666,6 +12758,7 @@ mod tests {
             trouble: None,
         }));
         let mutations = with_reactor(|| dom.rebuild_to_vec());
+        note_sink(&mutations);
         let clicks = listeners(&mutations, "click");
         (dom, clicks, sender)
     }
@@ -13438,6 +13531,7 @@ mod tests {
             inline: false,
         }));
         let mutations = with_reactor(|| dom.rebuild_to_vec());
+        note_sink(&mutations);
         let clicks = listeners(&mutations, "click");
         let keys = listeners(&mutations, "keydown");
         (
@@ -13582,15 +13676,12 @@ mod tests {
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        // the woken block mounts its own sink: its keydown target is in
-        // the motion's mutations
-        let woken = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("g".into()),
             Modifiers::empty(),
         );
-        let sink = listeners(&woken, "keydown")[0];
         assert!(source_of(&dom).contains("#import"), "{}", source_of(&dom));
         for key in [Key::Character("A".into()), Key::Character(" ".into())] {
             press(&mut dom, sink, key, Modifiers::empty());
@@ -18009,6 +18100,7 @@ mod tests {
             dom.insert_any_root_context(Box::new(line));
         }
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         (dom, mutations)
     }
 
@@ -18070,6 +18162,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(hit));
         dom.insert_any_root_context(Box::new(recorder));
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         let clicks = listeners(&mutations, "click");
         (dom, clicks, landing, launched)
     }
@@ -18284,6 +18377,7 @@ mod tests {
             }))));
         }
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         (
             dom,
             listeners(&mutations, "click"),
@@ -18362,6 +18456,7 @@ mod tests {
             },
         ))));
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         let clicks = listeners(&mutations, "click");
         (dom, clicks, written)
     }
@@ -18396,6 +18491,7 @@ mod tests {
             stamp.clone()
         }))));
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         let clicks = listeners(&mutations, "click");
         (dom, clicks)
     }
@@ -18610,6 +18706,7 @@ mod tests {
             },
         ))));
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         (dom, listeners(&mutations, "click"))
     }
 
@@ -18638,7 +18735,9 @@ mod tests {
                 target,
             );
             dom.process_events();
-            dom.render_immediate_to_vec()
+            let mutations = dom.render_immediate_to_vec();
+            note_sink(&mutations);
+            mutations
         })
     }
 
@@ -18653,6 +18752,30 @@ mod tests {
                 break;
             }
         }
+    }
+
+    thread_local! {
+        /// The one sink's keydown target, recorded by every helper that
+        /// renders: it lives beside the blocks and outlives every wake
+        /// (adr/2026-09-the-sink-outlives-the-active-block.md), so a
+        /// helper that wakes a block has no fresh listener to hand back
+        static SINK: std::cell::Cell<Option<ElementId>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Remembers the sink these mutations mounted, if they mounted one.
+    /// Its class is static, so no mutation names it; its composition
+    /// listeners are its alone, so `compositionstart` is its signature.
+    fn note_sink(mutations: &Mutations) {
+        if let Some(id) = listeners(mutations, "compositionstart").first() {
+            SINK.with(|sink| sink.set(Some(*id)));
+        }
+    }
+
+    /// The sink the last note mounted: where typing lands.
+    fn sink_target() -> ElementId {
+        SINK.with(std::cell::Cell::get)
+            .expect("a note is showing, so a sink was mounted and recorded")
     }
 
     thread_local! {
@@ -18801,7 +18924,9 @@ mod tests {
             dom.runtime()
                 .handle_event(kind, Event::new(data, true), target);
             dom.process_events();
-            dom.render_immediate_to_vec()
+            let mutations = dom.render_immediate_to_vec();
+            note_sink(&mutations);
+            mutations
         })
     }
 
@@ -18858,7 +18983,9 @@ mod tests {
                 target,
             );
             dom.process_events();
-            dom.render_immediate_to_vec()
+            let mutations = dom.render_immediate_to_vec();
+            note_sink(&mutations);
+            mutations
         })
     }
 
@@ -18905,9 +19032,13 @@ mod tests {
         // carries its markup block role too
         // (adr/2026-08-css-draws-the-markup.md), so the div's class
         // attribute is no longer exactly `"block-active"`
+        // the active div ends where the next block begins, or at the sink
+        // that closes the blocks when the active one is the last
+        // (adr/2026-09-the-sink-outlives-the-active-block.md)
         let active = html
             .split(r#"<div class="block-active"#)
             .nth(1)
+            .and_then(|rest| rest.split(r#"<div class="block-"#).next())
             .and_then(|rest| rest.split(r#"<input class="ime-sink""#).next())
             .unwrap_or("");
         let lines: Vec<String> = active
@@ -19043,6 +19174,7 @@ mod tests {
             size
         }))));
         let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
         (
             dom,
             listeners(&mutations, "click"),
@@ -19085,7 +19217,9 @@ mod tests {
                 target,
             );
             dom.process_events();
-            dom.render_immediate_to_vec()
+            let mutations = dom.render_immediate_to_vec();
+            note_sink(&mutations);
+            mutations
         })
     }
 
@@ -19437,20 +19571,18 @@ mod tests {
         std::fs::create_dir(&db).expect("a directory takes its place");
     }
 
-    /// Activates a block and returns the textarea's (input, keydown)
-    /// targets from the mount mutations.
     /// Wakes a rendered block and hands back the widget's two targets: the
-    /// block div's mousedown (where presses land) and the sink's keydown
-    /// (where typing lands) — the woken widget's own listeners are in the
-    /// click's mutations.
+    /// block div's mousedown (where presses land), from the click's
+    /// mutations, and the sink's keydown (where typing lands) — the sink
+    /// mounted with the note, not with the block, and the click never
+    /// remounts it (adr/2026-09-the-sink-outlives-the-active-block.md).
     fn activate_block(
         dom: &mut VirtualDom,
         block: ElementId,
     ) -> (ElementId, ElementId) {
         let mutations = click_for_mutations(dom, block);
         let downs = listeners(&mutations, "mousedown");
-        let keys = listeners(&mutations, "keydown");
-        (downs[0], keys[0])
+        (downs[0], sink_target())
     }
 
     /// The heading widget's targets: the fixture day note's own heading
