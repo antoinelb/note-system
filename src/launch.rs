@@ -212,6 +212,22 @@ for (let step = 0; step < count; step += 1) { \
 if (!landed) return null; \
 return [landed.start, landed.offset, x, taken];";
 
+/// Where a freshly mounted caret puts itself in the pane, said in the one
+/// vocabulary the DOM answers to. Dioxus's own `scroll_to_with_options`
+/// cannot say it: `dioxus-desktop` serialises `ScrollToOptions` as
+/// `{behavior, vertical, horizontal}` and hands that object straight to
+/// `Element.scrollIntoView`, which reads `block` and `inline` — so every
+/// scroll it makes takes `block`'s default, `start`, whatever the caller
+/// asked for. Every `zz`, every `j` and every caret move landed at the top
+/// of the pane, and no test could see it: the headless DOM has no
+/// `scrollIntoView` at all (adr/2026-09-the-caret-line-sits-at-the-centre.md).
+///
+/// The caret is found the way `LINE_WALK` finds it rather than by the
+/// mount's own handle, because the script is what has to name it. The
+/// alignment arrives as a one-element array, the shape every script here
+/// destructures — a bare string would destructure to its first character.
+pub const CARET_SCROLL: &str = "const [block] = await dioxus.recv(); const el = document.querySelector(     '.block-active .caret, .block-active .caret-box', ); if (!el) return false; el.scrollIntoView({ behavior: 'instant', block, inline: 'nearest' }); return true;";
+
 /// What `LINE_WALK` answered: one landing for the whole run, or `None`
 /// when it could not take even one step or answered a shape it never
 /// promised.
@@ -397,5 +413,10 @@ mod tests {
             assert!(script.contains("return null"));
             assert!(script.trim_end().ends_with("];"));
         }
+        // the third answers whether it found a caret to move, not a value
+        // the app parses
+        assert!(CARET_SCROLL.starts_with("const ["));
+        assert!(CARET_SCROLL.contains("return false"));
+        assert!(CARET_SCROLL.trim_end().ends_with("return true;"));
     }
 }
