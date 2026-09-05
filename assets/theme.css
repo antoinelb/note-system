@@ -753,6 +753,16 @@ body {
   position: relative;
 }
 
+/* an empty line has nothing in flow to give the span a height, and an
+   inline with no content sits in a zero-height line box, so the bar had
+   nothing to stretch over: `o` opened a line and drew no caret in it
+   until Escape's box caret brought its own stand-in. The same no-break
+   space gives the bar its font's height; only-child keeps it off every
+   line with text, where its width would push what follows the caret. */
+.caret:only-child::before {
+  content: "\a0";
+}
+
 .caret::after {
   content: "";
   position: absolute;
