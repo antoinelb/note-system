@@ -14066,6 +14066,66 @@ mod tests {
         );
     }
 
+    /// The picker renders inside the reading column, after every block of
+    /// the note, and its query field asks for focus in its own
+    /// `onmounted`. `node.focus()` scrolls its target into view, so left
+    /// in the column's scroll flow that grab dragged the pane past the
+    /// caret's own line: the caret was off screen for as long as the
+    /// picker was up and, after an Escape — which changes no editor state
+    /// and so remounts no caret span for `settle_caret` to scroll back —
+    /// stayed off screen afterwards too
+    /// (adr/2026-09-the-picker-rides-the-pane.md).
+    ///
+    /// `dioxus_ssr` renders markup, never layout, so this is as close as
+    /// `make test` reaches: it pins the two halves the defect needed —
+    /// the box renders in the scrolling column after the blocks, and the
+    /// stylesheet the app inlines takes it out of that column's scroll
+    /// flow. The scroll itself was measured by eye in a headless X
+    /// session; the e2e harness asserts on files and the index, never on
+    /// pixels (adr/2026-08-headless-x11-e2e.md).
+    #[test]
+    fn the_picker_is_taken_out_of_the_reading_column_scroll_flow() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, keys) = activate_heading(&mut dom, &clicks);
+        open_picker(&mut dom, keys);
+        let html = dioxus_ssr::render(&dom);
+
+        let column = html
+            .split(r#"<div class="centre-column">"#)
+            .nth(1)
+            .expect("the logs draw one reading column");
+        let blocks = column
+            .find(r#"class="note-blocks""#)
+            .expect("the open note draws its blocks");
+        let picker = column
+            .find(r#"class="link-picker""#)
+            .expect("the open picker draws in the same column");
+        assert!(
+            blocks < picker,
+            "the picker follows every block, which is why the focus grab \
+             could scroll the pane: {column}"
+        );
+
+        // the same string the app inlines into the page
+        // (adr/2026-08-theme-css-inlined.md); `document::Style` is hoisted
+        // to the head, which `dioxus_ssr` does not render, so the rule is
+        // read from the file itself. The `\n` anchors the match to the
+        // start of a line: `.sheet .link-picker` below it only repaints
+        // the ground for the card.
+        let rule = include_str!("../assets/theme.css")
+            .split("\n.link-picker {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet carries the picker's box");
+        assert!(
+            rule.contains("position: sticky"),
+            "the box rides the foot of the pane, not the foot of the note: \
+             {rule}"
+        );
+    }
+
     #[test]
     fn a_row_click_accepts_the_completion_too() {
         let vault = temp_vault();
