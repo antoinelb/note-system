@@ -1,5 +1,9 @@
 # CSS draws the markup; Typst compiles only what it must
 
+> **Amended by `2026-09-a-template-draws-as-source.md`.**
+> The node-kind verdict below decides which renderer draws a block in a *note*.
+> In a file under `templates/` there is no fallback: a `Typst`-verdict block draws its own source as one plain span, because a template is code and code compiles to a blank page.
+
 ## Context
 
 `adr/2026-08-cursor-split-rendering.md` kept the editor's prose as compiled Typst SVG at all times, splitting only *which* fragment a cursor move belongs to — above the caret, below it, or the raw `<textarea>` line itself.
