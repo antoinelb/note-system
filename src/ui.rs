@@ -34,6 +34,7 @@ use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
 use crate::undo;
+use crate::usage::Usage;
 use crate::vim;
 use crate::watch;
 
@@ -373,6 +374,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut positions = use_signal({
         let root = root.clone();
         move || Positions::load(&root.join(".index/positions"))
+    });
+    // the palette's usage counts, the positions file's sibling: user data
+    // with no upstream, read once here and written by a palette run alone
+    // (adr/2026-09-palette-orders-by-usage.md)
+    let mut usage = use_signal({
+        let root = root.clone();
+        move || Usage::load(&root.join(".index/usage"))
     });
     // which screen is up; the logs remain the door the app opens on
     let mut screen = use_signal(|| Screen::Logs);
@@ -1970,6 +1978,22 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let run_command =
         use_callback(move |(_frozen, id): (Palette, palette::CommandId)| {
             close_palette.call(());
+            // the run is what the next palette orders by: counted and
+            // written here, before the command itself runs, so a command
+            // that quits the app is still remembered
+            // (adr/2026-09-palette-orders-by-usage.md)
+            usage.write().record(id);
+            match usage.peek().save() {
+                Err(error) => {
+                    let notice = Notice::usage_failed(&error.to_string());
+                    status.write().report(notice);
+                }
+                Ok(()) => {
+                    if status.peek().has(Source::Usage) {
+                        status.write().resolve(Source::Usage);
+                    }
+                }
+            }
             match id {
                 palette::CommandId::ToggleTheme => {
                     root_commands.toggle_theme.call(());
@@ -3346,6 +3370,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 conflict: frozen.conflict,
                 undoable: frozen.undoable,
             },
+            &usage.read(),
         );
         // the undo row wears the register's words for what it would take
         // back; every other row keeps its registry label
@@ -14735,6 +14760,73 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"data-theme="light""#), "{html}");
         assert!(!html.contains("command-palette"), "and it closed: {html}");
+    }
+
+    /// The palette orders by how often each command was run, and the count
+    /// is user data on disk beside the positions
+    /// (adr/2026-09-palette-orders-by-usage.md).
+    #[test]
+    fn a_command_run_climbs_to_the_top_and_its_count_reaches_disk() {
+        let vault = temp_vault();
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        // nothing counted yet: the alphabetical list, unchanged
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        assert_eq!(
+            palette_labels(&dom).first().map(String::as_str),
+            Some("edit template"),
+            "a fresh vault reads alphabetically"
+        );
+        type_into(&mut dom, input, "theme");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        // one run and the row leads the list; run it again from there
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        assert_eq!(
+            palette_labels(&dom).first().map(String::as_str),
+            Some("toggle theme"),
+            "the run command leads"
+        );
+        type_into(&mut dom, input, "theme");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+
+        // the file names the CommandId, not the label, and holds both runs
+        assert_eq!(
+            std::fs::read_to_string(vault.path().join(".index/usage"))
+                .expect("the usage file is written"),
+            "toggle-theme 2\n"
+        );
+    }
+
+    #[test]
+    fn an_unwritable_usage_file_surfaces_and_the_command_still_runs() {
+        let vault = temp_vault();
+        // the store's path is a directory: the load degrades to "nothing
+        // counted", and every save fails
+        std::fs::create_dir_all(vault.path().join(".index/usage"))
+            .expect("the sabotage directory is created");
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "theme");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("usage:"), "{html}");
+        assert!(
+            html.contains(r#"data-theme="light""#),
+            "only the memory of the run was lost, not the run: {html}"
+        );
+
+        // the squat removed, the next landed write resolves the notice
+        std::fs::remove_dir(vault.path().join(".index/usage"))
+            .expect("the squat is removed");
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "theme");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("usage:"), "resolved: {html}");
     }
 
     #[test]

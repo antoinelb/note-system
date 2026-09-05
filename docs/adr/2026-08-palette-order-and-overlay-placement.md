@@ -20,6 +20,12 @@ Todo 21 reported the notices pane not closing on a click; todo 24 reported the o
 
 That ADR's stated invariant was explicit: "the palette lists all nine user-invocable commands... it is the complete named surface of the app, not just an index of its chords." Dropping `capture clipboard` breaks that invariant on purpose — the palette is no longer an exhaustive index of every command or every chord. `Ctrl+Shift+V` now answers to a chord with no palette row, the first such case. The birth ADR's completeness *tests* (the registry-against-chords audit) stay, narrowed to the chords that do have rows; the birth ADR's prose claim of completeness does not survive this change and is superseded here.
 
+## Amended by `2026-09-palette-orders-by-usage.md`
+
+The alphabetical order stated here is now the *tie-breaker*, not the order: the palette lists commands by how often each has been run, descending, and equal counts fall back to the alphabetical array this ADR established.
+The registry itself stays alphabetical and `the_registry_is_alphabetized_by_label` still pins it — that is what makes the fallback free — but `filter` now ends in one stable `sort_by_key`, which is precisely the "sort at query time" the first rejected alternative below turned down.
+That rejection stood while the order was a fixed property of the array; it does not survive an order that depends on state the array cannot carry.
+
 ## Rejected
 
 - **A `sort_by_key` at query time instead of reordering the array** — would keep `COMMANDS` in registration order in the source (arguably easier to append to) but pay a sort on every keystroke for a list that is small, bounded, and rarely changes; reordering the constant once is free and keeps `filter`'s "walks the array in place" contract intact.

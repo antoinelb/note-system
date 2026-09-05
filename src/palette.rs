@@ -5,6 +5,10 @@
 //! named surface — every phase that adds a keystroke adds its entry in the
 //! same change (`adr/2026-08-palette-birth-command-list.md`).
 
+use std::cmp::Reverse;
+
+use crate::usage::Usage;
+
 /// Every command the palette can run. The dispatch in `ui` matches this
 /// exhaustively with no wildcard arm, so a variant added here does not
 /// compile until it is wired.
@@ -292,13 +296,26 @@ pub struct Context {
 /// An empty query is the whole vocabulary, uncapped: unlike the vault, the
 /// registry is bounded, and seeing all of it is the point
 /// (`adr/2026-08-command-palette-overlay-shape.md`).
-pub fn filter(query: &str, context: Context) -> Vec<&'static Command> {
+///
+/// Matching is the query's alone; `usage` only orders what matched — most
+/// often run first, ties in the registry's own alphabetical order, so a
+/// fresh install reads exactly as it did before anything was counted
+/// (`adr/2026-09-palette-orders-by-usage.md`).
+pub fn filter(
+    query: &str,
+    context: Context,
+    usage: &Usage,
+) -> Vec<&'static Command> {
     let needle = query.to_lowercase();
-    COMMANDS
+    let mut rows: Vec<&'static Command> = COMMANDS
         .iter()
         .filter(|command| available(command.id, context))
         .filter(|command| command.label.to_lowercase().contains(&needle))
-        .collect()
+        .collect();
+    // a stable sort over an already-alphabetical registry: equal counts
+    // keep the order the array carries
+    rows.sort_by_key(|command| Reverse(usage.count(command.id)));
+    rows
 }
 
 /// Whether a command exists in this context: hidden beats disabled — a
@@ -347,6 +364,8 @@ fn available(id: CommandId, context: Context) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const EDITING: Context = Context {
@@ -403,20 +422,102 @@ mod tests {
         rows.iter().map(|command| command.label).collect()
     }
 
+    /// A fresh install: a path no file stands at, which the store reads as
+    /// "nothing counted yet".
+    fn unused() -> Usage {
+        Usage::load(Path::new("no-such-usage-file"))
+    }
+
+    /// A history, without touching a disk: each command run as often as it
+    /// is named here.
+    fn counted(runs: &[(CommandId, u32)]) -> Usage {
+        let mut usage = unused();
+        for (id, times) in runs {
+            for _ in 0..*times {
+                usage.record(*id);
+            }
+        }
+        usage
+    }
+
+    /// The order is by count, descending
+    /// (`adr/2026-09-palette-orders-by-usage.md`).
     #[test]
-    fn the_query_narrows_by_label_ignoring_case() {
-        assert_eq!(labels(&filter("theme", EDITING)), vec!["toggle theme"]);
+    fn the_most_run_commands_come_first() {
+        let usage = counted(&[
+            (CommandId::ToggleTheme, 5),
+            (CommandId::Notices, 2),
+            (CommandId::Quit, 9),
+        ]);
+        let order = labels(&filter("", READING, &usage));
+        assert_eq!(&order[..3], &["quit", "toggle theme", "notices"]);
+        // and everything never run keeps the alphabetical tail
+        assert_eq!(order[3], "edit template");
+    }
+
+    /// Ties keep the registry's alphabetical order, so a fresh install —
+    /// and every command run the same number of times — reads as before.
+    #[test]
+    fn ties_keep_the_alphabetical_order() {
+        let tied = counted(&[(CommandId::Quit, 3), (CommandId::Notices, 3)]);
         assert_eq!(
-            labels(&filter("WEEKLY", EDITING)),
+            &labels(&filter("", READING, &tied))[..2],
+            &["notices", "quit"],
+            "equal counts fall back to the array's own order"
+        );
+        assert_eq!(
+            labels(&filter("", READING, &unused())),
+            labels(&filter("", READING, &counted(&[]))),
+            "nothing counted is the alphabetical palette"
+        );
+    }
+
+    /// The query's matching rule is untouched; only the order among the
+    /// matches changes.
+    #[test]
+    fn a_query_narrows_the_same_rows_in_the_usage_order() {
+        let usage = counted(&[(CommandId::NextWeekly, 4)]);
+        assert_eq!(
+            labels(&filter("weekly", READING, &usage)),
             vec!["open next weekly", "open previous weekly", "open weekly"]
         );
-        assert_eq!(filter("xyzzy", EDITING), Vec::<&Command>::new());
+        let usage = counted(&[(CommandId::OpenWeekly, 4)]);
+        assert_eq!(
+            labels(&filter("weekly", READING, &usage)),
+            vec!["open weekly", "open next weekly", "open previous weekly"],
+            "the same three rows, the run one first"
+        );
+    }
+
+    /// A count on a command this context hides cannot smuggle it in.
+    #[test]
+    fn usage_never_makes_an_unavailable_command_appear() {
+        let usage = counted(&[(CommandId::DeleteNote, 40)]);
+        assert!(
+            !labels(&filter("", READING, &usage)).contains(&"delete note")
+        );
+    }
+
+    #[test]
+    fn the_query_narrows_by_label_ignoring_case() {
+        assert_eq!(
+            labels(&filter("theme", EDITING, &unused())),
+            vec!["toggle theme"]
+        );
+        assert_eq!(
+            labels(&filter("WEEKLY", EDITING, &unused())),
+            vec!["open next weekly", "open previous weekly", "open weekly"]
+        );
+        assert_eq!(
+            filter("xyzzy", EDITING, &unused()),
+            Vec::<&Command>::new()
+        );
     }
 
     #[test]
     fn the_time_navigation_commands_are_found_by_label() {
         assert_eq!(
-            labels(&filter("previous", READING)),
+            labels(&filter("previous", READING, &unused())),
             vec![
                 "open previous daily",
                 "open previous season",
@@ -424,19 +525,19 @@ mod tests {
             ]
         );
         assert_eq!(
-            labels(&filter("next", READING)),
+            labels(&filter("next", READING, &unused())),
             vec!["open next daily", "open next season", "open next weekly"]
         );
         assert_eq!(
-            labels(&filter("daily", READING)),
+            labels(&filter("daily", READING, &unused())),
             vec!["open daily", "open next daily", "open previous daily"]
         );
         assert_eq!(
-            labels(&filter("weekly", READING)),
+            labels(&filter("weekly", READING, &unused())),
             vec!["open next weekly", "open previous weekly", "open weekly"]
         );
         assert_eq!(
-            labels(&filter("season", READING)),
+            labels(&filter("season", READING, &unused())),
             vec!["open next season", "open previous season", "open season"]
         );
     }
@@ -446,7 +547,7 @@ mod tests {
         // the whole vocabulary minus the place already stood in, the
         // sheet-bound command no sheet backs, and the table-bound zooms
         assert_eq!(
-            labels(&filter("", EDITING)),
+            labels(&filter("", EDITING, &unused())),
             COMMANDS
                 .iter()
                 .map(|c| c.label)
@@ -466,7 +567,7 @@ mod tests {
 
     #[test]
     fn no_active_block_hides_the_caret_commands() {
-        let visible = labels(&filter("", READING));
+        let visible = labels(&filter("", READING, &unused()));
         assert_eq!(visible.len(), COMMANDS.len() - 11);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
@@ -494,57 +595,108 @@ mod tests {
         };
         // the logs show the block; the bare table hides it behind the
         // screen; the sheet shows it again
-        assert_eq!(labels(&filter("insert", EDITING)), vec!["insert link"]);
         assert_eq!(
-            labels(&filter("insert", EDITING_AT_TABLE)),
+            labels(&filter("insert", EDITING, &unused())),
+            vec!["insert link"]
+        );
+        assert_eq!(
+            labels(&filter("insert", EDITING_AT_TABLE, &unused())),
             Vec::<&str>::new()
         );
         assert_eq!(
-            labels(&filter("insert", EDITING_AT_SHEET)),
+            labels(&filter("insert", EDITING_AT_SHEET, &unused())),
             vec!["insert link"]
         );
     }
 
     #[test]
     fn the_finders_hide_off_the_table() {
-        assert_eq!(labels(&filter("filter", READING)), Vec::<&str>::new());
+        assert_eq!(
+            labels(&filter("filter", READING, &unused())),
+            Vec::<&str>::new()
+        );
         // "jump" now names the fold row alone, which is the logs' own
-        assert_eq!(labels(&filter("jump", READING)), vec!["fold jump panel"]);
-        assert_eq!(labels(&filter("filter", AT_TABLE)), vec!["filter cards"]);
-        assert_eq!(labels(&filter("jump", AT_TABLE)), Vec::<&str>::new());
+        assert_eq!(
+            labels(&filter("jump", READING, &unused())),
+            vec!["fold jump panel"]
+        );
+        assert_eq!(
+            labels(&filter("filter", AT_TABLE, &unused())),
+            vec!["filter cards"]
+        );
+        assert_eq!(
+            labels(&filter("jump", AT_TABLE, &unused())),
+            Vec::<&str>::new()
+        );
         // the switcher is not a finder: it stands on both screens
-        assert_eq!(labels(&filter("open note", READING)), vec!["open note"]);
-        assert_eq!(labels(&filter("open note", AT_TABLE)), vec!["open note"]);
+        assert_eq!(
+            labels(&filter("open note", READING, &unused())),
+            vec!["open note"]
+        );
+        assert_eq!(
+            labels(&filter("open note", AT_TABLE, &unused())),
+            vec!["open note"]
+        );
     }
 
     #[test]
     fn the_folds_hide_on_the_table() {
         assert_eq!(
-            labels(&filter("fold", READING)),
+            labels(&filter("fold", READING, &unused())),
             vec!["fold jump panel", "fold rail"]
         );
-        assert_eq!(labels(&filter("fold", AT_TABLE)), Vec::<&str>::new());
+        assert_eq!(
+            labels(&filter("fold", AT_TABLE, &unused())),
+            Vec::<&str>::new()
+        );
     }
 
     #[test]
     fn the_zoom_commands_hide_off_the_table_and_at_their_own_level() {
-        assert_eq!(labels(&filter("zoom", READING)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("zoom", AT_TABLE)), vec!["zoom to bodies"]);
-        assert_eq!(labels(&filter("zoom", AT_BODIES)), vec!["zoom to titles"]);
+        assert_eq!(
+            labels(&filter("zoom", READING, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("zoom", AT_TABLE, &unused())),
+            vec!["zoom to bodies"]
+        );
+        assert_eq!(
+            labels(&filter("zoom", AT_BODIES, &unused())),
+            vec!["zoom to titles"]
+        );
     }
 
     #[test]
     fn delete_note_exists_only_over_an_open_sheet() {
-        assert!(!labels(&filter("delete", AT_TABLE)).contains(&"delete note"));
-        assert_eq!(labels(&filter("delete", AT_SHEET)), vec!["delete note"]);
+        assert!(
+            !labels(&filter("delete", AT_TABLE, &unused()))
+                .contains(&"delete note")
+        );
+        assert_eq!(
+            labels(&filter("delete", AT_SHEET, &unused())),
+            vec!["delete note"]
+        );
     }
 
     #[test]
     fn the_conflict_pair_exists_only_while_a_conflict_stands() {
-        assert_eq!(labels(&filter("mine", READING)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("disk", READING)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("mine", CONFLICTED)), vec!["keep mine"]);
-        assert_eq!(labels(&filter("disk", CONFLICTED)), vec!["take disk"]);
+        assert_eq!(
+            labels(&filter("mine", READING, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("disk", READING, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("mine", CONFLICTED, &unused())),
+            vec!["keep mine"]
+        );
+        assert_eq!(
+            labels(&filter("disk", CONFLICTED, &unused())),
+            vec!["take disk"]
+        );
     }
 
     #[test]
@@ -553,15 +705,21 @@ mod tests {
             undoable: true,
             ..READING
         };
-        assert_eq!(labels(&filter("undo", READING)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("undo", UNDOABLE)), vec!["undo"]);
+        assert_eq!(
+            labels(&filter("undo", READING, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(labels(&filter("undo", UNDOABLE, &unused())), vec!["undo"]);
     }
 
     #[test]
     fn arrange_cluster_exists_only_over_an_open_sheet() {
-        assert_eq!(labels(&filter("arrange", AT_TABLE)), Vec::<&str>::new());
         assert_eq!(
-            labels(&filter("arrange", AT_SHEET)),
+            labels(&filter("arrange", AT_TABLE, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("arrange", AT_SHEET, &unused())),
             vec!["arrange cluster"]
         );
     }
@@ -572,10 +730,22 @@ mod tests {
             note_open: false,
             ..READING
         };
-        assert_eq!(labels(&filter("export", READING)), vec!["export pdf"]);
-        assert_eq!(labels(&filter("export", CLOSED)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("export", AT_TABLE)), Vec::<&str>::new());
-        assert_eq!(labels(&filter("export", AT_SHEET)), vec!["export pdf"]);
+        assert_eq!(
+            labels(&filter("export", READING, &unused())),
+            vec!["export pdf"]
+        );
+        assert_eq!(
+            labels(&filter("export", CLOSED, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("export", AT_TABLE, &unused())),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            labels(&filter("export", AT_SHEET, &unused())),
+            vec!["export pdf"]
+        );
     }
 
     /// The command reaches the one editor from every screen: on the table
@@ -585,7 +755,7 @@ mod tests {
     fn edit_template_stands_on_every_screen() {
         for context in [READING, EDITING, AT_TABLE, AT_SHEET, AT_BODIES] {
             assert_eq!(
-                labels(&filter("template", context)),
+                labels(&filter("template", context, &unused())),
                 vec!["edit template"]
             );
         }
@@ -593,10 +763,10 @@ mod tests {
 
     #[test]
     fn the_screen_commands_hide_where_they_stand() {
-        let on_logs = labels(&filter("", READING));
+        let on_logs = labels(&filter("", READING, &unused()));
         assert!(on_logs.contains(&"go to table"));
         assert!(!on_logs.contains(&"go to logs"));
-        let on_table = labels(&filter("", AT_TABLE));
+        let on_table = labels(&filter("", AT_TABLE, &unused()));
         assert!(on_table.contains(&"go to logs"));
         assert!(!on_table.contains(&"go to table"));
     }

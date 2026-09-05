@@ -53,6 +53,10 @@ pub enum Source {
     /// (adr/2026-08-external-edit-conflict-commands.md).
     Conflict,
     Positions,
+    /// The palette's usage counts, the positions file's sibling: user data
+    /// with no upstream, so a refused write is the same class of failure
+    /// (adr/2026-09-palette-orders-by-usage.md).
+    Usage,
     Watcher,
     Editor,
     Capture,
@@ -235,6 +239,21 @@ impl Notice {
             text: format!(
                 "positions: {detail} — placements held in memory; \
                  the next move retries"
+            ),
+        }
+    }
+
+    /// The usage file refusing the write a palette run makes: the command
+    /// itself ran, so nothing the user asked for was lost — only the
+    /// ordering's memory of it (adr/2026-09-palette-orders-by-usage.md).
+    /// A warning, not a critical: no prose is at stake.
+    pub fn usage_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Usage,
+            text: format!(
+                "usage: {detail} — the command ran; the palette's order \
+                 will not remember it"
             ),
         }
     }
