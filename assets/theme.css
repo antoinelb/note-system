@@ -810,10 +810,35 @@ body {
 /* the day gathers what happened in it */
 /* -- links: the Ctrl+L picker and the both-directions footer -------------- */
 
+/* The three in-column overlays — the link picker, the / prompt and the ex
+   line — ride the foot of the *pane* rather than the foot of the note.
+   Each asks for focus in its own `onmounted`, and `node.focus()` scrolls
+   its target into view: sitting after every block of a note taller than
+   the pane, that grab dragged the reading column past the caret's own
+   line, which then stayed out of sight for as long as the overlay was up
+   and — when Escape closed it, changing no editor state and so remounting
+   no caret span — stayed out of sight afterwards too, since only a caret
+   mount ever scrolls the pane back
+   (adr/2026-09-the-picker-rides-the-pane.md). This is the same trap the
+   sink's `position: fixed` answers (adr/2026-09-the-sink-outlives-the-active-block.md)
+   and the palette's (a summonable box buried below a long note is
+   unreachable); sticky is the in-column form of that answer — the column
+   still reserves the box's space at the note's foot, the box just never
+   falls below the fold, so focusing it scrolls nothing. The ground is
+   opaque because a stuck box draws over the lines it rides above. */
 .link-picker {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg);
   margin: 8px 0;
   border: 1px solid var(--border);
   padding: 8px;
+}
+
+/* the sheet is a raised card, so a box riding its foot takes the card's
+   own ground rather than the logs' (adr/2026-09-the-sheet-is-an-index-card.md) */
+.sheet .link-picker {
+  background: var(--sheet-fill);
 }
 
 .picker-query {
