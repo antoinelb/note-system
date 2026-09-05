@@ -1,5 +1,7 @@
 # The IME sink outlives the active block
 
+> Superseded by `adr/2026-09-the-sink-is-the-one-keyboard-socket.md`: the sink now lives at the shell's root, on every screen, and the panes forward nothing — they have no keydown of their own. The observation that motivated this decision stands; its fix was one step short.
+
 ## Context
 
 The invisible `input.ime-sink` (`adr/2026-08-hidden-ime-sink.md`) was

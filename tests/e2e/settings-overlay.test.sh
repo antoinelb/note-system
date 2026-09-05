@@ -4,7 +4,7 @@
 # keyboard back to the note when Escape closes it. Its controls are
 # session-only by decision and leave nothing on disk, so what the vault
 # can witness is the overlay's presence: dd typed while it stands is
-# dropped by the relay (adr/2026-09-overlay-keys-relay-before-focus-lands.md)
+# dropped by the overlay's own reader (adr/2026-09-the-sink-is-the-one-keyboard-socket.md)
 # and the line survives — an overlay that never opened would have let dd
 # delete it — and the sentence appended after Escape proves the note took
 # the keyboard back (adr/2026-08-the-pane-holds-focus.md).

@@ -3,10 +3,10 @@
 # (adr/2026-08-ex-line-is-literal-and-global.md): `:s/old/new/` replaces
 # every occurrence on the caret's line with no regex and no g flag. The
 # colon reaches the grammar through the sink and opens the prompt; the
-# command's letters go out in the same xdotool burst, ahead of the
-# prompt's focus grab, and are relayed into its query
-# (adr/2026-09-overlay-keys-relay-before-focus-lands.md). Only the
-# Return, the one key the relay drops, is paced.
+# command's letters go out in the same xdotool burst and the sink reads
+# them into the prompt's query, Return included
+# (adr/2026-09-the-sink-is-the-one-keyboard-socket.md). The paced Return
+# predates that and stays.
 . "$(dirname "$0")/harness.sh"
 
 trap e2e_stop EXIT INT TERM

@@ -139,16 +139,16 @@ e2e_shot() {
 }
 
 # `e2e_key`/`e2e_type` return the instant xdotool's XTest calls do, not
-# once WebKitGTK has drained the event, and every overlay, sheet and
-# screen switch grabs focus through an async onmounted
-# (adr/2026-09-overlay-keys-relay-before-focus-lands.md names the
-# overlays' half, adr/2026-09-sheet-and-screen-join-the-focus-effect.md
-# the panes'). A keystroke paced behind one screenshot round trip lands
-# on a window that has had a compositor frame to take focus — the app's
-# own speed, never a guessed sleep. Pace the key that crosses a focus
-# grab; never retry a sentence typed into a note (a retry after a
-# slow-but-landed first send splices a duplicate into the buffer), and
-# let `e2e_note_holds`' read-only poll absorb the autosave debounce.
+# once WebKitGTK has drained the event. Nothing needs pacing any more:
+# the sink holds the focus for the life of the window and reads every
+# key against the state the previous key produced
+# (adr/2026-09-the-sink-is-the-one-keyboard-socket.md), so a burst typed
+# right after a chord lands whole under any load. The paced helpers stay
+# for the scenarios written with them — one screenshot round trip, the
+# app's own speed, never a guessed sleep. Never retry a sentence typed
+# into a note (a retry after a slow-but-landed first send splices a
+# duplicate into the buffer); let `e2e_note_holds`' read-only poll absorb
+# the autosave debounce.
 e2e_key_paced() {
     e2e_key "$@"
     e2e_shot "$E2E_DIR/probe.png"

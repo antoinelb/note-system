@@ -1,5 +1,7 @@
 # An `input` event is a delta against what the field showed, never the query itself
 
+> Superseded by `adr/2026-09-the-sink-is-the-one-keyboard-socket.md`: the query fields are gone, and with them the `input` event and the `Shown` memory. The ambiguity this reader could not resolve — a report one character short being a Backspace or a stale field — is why.
+
 ## Context
 
 `adr/2026-09-overlay-keys-relay-before-focus-lands.md` made the nine

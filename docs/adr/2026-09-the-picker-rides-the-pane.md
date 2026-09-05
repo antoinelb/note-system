@@ -1,5 +1,7 @@
 # The in-column overlays ride the foot of the pane, not the foot of the note
 
+> Amended by `adr/2026-09-the-sink-is-the-one-keyboard-socket.md`: the picker no longer grabs the focus, so `node.focus()` scrolls nothing; the sticky placement decided here is what keeps it at the pane's foot.
+
 ## Context
 
 "Adding a link makes the cursor disappear" — from the user's todo.

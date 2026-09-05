@@ -228,6 +228,16 @@ return [landed.start, landed.offset, x, taken];";
 /// destructures — a bare string would destructure to its first character.
 pub const CARET_SCROLL: &str = "const [block] = await dioxus.recv(); const el = document.querySelector(     '.block-active .caret, .block-active .caret-box', ); if (!el) return false; el.scrollIntoView({ behavior: 'instant', block, inline: 'nearest' }); return true;";
 
+/// What keeps the sink the document's focused element for the life of the
+/// window: a click on anything that is not focusable moves the focus to
+/// `<body>`, where no handler reads keys, and a refocus asked from Rust
+/// would land a round trip later — every key typed in between lost. This
+/// listener refocuses the sink in the same event turn, before the next
+/// key can be dispatched (adr/2026-09-the-sink-is-the-one-keyboard-socket.md).
+/// The window losing focus fires the same event with the sink still the
+/// document's focused element, so the refocus is a no-op there.
+pub const KEEP_FOCUS: &str = "document.addEventListener('focusout', (event) => { const sink = document.querySelector('.ime-sink'); if (sink && event.target === sink) { queueMicrotask(() => sink.focus({ preventScroll: true })); } }); return true;";
+
 /// What `LINE_WALK` answered: one landing for the whole run, or `None`
 /// when it could not take even one step or answered a shape it never
 /// promised.
@@ -418,5 +428,11 @@ mod tests {
         assert!(CARET_SCROLL.starts_with("const ["));
         assert!(CARET_SCROLL.contains("return false"));
         assert!(CARET_SCROLL.trim_end().ends_with("return true;"));
+        // the fourth installs a listener and answers nothing the app
+        // reads; what it must do is refocus the sink, by class, on focusout
+        assert!(KEEP_FOCUS.contains("'focusout'"));
+        assert!(KEEP_FOCUS.contains(".ime-sink"));
+        assert!(KEEP_FOCUS.contains("sink.focus("));
+        assert!(KEEP_FOCUS.trim_end().ends_with("return true;"));
     }
 }

@@ -1,5 +1,7 @@
 # The sheet and the screen join the pane-holds-focus effect
 
+> Superseded by `adr/2026-09-the-sink-is-the-one-keyboard-socket.md`: the focus effect is gone. The sink holds the focus for the life of the window and the `hosted` reading — the grammar speaks only where the note is drawn — moved into the one key dispatcher.
+
 ## Context
 
 A note-taker session found the table screen a keyboard dead end after a

@@ -1,10 +1,11 @@
 #!/bin/sh
-# A key typed before the sink's focus grab lands reaches a pane, and the
-# pane reads it as the sink would instead of dropping it
-# (adr/2026-09-the-sink-outlives-the-active-block.md). Two grabs are
-# crossed unpaced on purpose: the note's first mount (Ctrl+D creating the
-# day, then o and the sentence in one burst) and an overlay's close
-# (Ctrl+O landing on a note, then i and the sentence in one burst).
+# A key typed in the same burst as the chord that opens or lands a note
+# is read against the state that chord produced: the sink holds the focus
+# for the life of the window and nothing else ever takes it
+# (adr/2026-09-the-sink-is-the-one-keyboard-socket.md). Two former focus
+# grabs are crossed unpaced on purpose: the note's first mount (Ctrl+D
+# creating the day, then o and the sentence in one burst) and an
+# overlay's close (Ctrl+O landing on a note, then i and the sentence).
 # Pacing here would hide the defect this exists to catch: the settings
 # scenario paced its o and still held "ettings proving ground" one run in
 # four under load, the o having fallen on the pane.

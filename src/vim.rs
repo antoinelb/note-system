@@ -667,10 +667,13 @@ impl Vim {
                 self.reset();
                 Outcome::Swallow
             }
-            // and there the ladder stops: a plain Escape never leaves the
-            // note, so the reflex of pressing it to be sure of the mode
-            // costs nothing (adr/2026-08-shift-escape-leaves-the-note.md)
-            Key::Escape => Outcome::Swallow,
+            // and there the note's ladder stops: a plain Escape never
+            // leaves the note, so the reflex of pressing it to be sure of
+            // the mode costs nothing (adr/2026-08-shift-escape-leaves-the-note.md)
+            // — passed on, not swallowed, so the screen's own rungs (a
+            // notice to acknowledge, a template to leave) still answer it
+            // (adr/2026-09-the-sink-is-the-one-keyboard-socket.md)
+            Key::Escape => Outcome::Pass,
             // the phase-0 arrows still answer; pending grammar does not
             // apply to them, so it resets rather than leaking
             Key::ArrowLeft
@@ -2976,8 +2979,8 @@ mod tests {
         let mut vim = normal();
         assert_eq!(
             vim.handle(&Key::Escape, Modifiers::empty(), &sight),
-            Outcome::Swallow,
-            "a plain Escape never leaves the note"
+            Outcome::Pass,
+            "a plain Escape never leaves the note: passed on to the screen"
         );
         assert_eq!(vim.mode, Mode::Normal, "and changes nothing");
         assert_eq!(

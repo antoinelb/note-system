@@ -1,5 +1,7 @@
 # The palette lists commands alphabetically and drops one row; every overlay renders above both screens
 
+> Amended by `adr/2026-09-the-sink-is-the-one-keyboard-socket.md`: an overlay no longer grabs the focus in its `onmounted`; its keys reach it from the sink. The placement stands.
+
 ## Context
 
 Todo 21 reported the notices pane not closing on a click; todo 24 reported the open-loops command doing nothing from the table screen; todo 23 asked for the palette's capture-clipboard row to go and the rest to sort alphabetically. All three turned out to share one root cause and one fix shape: an overlay that is not rendered at `Shell`'s top level, or not wired with its own focus and dismissal, behaves differently depending on which screen summoned it.

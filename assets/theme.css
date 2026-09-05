@@ -269,11 +269,6 @@ body {
   display: flex;
 }
 
-/* focusable only so the enter keystroke has somewhere to land */
-.logs:focus {
-  outline: none;
-}
-
 /* 176px: the widest row the fixture vault draws — "2026-summer" and its
    "season" tag — plus the 16px gutter each side, measured on a headless
    screenshot (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md) */
@@ -793,11 +788,11 @@ body {
 }
 
 /* the invisible keyboard socket: WebKitGTK attaches its IME only to
-   editable elements (adr/2026-08-hidden-ime-sink.md). Fixed, not placed
-   at the active block: it lives beside the blocks now, never remounting
-   with one, and `focus()` scrolls its target into view — fixed means the
-   caret's own mount is the only thing that ever scrolls the pane
-   (adr/2026-09-the-sink-outlives-the-active-block.md) */
+   editable elements (adr/2026-08-hidden-ime-sink.md). Fixed at the
+   window's corner, mounted once with the shell and holding the focus for
+   the life of the window, so `focus()` scrolls nothing and the caret's own
+   mount is the only thing that ever scrolls a pane
+   (adr/2026-09-the-sink-is-the-one-keyboard-socket.md) */
 .ime-sink {
   position: fixed;
   left: 0;
@@ -829,20 +824,14 @@ body {
 /* -- links: the Ctrl+L picker and the both-directions footer -------------- */
 
 /* The three in-column overlays — the link picker, the / prompt and the ex
-   line — ride the foot of the *pane* rather than the foot of the note.
-   Each asks for focus in its own `onmounted`, and `node.focus()` scrolls
-   its target into view: sitting after every block of a note taller than
-   the pane, that grab dragged the reading column past the caret's own
-   line, which then stayed out of sight for as long as the overlay was up
-   and — when Escape closed it, changing no editor state and so remounting
-   no caret span — stayed out of sight afterwards too, since only a caret
-   mount ever scrolls the pane back
-   (adr/2026-09-the-picker-rides-the-pane.md). This is the same trap the
-   sink's `position: fixed` answers (adr/2026-09-the-sink-outlives-the-active-block.md)
-   and the palette's (a summonable box buried below a long note is
-   unreachable); sticky is the in-column form of that answer — the column
-   still reserves the box's space at the note's foot, the box just never
-   falls below the fold, so focusing it scrolls nothing. The ground is
+   line — ride the foot of the *pane* rather than the foot of the note
+   (adr/2026-09-the-picker-rides-the-pane.md): sitting after every block
+   of a note taller than the pane, a box at the note's foot is below the
+   fold, and the focus grab it used to make dragged the reading column
+   past the caret's own line. The grab is gone — no overlay takes the
+   focus (adr/2026-09-the-sink-is-the-one-keyboard-socket.md) — and sticky
+   keeps the box in reach: the column still reserves its space at the
+   note's foot, the box just never falls below the fold. The ground is
    opaque because a stuck box draws over the lines it rides above. */
 .link-picker {
   position: sticky;
@@ -859,19 +848,28 @@ body {
   background: var(--sheet-fill);
 }
 
+/* an overlay's query is drawn from state, never a focused field of its own:
+   the sink reads every key (adr/2026-09-the-sink-is-the-one-keyboard-socket.md),
+   so the line shows the query with its own bar after it, or the placeholder */
 .picker-query {
   width: 100%;
   box-sizing: border-box;
   font: 16px Lato, sans-serif;
   color: var(--ink-bright);
-  background: transparent;
-  border: none;
-  outline: none;
-  caret-color: var(--ember);
   padding: 0 0 8px 0;
+  white-space: pre-wrap;
 }
 
-.picker-query::placeholder {
+.picker-query::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  vertical-align: -0.1em;
+  background: var(--ember);
+}
+
+.picker-placeholder {
   color: var(--ink-faint);
 }
 
@@ -1231,11 +1229,6 @@ body {
     radial-gradient(circle 1px at 35% 80%, var(--star-dim), transparent),
     radial-gradient(circle 1px at 55% 45%, var(--star-dim), transparent),
     radial-gradient(circle 1px at 25% 55%, var(--star-bright), transparent);
-}
-
-/* focusable only so the chords have somewhere to land */
-.table:focus {
-  outline: none;
 }
 
 /* the panned layer; its transform is set inline from the zoom and pan

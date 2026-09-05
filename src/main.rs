@@ -118,6 +118,11 @@ fn main() {
         // where a freshly mounted caret puts itself in the pane: said in
         // the DOM's own words, because Dioxus's ScrollToOptions cannot say
         // it at all (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+        .with_context(ui::KeepFocus(std::sync::Arc::new(|| {
+            // the script installs its listener the moment it is sent;
+            // nothing comes back to await
+            let _ = dioxus::document::eval(launch::KEEP_FOCUS);
+        })))
         .with_context(ui::CaretScroll(std::sync::Arc::new(|block| {
             Box::pin(async move {
                 let eval = dioxus::document::eval(launch::CARET_SCROLL);

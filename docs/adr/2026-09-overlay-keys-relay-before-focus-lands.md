@@ -1,5 +1,7 @@
 # A key that beats an overlay's focus grab is relayed into the overlay, never read by the grammar
 
+> Superseded by `adr/2026-09-the-sink-is-the-one-keyboard-socket.md`: overlays no longer take the focus at all, so there is no grab for a key to beat. The relay's routing survives as `overlay_keys`, which now also carries Enter, Escape and the arrows — the known ceiling below is closed.
+
 ## Context
 
 Every overlay grabs its own focus in an async `onmounted`

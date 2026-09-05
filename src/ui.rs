@@ -29,7 +29,6 @@ use crate::render::{
     BodyCache, BodyView, DEFAULT_SIZE, FragmentCache, FragmentView,
     RenderTheme,
 };
-use crate::shown::Shown;
 use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
@@ -144,6 +143,13 @@ pub type Scrolled = Pin<Box<dyn Future<Output = ()>>>;
 /// (adr/2026-09-the-caret-line-sits-at-the-centre.md). The argument is
 /// the DOM's own word for the alignment: `center`, `start`, `end` or
 /// `nearest`.
+/// How the sink keeps the window's focus once it has it: `main` injects
+/// `launch::KEEP_FOCUS` once per shell, the headless tests inject a
+/// counting fake — the `HitProbe` pattern
+/// (adr/2026-09-the-sink-is-the-one-keyboard-socket.md).
+#[derive(Clone)]
+pub struct KeepFocus(pub Arc<dyn Fn() + Send + Sync>);
+
 #[derive(Clone)]
 pub struct CaretScroll(
     pub Arc<dyn Fn(&'static str) -> Scrolled + Send + Sync>,
@@ -505,6 +511,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let hit = try_consume_context::<HitProbe>();
     let line_probe = try_consume_context::<LineProbe>();
     let caret_scroll = try_consume_context::<CaretScroll>();
+    // the sink is the window's one keyboard socket: it takes the focus at
+    // its mount and this keeps it there; nothing else ever asks for it
+    // (adr/2026-09-the-sink-is-the-one-keyboard-socket.md)
+    use_hook(|| {
+        if let Some(keep) = try_consume_context::<KeepFocus>() {
+            (keep.0)();
+        }
+    });
     let clipboard = try_consume_context::<Clipboard>();
     let clipboard_image = try_consume_context::<ClipboardImage>();
     let clipboard_write = try_consume_context::<ClipboardWrite>();
@@ -545,7 +559,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut creator_notice = use_signal(|| None::<String>);
     // what every query input may still be showing, one memory for the one
     // overlay open at a time (adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md)
-    let mut shown = use_signal(Shown::default);
 
     // the active filter, and the Ctrl+F overlay that sets it — dims cards,
     // never drops them (adr/2026-08-filter-overlay-ctrl-f.md)
@@ -1149,7 +1162,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-08-ctrl-n-two-step-create-overlay.md)
     let open_creator = use_callback(move |()| {
         creator_query.set(String::new());
-        shown.set(Shown::opened(""));
         creator_highlighted.set(0);
         creator_notice.set(None);
         creator.set(Some(Creator { picked: None }));
@@ -1223,7 +1235,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     status.write().resolve(Source::Index);
                 }
                 filter_query.set(String::new());
-                shown.set(Shown::opened(""));
                 filter_highlighted.set(0);
                 filter_picker.set(Some(FilterPicker {
                     entries: table::filter_entries(&tags),
@@ -1251,7 +1262,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     status.write().resolve(Source::Index);
                 }
                 template_query.set(String::new());
-                shown.set(Shown::opened(""));
                 template_highlighted.set(0);
                 template_picker.set(Some(TemplatePicker { entries }));
             }
@@ -1614,7 +1624,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             };
             let recent = recent_notes(&history.peek(), &own, &entries);
             switcher_query.set(String::new());
-            shown.set(Shown::opened(""));
             switcher_highlighted.set(0);
             switcher.set(Some(Switcher { recent, entries }));
         }
@@ -1625,7 +1634,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // — and lands a hit the way a loop line lands, by path
     let open_finder = use_callback(move |()| {
         finder_query.set(String::new());
-        shown.set(Shown::opened(""));
         finder_highlighted.set(0);
         finder_hits.set(Vec::new());
         finder_open.set(true);
@@ -1688,130 +1696,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // *above* the app and outside every handler it has, and the chord
     // goes dead until something inside is clicked. A plain cell, like
     // QuitFlush: nothing re-renders when the pane announces itself.
-    let pane = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
-    // where the invisible keyboard sink is, the pane cell's twin: the
-    // widget's keystrokes and compositions land on it, so it must hold the
-    // focus whenever a block is active and no overlay owns it
-    // (adr/2026-08-hidden-ime-sink.md)
-    let sink = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
-    use_effect({
-        let pane = pane.clone();
-        let sink = sink.clone();
-        move || {
-            // every flag is read every time, so the effect follows them
-            // all. While an overlay is up neither may take focus — the
-            // overlay's input just asked for it in its own mount; when it
-            // closes, this re-runs and hands the focus back
-            let editing = editor.read().active().is_some();
-            // mirrors the loops overlay's own mount guard (line ~3239):
-            // nothing renders at zero loops, so an empty vault must not
-            // starve the pane of focus
-            let listing = loops_open() && !loops.read().is_empty();
-            let overlaid = palette.read().is_some()
-                || creator.read().is_some()
-                || picker.read().is_some()
-                || filter_picker.read().is_some()
-                || switcher.read().is_some()
-                || template_picker.read().is_some()
-                || search_prompt()
-                || ex_prompt()
-                || finder_open()
-                || listing
-                // absent from this list, closing either overlay left the
-                // focus stranded on <body>: the effect never re-ran, the
-                // sink never got the focus back, and buffered keystrokes
-                // replayed on the next click
-                || settings_open()
-                || notices_open();
-            // the sheet and the screen, the two elements the effect used to
-            // leave unread (adr/2026-09-sheet-and-screen-join-the-focus-effect.md).
-            // `blocks_view` — and the sink inside it — only mounts on the
-            // logs screen or behind an open sheet; the table screen with no
-            // sheet renders neither. Closing a sheet can still leave the one
-            // editor `active` (the reactivated note wakes with its last
-            // block, adr/2026-08-cursor-always-in-the-note.md), so `editing`
-            // alone would aim at a sink that just unmounted with the sheet —
-            // a stale handle nothing answers. Reading `sheet` and `screen`
-            // every run, and gating the sink on an actual host for it,
-            // means every screen switch and every sheet open-or-close
-            // re-picks the right target instead of stranding focus on
-            // `<body>`.
-            let sheeted = sheet.read().is_some();
-            let hosted = screen() == Screen::Logs || sheeted;
-            let target = if editing && !listing && hosted {
-                sink.borrow().clone()
-            } else {
-                pane.borrow().clone()
-            };
-            if let Some(handle) = target
-                && !overlaid
-            {
-                // a headless refusal has no one to tell; the caret simply
-                // stays where it was
-                spawn(async move {
-                    let _ = handle.set_focus(true).await;
-                });
-            }
-        }
-    });
-
-    // A bare key that reaches the sink or a pane while an overlay is up
-    // was typed at the overlay before its async focus grab landed
-    // (adr/2026-09-overlay-keys-relay-before-focus-lands.md). The grammar
-    // must never see it — "c" is an operator there, not a letter — so it
-    // goes into the open overlay's query instead, or is dropped when the
-    // overlay has none. Escape and the chords still pass: the ladders and
-    // the chord arms below own those whether or not an overlay is up.
-    let relay = use_callback(move |(key, modifiers): (Key, Modifiers)| {
-        if key == Key::Escape
-            || modifiers.intersects(
-                Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
-            )
-        {
-            return false;
-        }
-        let listing = loops_open() && !loops.read().is_empty();
-        let open_query = [
-            (palette.read().is_some(), palette_query),
-            (creator.read().is_some(), creator_query),
-            (picker.read().is_some(), query),
-            (filter_picker.read().is_some(), filter_query),
-            (switcher.read().is_some(), switcher_query),
-            (template_picker.read().is_some(), template_query),
-            (search_prompt(), search_query),
-            (ex_prompt(), ex_query),
-            (finder_open(), finder_query),
-        ]
-        .into_iter()
-        .find_map(|(open, query)| open.then_some(query));
-        let Some(mut open_query) = open_query else {
-            return listing || settings_open() || notices_open();
-        };
-        match key {
-            Key::Character(character) => {
-                open_query.write().push_str(&character);
-            }
-            Key::Backspace => {
-                open_query.write().pop();
-            }
-            _ => return true,
-        }
-        // the field learns of the letter by a patch it may not have seen
-        // when it next speaks
-        let written = open_query.peek().clone();
-        shown.write().wrote(&written);
-        true
-    });
-
-    // an `input` event names the field's whole value, and the field may be
-    // behind a write the relay or a step change just made: the value is
-    // read as a delta against what the field showed, never taken whole
-    // (adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md)
-    let typed =
-        use_callback(move |(query, reported): (Signal<String>, String)| {
-            shown.write().typed(&query.peek(), &reported)
-        });
-
     // one follow path for Ctrl+Enter, Ctrl+click and the palette: the
     // caret is app state now, so everyone reads the same one — no probe,
     // no frozen offsets (adr/2026-08-ctrl-enter-opens-time-links.md,
@@ -1922,7 +1806,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     status.write().resolve(Source::Index);
                 }
                 query.set(String::new());
-                shown.set(Shown::opened(""));
                 highlighted.set(0);
                 picker.set(Some(Picker { entries }));
             }
@@ -1964,7 +1847,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-08-command-palette-overlay-shape.md)
     let summon_palette = use_callback(move |()| {
         palette_query.set(String::new());
-        shown.set(Shown::opened(""));
         palette_highlighted.set(0);
         palette.set(Some(Palette {
             block_active: editor.peek().active().is_some(),
@@ -2305,7 +2187,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     vim::Act::Redo => editor.write().redo(),
                     vim::Act::OpenSearch => {
                         search_query.set(String::new());
-                        shown.set(Shown::opened(""));
                         search_prompt.set(true);
                     }
                     // the same one-line prompt in the same place, wearing
@@ -2313,7 +2194,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // already spelled
                     // (adr/2026-08-ex-line-is-literal-and-global.md)
                     vim::Act::OpenEx { prefill } => {
-                        shown.set(Shown::opened(&prefill));
                         ex_query.set(prefill);
                         ex_prompt.set(true);
                     }
@@ -2443,111 +2323,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // the block panes, one closure both screens mount: the logs centre pane
     // and the writing sheet show the one editor through the one widget
     // (adr/2026-08-sheet-reuses-the-one-editor.md)
-    // the sink's reading of a keystroke, one callback so the panes can
-    // read a key the same way when it reaches them instead of the sink:
-    // typed while a block was awake but before the sink's focus grab had
-    // landed — a note just mounted, an overlay just closed — the key used
-    // to fall through the pane's own arms and be dropped, the grammar
-    // never hearing it (adr/2026-09-the-sink-outlives-the-active-block.md)
-    let sink_keys = use_callback({
-        let goal = goal.clone();
-        move |event: KeyboardEvent| {
-            // never touch a composing keystroke: the
-            // IME owns it, and an open preview means
-            // the IME owns it whatever isComposing
-            // says (the spike saw both)
-            let owned = *composing.peek();
-            if owned == Composing::Closing {
-                composing.set(Composing::No);
-            }
-            if event.data().is_composing()
-                || event.key() == Key::Dead
-                || owned != Composing::No
-            {
-                // stopped, or the pane would read what the sink declined
-                event.stop_propagation();
-                return;
-            }
-            // typed at an overlay that had not yet
-            // taken the focus: relayed into it, and
-            // stopped here so the pane does not
-            // relay it a second time
-            if relay.call((event.key(), event.modifiers())) {
-                event.stop_propagation();
-                return;
-            }
-            // the pane folds are the logs' and normal
-            // mode's: insert mode keeps every alt
-            // character typeable (AltGr), and the
-            // grammar would swallow the chord inert
-            // before the pane saw it
-            // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
-            if vim.peek().mode == vim::Mode::Normal
-                && *screen.peek() == Screen::Logs
-                && let Some(fold) =
-                    keymap::fold(&event.key(), event.modifiers())
-            {
-                event.prevent_default();
-                event.stop_propagation();
-                fold_pane.call(fold);
-                return;
-            }
-            // the grammar speaks first (editor.rs
-            // names this slot); Pass hands the key to
-            // the phase-0 keymap unchanged
-            let outcome = grammar.call((event.key(), event.modifiers()));
-            match outcome {
-                vim::Outcome::Acts(acts) => {
-                    event.prevent_default();
-                    // shift+Escape leaves the note and
-                    // keeps travelling: the table pane
-                    // closes the sheet behind it
-                    // (adr/2026-08-shift-escape-leaves-the-note.md)
-                    let leaving = event.key() == Key::Escape
-                        && event.modifiers().shift();
-                    if !leaving {
-                        event.stop_propagation();
-                    }
-                    apply_vim.call(acts);
-                }
-                // unbound normal-mode keys are inert:
-                // consumed, never inserted — but a key
-                // the grammar swallows is still another
-                // key, and the goal column lives only
-                // across a j/k run, so it forgets too.
-                // The one exception is a count still
-                // accumulating: vim's curswant survives
-                // one, so the 2 of 2j does not throw
-                // away the column the j before it set.
-                vim::Outcome::Swallow => {
-                    event.prevent_default();
-                    event.stop_propagation();
-                    if !vim.peek().counting() {
-                        goal.set(goal.get().forgotten());
-                    }
-                }
-                vim::Outcome::Pass => {
-                    // not the grammar's: Escape and the
-                    // app chords bubble as they always did
-                    if let Some(action) =
-                        keymap::action(&event.key(), event.modifiers())
-                    {
-                        // ours: keep the default out of the
-                        // sink and the key off the pane
-                        event.prevent_default();
-                        event.stop_propagation();
-                        apply_action.call(action);
-                    }
-                }
-            }
-        }
-    });
-
     let blocks_view = {
         let root = root.clone();
         let feed = feed.clone();
         let fragments = fragments.clone();
-        let sink = sink.clone();
         let hit = hit.clone();
         let caret_scroll = caret_scroll.clone();
         let dragging = dragging.clone();
@@ -3063,75 +2842,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             }
                         }
                     }
-                    // the invisible keyboard socket: WebKitGTK
-                    // attaches its IME only to editable elements,
-                    // so French dead keys compose here while the
-                    // app owns everything drawn
-                    // (adr/2026-08-hidden-ime-sink.md). A sibling of
-                    // the blocks, not a child of the active one: keyed
-                    // inside `.block-active` it remounted on every wake,
-                    // and the keys typed before the fresh mount's focus
-                    // grab landed fell on <body> and were lost
-                    // (adr/2026-09-the-sink-outlives-the-active-block.md)
-                    input {
-                        class: "ime-sink",
-                        onmounted: {
-                            let sink = sink.clone();
-                            move |event: Event<MountedData>| {
-                                sink.borrow_mut().replace(event.data());
-                                async move {
-                                    let _ = event.set_focus(true).await;
-                                }
-                            }
-                        },
-                        onkeydown: move |event: KeyboardEvent| sink_keys.call(event),
-                        oncompositionstart: move |_| {
-                            composing.set(Composing::Open);
-                            // the IME writes; normal mode does not
-                            if vim.peek().mode == vim::Mode::Insert {
-                                preview.set(Some(String::new()));
-                            }
-                        },
-                        oncompositionupdate: move |event: Event<CompositionData>| {
-                            if vim.peek().mode == vim::Mode::Insert {
-                                preview.set(Some(event.data().data()));
-                            }
-                        },
-                        oncompositionend: move |event: Event<CompositionData>| {
-                            // WebKitGTK can fire an empty end before
-                            // the real one (the spike's transcript), so
-                            // the early end commits nothing
-                            preview.set(None);
-                            let committed = event.data().data();
-                            if committed.is_empty() {
-                                composing.set(Composing::Closing);
-                                return;
-                            }
-                            composing.set(Composing::No);
-                            if vim.peek().mode == vim::Mode::Insert {
-                                editor.write().insert_at_caret(&committed);
-                                return;
-                            }
-                            // outside insert the composition wrote
-                            // nothing, so its commit is the only way a
-                            // dead key ever reaches the grammar — ^ is
-                            // dead on a French layout, and ^ is a
-                            // motion. One cluster is one keystroke;
-                            // anything longer is a real IME's and stays
-                            // discarded whole
-                            // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
-                            if caret::next_cluster(&committed, 0)
-                                != committed.len()
-                            {
-                                return;
-                            }
-                            if let vim::Outcome::Acts(acts) = grammar
-                                .call((Key::Character(committed), Modifiers::empty()))
-                            {
-                                apply_vim.call(acts);
-                            }
-                        },
-                    }
                 }
             })
         }
@@ -3153,43 +2863,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 let rows = matches.clone();
                 rsx! {
                 div { class: "link-picker",
-                    input {
-                        class: "picker-query",
-                        value: "{query}",
-                        placeholder: "link to…",
-                        onmounted: move |event| async move {
-                            let _ = event.set_focus(true).await;
-                        },
-                        oninput: move |event| {
-                            query.set(typed.call((query, event.value())));
-                            highlighted.set(0);
-                        },
-                        onkeydown: move |event: KeyboardEvent| {
-                            let key = event.key();
-                            let last = matches.len().saturating_sub(1);
-                            match key {
-                                Key::Escape => close_picker.call(()),
-                                Key::Enter => {
-                                    // no matches: the keystroke does
-                                    // nothing rather than guessing
-                                    if let Some(entry) = matches.get(highlighted()) {
-                                        accept.call(entry.id.clone());
-                                    }
-                                }
-                                Key::ArrowDown => {
-                                    highlighted.set((highlighted() + 1).min(last));
-                                }
-                                Key::ArrowUp => {
-                                    highlighted.set(highlighted().saturating_sub(1));
-                                }
-                                _ => {}
-                            }
-                            // the picker owns every plain key while it
-                            // is open; the ctrl chords still bubble
-                            if !event.modifiers().ctrl() {
-                                event.stop_propagation();
-                            }
-                        },
+                    div { class: "picker-query",
+                        if query.read().is_empty() {
+                            span { class: "picker-placeholder", "link to…" }
+                        } else {
+                            "{query}"
+                        }
                     }
                     if rows.is_empty() {
                         div { class: "picker-empty", "no matching note" }
@@ -3224,38 +2903,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
         rsx! {
             div { class: "link-picker",
-                input {
-                    class: "picker-query",
-                    value: "{search_query}",
-                    placeholder: "/",
-                    onmounted: move |event| async move {
-                        let _ = event.set_focus(true).await;
-                    },
-                    oninput: move |event| search_query.set(typed.call((search_query, event.value()))),
-                    onkeydown: move |event: KeyboardEvent| {
-                        match event.key() {
-                            Key::Escape => search_prompt.set(false),
-                            Key::Enter => {
-                                let pattern = search_query.peek().clone();
-                                search_prompt.set(false);
-                                vim.write().commit_search(pattern);
-                                // the first jump is n's, synthesized
-                                let outcome = grammar.call((
-                                    Key::Character("n".to_string()),
-                                    Modifiers::empty(),
-                                ));
-                                if let vim::Outcome::Acts(acts) = outcome {
-                                    apply_vim.call(acts);
-                                }
-                            }
-                            _ => {}
-                        }
-                        // the prompt owns every plain key while it is
-                        // open; the ctrl chords still bubble
-                        if !event.modifiers().ctrl() {
-                            event.stop_propagation();
-                        }
-                    },
+                div { class: "picker-query",
+                    if search_query.read().is_empty() {
+                        span { class: "picker-placeholder", "/" }
+                    } else {
+                        "{search_query}"
+                    }
                 }
             }
         }
@@ -3273,62 +2926,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
         rsx! {
             div { class: "link-picker",
-                input {
-                    class: "picker-query",
-                    placeholder: ":",
-                    value: "{ex_query}",
-                    onmounted: move |event| async move {
-                        let _ = event.set_focus(true).await;
-                    },
-                    oninput: move |event| ex_query.set(typed.call((ex_query, event.value()))),
-                    onkeydown: move |event: KeyboardEvent| {
-                        match event.key() {
-                            Key::Escape => ex_prompt.set(false),
-                            Key::Enter => {
-                                let line = ex_query.peek().clone();
-                                ex_prompt.set(false);
-                                // the same shape the grammar callback uses:
-                                // the prompt only opens over a note, so the
-                                // zip never comes up empty, and the editor
-                                // guard drops before an act writes it back
-                                let resolved = {
-                                    let snapshot = editor.peek();
-                                    snapshot.note().zip(snapshot.caret()).map_or(
-                                        vim::ExOutcome::Acts(Vec::new()),
-                                        |((_, note_text), at)| {
-                                            vim.write().commit_ex(
-                                                &line,
-                                                &vim::View {
-                                                    text: note_text,
-                                                    blocks: snapshot.blocks(),
-                                                    head: at.head,
-                                                    anchor: at.anchor,
-                                                },
-                                            )
-                                        },
-                                    )
-                                };
-                                // a line that could not be read says so
-                                // rather than vanishing (AIR ERR-2)
-                                match resolved {
-                                    vim::ExOutcome::Acts(acts) => {
-                                        apply_vim.call(acts);
-                                    }
-                                    vim::ExOutcome::Refused(reason) => {
-                                        status
-                                            .write()
-                                            .report(Notice::ex_refused(&reason));
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        // the prompt owns every plain key while it is
-                        // open; the ctrl chords still bubble
-                        if !event.modifiers().ctrl() {
-                            event.stop_propagation();
-                        }
-                    },
+                div { class: "picker-query",
+                    if ex_query.read().is_empty() {
+                        span { class: "picker-placeholder", ":" }
+                    } else {
+                        "{ex_query}"
+                    }
                 }
             }
         }
@@ -3341,52 +2944,17 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let template_view = move || -> Element {
         match template_picker() {
             Some(frozen) => {
-                let needle = template_query.read().to_lowercase();
-                let rows: Vec<String> = frozen
-                    .entries
-                    .iter()
-                    .filter(|name| name.to_lowercase().contains(&needle))
-                    .cloned()
-                    .collect();
-                let keys_rows = rows.clone();
+                let rows =
+                    template_rows(&frozen.entries, &template_query.read());
                 rsx! {
                 div { class: "command-palette",
                     div { class: "palette-head type-label", "edit template" }
-                    input {
-                        class: "picker-query",
-                        value: "{template_query}",
-                        placeholder: "template…",
-                        onmounted: move |event| async move {
-                            let _ = event.set_focus(true).await;
-                        },
-                        oninput: move |event| {
-                            template_query.set(typed.call((template_query, event.value())));
-                            template_highlighted.set(0);
-                        },
-                        onkeydown: move |event: KeyboardEvent| {
-                            let key = event.key();
-                            let last = keys_rows.len().saturating_sub(1);
-                            match key {
-                                Key::Escape => close_templates.call(()),
-                                Key::Enter => {
-                                    // no matches: the keystroke does
-                                    // nothing rather than guessing
-                                    if let Some(name) = keys_rows.get(template_highlighted()) {
-                                        edit_template.call(name.clone());
-                                    }
-                                }
-                                Key::ArrowDown => {
-                                    template_highlighted.set((template_highlighted() + 1).min(last));
-                                }
-                                Key::ArrowUp => {
-                                    template_highlighted.set(template_highlighted().saturating_sub(1));
-                                }
-                                _ => {}
-                            }
-                            if !event.modifiers().ctrl() {
-                                event.stop_propagation();
-                            }
-                        },
+                    div { class: "picker-query",
+                        if template_query.read().is_empty() {
+                            span { class: "picker-placeholder", "template…" }
+                        } else {
+                            "{template_query}"
+                        }
                     }
                     if rows.is_empty() {
                         div { class: "picker-empty", "no matching template" }
@@ -3412,15 +2980,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let open_palette = palette().map(|frozen| {
         let matches = palette::filter(
             &palette_query.read(),
-            palette::Context {
-                block_active: frozen.block_active,
-                note_open: frozen.note_open,
-                on_table: frozen.on_table,
-                sheet_open: frozen.sheet_open,
-                at_bodies: frozen.at_bodies,
-                conflict: frozen.conflict,
-                undoable: frozen.undoable,
-            },
+            frozen.context(),
             &usage.read(),
         );
         // the undo row wears the register's words for what it would take
@@ -3521,30 +3081,18 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let sheet_footer =
         sheet_open.as_deref().map(|own| sheet_backlinks(&root, own));
 
-    let keyboard = {
+    let logs_keys = use_callback({
         let root = root.clone();
         move |event: KeyboardEvent| {
             // read before the match: a guard's borrow would still be held
             // when an arm writes the editor back
             let over_template = open_template(&editor.peek(), &root).is_some();
             match event.key() {
-                // typed at an overlay that had not yet taken the focus:
-                // relayed into it, never read as a rung or a chord here
-                key if relay.call((key.clone(), event.modifiers())) => {
-                    event.stop_propagation();
-                }
                 // shift+Escape belongs to the note it just left; the rungs
                 // below are plain Escape's, and a note must not acknowledge
                 // a notice on its way out
                 // (adr/2026-08-shift-escape-leaves-the-note.md)
                 Key::Escape if event.modifiers().shift() => {}
-                // the settings overlay closes first, above the notices and
-                // loops rungs — defence in depth behind its own onkeydown
-                // (adr/2026-08-settings-overlay.md)
-                Key::Escape if settings_open() => settings_open.set(false),
-                // the notices overlay is a destination you leave, like the
-                // loops list below it on the ladder
-                Key::Escape if notices_open() => notices_open.set(false),
                 // the open-loops list is a destination you leave; escape
                 // reaches here only when no block owns it
                 Key::Escape if loops_open() => loops_open.set(false),
@@ -3632,6 +3180,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     if character == "p"
                         && event.modifiers().ctrl()
                         && palette.peek().is_none()
+                        && !finder_open()
                         && picker.peek().is_none()
                         && creator.peek().is_none()
                         && template_picker.peek().is_none()
@@ -3696,26 +3245,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 {
                     event.prevent_default();
                     open_settings.call(());
-                }
-                // Alt+H / Alt+L fold the panes from the pane itself — the
-                // empty day, where no sink holds the keys
-                // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
-                Key::Character(_)
-                    if keymap::fold(&event.key(), event.modifiers())
-                        .is_some()
-                        && palette.peek().is_none()
-                        && creator.peek().is_none()
-                        && switcher.peek().is_none()
-                        && !finder_open()
-                        && !settings_open() =>
-                {
-                    event.prevent_default();
-                    // the guard proved the chord; the default is never
-                    // the value taken
-                    fold_pane.call(
-                        keymap::fold(&event.key(), event.modifiers())
-                            .unwrap_or(keymap::Fold::Rail),
-                    );
                 }
                 // Ctrl+O, the note switcher — the same chord the table
                 // answers, because the switcher belongs to no screen
@@ -3796,34 +3325,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         select.call((scale, id));
                     }
                 }
-                // a bare key over an awake block was typed before the
-                // sink's focus grab landed: read it as the sink would, so
-                // the first letter after a note mounts is never lost.
-                // Escape and Enter keep the pane's own rungs above — the
-                // known ceiling, as with the overlay relay
-                // (adr/2026-09-the-sink-outlives-the-active-block.md)
-                _ if editor.peek().active().is_some()
-                    && !event.modifiers().intersects(
-                        Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
-                    ) =>
-                {
-                    sink_keys.call(event)
-                }
                 _ => {}
             }
         }
-    };
+    });
 
     // the table pane's own chords: the palette, the screens, and — now that
     // the sheet holds the editor here — the editor chords the logs pane has;
     // everything else bubbles to the app root
-    let table_keys = {
-        move |event: KeyboardEvent| match event.key() {
-            // typed at an overlay that had not yet taken the focus:
-            // relayed into it, never read as a rung or a chord here
-            key if relay.call((key.clone(), event.modifiers())) => {
-                event.stop_propagation();
-            }
+    let table_keys =
+        use_callback(move |event: KeyboardEvent| match event.key() {
             // the note's own exit gesture, arriving from the block it just
             // left: the sheet is the note here, so it goes with it
             // (adr/2026-08-shift-escape-leaves-the-note.md)
@@ -3832,13 +3343,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     close_sheet.call(());
                 }
             }
-            // the settings overlay closes first, above the notices rung —
-            // defence in depth behind its own onkeydown
-            // (adr/2026-08-settings-overlay.md)
-            Key::Escape if settings_open() => settings_open.set(false),
-            // the notices overlay closes before the sheet: overlays leave
-            // the ladder first
-            Key::Escape if notices_open() => notices_open.set(false),
             // the open-loops list is a destination you leave too — the
             // table pane's twin of the logs arm's rung, so the ember and
             // the palette's open-loops command both close from here
@@ -3884,6 +3388,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 if character == "p"
                     && event.modifiers().ctrl()
                     && palette.peek().is_none()
+                    && !finder_open()
                     && picker.peek().is_none()
                     && creator.peek().is_none()
                     && filter_picker.peek().is_none()
@@ -4063,21 +3568,467 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 event.prevent_default();
                 open_switcher.call(());
             }
-            // the sheet's block is awake and the key beat the sink's focus
-            // grab: the logs pane's arm, gated on the sheet because the
-            // bare table hosts no sink for the editor it may still hold
-            // (adr/2026-09-the-sink-outlives-the-active-block.md)
-            _ if sheet.peek().is_some()
-                && editor.peek().active().is_some()
-                && !event.modifiers().intersects(
-                    Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
-                ) =>
-            {
-                sink_keys.call(event)
-            }
             _ => {}
+        });
+
+    // Every overlay reads its keys from the sink, never from a focused
+    // field of its own: the overlay is drawn from state, so a key typed at
+    // it can neither beat a focus grab nor race the patch that would have
+    // shown it (adr/2026-09-the-sink-is-the-one-keyboard-socket.md). Each
+    // reader recomputes its rows the way its view does, so Enter and the
+    // arrows act on exactly what is drawn.
+    let picker_keys = use_callback(move |key: OverlayKey| {
+        let rows: Vec<String> =
+            picker.peek().as_ref().map_or_else(Vec::new, |open| {
+                links::picker_rows(&open.entries, &query.peek())
+                    .into_iter()
+                    .map(|entry| entry.id.clone())
+                    .collect()
+            });
+        match key {
+            OverlayKey::Escape => close_picker.call(()),
+            OverlayKey::Enter => {
+                if let Some(id) = rows.get(highlighted()) {
+                    accept.call(id.clone());
+                }
+            }
+            OverlayKey::Down => highlighted
+                .set((highlighted() + 1).min(rows.len().saturating_sub(1))),
+            OverlayKey::Up => highlighted.set(highlighted().saturating_sub(1)),
         }
-    };
+    });
+    let search_keys = use_callback(move |key: OverlayKey| match key {
+        OverlayKey::Escape => search_prompt.set(false),
+        OverlayKey::Enter => {
+            let pattern = search_query.peek().clone();
+            search_prompt.set(false);
+            vim.write().commit_search(pattern);
+            // the committed pattern is searched at once, as `n` would
+            let outcome = grammar
+                .call((Key::Character("n".to_string()), Modifiers::empty()));
+            if let vim::Outcome::Acts(acts) = outcome {
+                apply_vim.call(acts);
+            }
+        }
+        // the prompts list nothing, so the arrows have nowhere to go
+        OverlayKey::Up | OverlayKey::Down => {}
+    });
+    let ex_keys = use_callback(move |key: OverlayKey| match key {
+        OverlayKey::Escape => ex_prompt.set(false),
+        OverlayKey::Enter => {
+            let line = ex_query.peek().clone();
+            ex_prompt.set(false);
+            let resolved = {
+                let snapshot = editor.peek();
+                snapshot.note().zip(snapshot.caret()).map_or(
+                    vim::ExOutcome::Acts(Vec::new()),
+                    |((_, note_text), at)| {
+                        vim.write().commit_ex(
+                            &line,
+                            &vim::View {
+                                text: note_text,
+                                blocks: snapshot.blocks(),
+                                head: at.head,
+                                anchor: at.anchor,
+                            },
+                        )
+                    },
+                )
+            };
+            match resolved {
+                vim::ExOutcome::Acts(acts) => apply_vim.call(acts),
+                vim::ExOutcome::Refused(reason) => {
+                    status.write().report(Notice::ex_refused(&reason));
+                }
+            }
+        }
+        // the prompts list nothing, so the arrows have nowhere to go
+        OverlayKey::Up | OverlayKey::Down => {}
+    });
+    let template_keys = use_callback(move |key: OverlayKey| {
+        let rows = template_picker
+            .peek()
+            .as_ref()
+            .map_or_else(Vec::new, |open| {
+                template_rows(&open.entries, &template_query.peek())
+            });
+        match key {
+            OverlayKey::Escape => close_templates.call(()),
+            OverlayKey::Enter => {
+                if let Some(name) = rows.get(template_highlighted()) {
+                    edit_template.call(name.clone());
+                }
+            }
+            OverlayKey::Down => template_highlighted.set(
+                (template_highlighted() + 1).min(rows.len().saturating_sub(1)),
+            ),
+            OverlayKey::Up => template_highlighted
+                .set(template_highlighted().saturating_sub(1)),
+        }
+    });
+    let palette_keys = use_callback(move |key: OverlayKey| {
+        // read only while the palette stands, which is when it is called
+        let frozen = *palette.peek();
+        let rows = frozen.map_or_else(Vec::new, |frozen| {
+            palette::filter(
+                &palette_query.peek(),
+                frozen.context(),
+                &usage.peek(),
+            )
+        });
+        match key {
+            OverlayKey::Escape => close_palette.call(()),
+            OverlayKey::Enter => {
+                if let Some((frozen, command)) =
+                    frozen.zip(rows.get(palette_highlighted()))
+                {
+                    run_command.call((frozen, command.id));
+                }
+            }
+            OverlayKey::Down => palette_highlighted.set(
+                (palette_highlighted() + 1).min(rows.len().saturating_sub(1)),
+            ),
+            OverlayKey::Up => palette_highlighted
+                .set(palette_highlighted().saturating_sub(1)),
+        }
+    });
+    let creator_keys = use_callback(move |key: OverlayKey| {
+        // read only while the creator stands, which is when it is called
+        let picked =
+            creator.peek().as_ref().and_then(|open| open.picked.clone());
+        // the title step lists nothing, so the arrows have nowhere to go
+        let rows = if picked.is_some() {
+            Vec::new()
+        } else {
+            crate::create::filter(&creator_query.peek())
+        };
+        match key {
+            // a step back from the title, a close from the type
+            OverlayKey::Escape => {
+                if picked.is_some() {
+                    creator_query.set(String::new());
+                    creator_highlighted.set(0);
+                    creator_notice.set(None);
+                    creator.set(Some(Creator { picked: None }));
+                } else {
+                    close_creator.call(());
+                }
+            }
+            OverlayKey::Enter => match picked {
+                Some(picked) => {
+                    let title = creator_query.peek().clone();
+                    create_note.call((picked, title));
+                }
+                None => {
+                    if let Some(picked) = rows.get(creator_highlighted()) {
+                        creator_query.set(String::new());
+                        creator_highlighted.set(0);
+                        creator.set(Some(Creator {
+                            picked: Some(picked.clone()),
+                        }));
+                    }
+                }
+            },
+            OverlayKey::Down => creator_highlighted.set(
+                (creator_highlighted() + 1).min(rows.len().saturating_sub(1)),
+            ),
+            OverlayKey::Up => creator_highlighted
+                .set(creator_highlighted().saturating_sub(1)),
+        }
+    });
+    let filter_keys = use_callback(move |key: OverlayKey| {
+        let rows: Vec<table::FilterEntry> =
+            filter_picker.peek().as_ref().map_or_else(Vec::new, |open| {
+                table::filter_rows(&filter_query.peek(), &open.entries)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            });
+        match key {
+            OverlayKey::Escape => close_filter.call(()),
+            // an empty query accepted is the filter lifted
+            OverlayKey::Enter => {
+                if filter_query.peek().is_empty() {
+                    apply_filter.call(None);
+                } else if let Some(entry) = rows.get(filter_highlighted()) {
+                    apply_filter.call(Some(entry.filter.clone()));
+                }
+            }
+            OverlayKey::Down => filter_highlighted.set(
+                (filter_highlighted() + 1).min(rows.len().saturating_sub(1)),
+            ),
+            OverlayKey::Up => {
+                filter_highlighted.set(filter_highlighted().saturating_sub(1))
+            }
+        }
+    });
+    let switcher_keys = use_callback(move |key: OverlayKey| {
+        let rows: Vec<String> =
+            switcher.peek().as_ref().map_or_else(Vec::new, |open| {
+                switcher_rows(open, &switcher_query.peek())
+                    .into_iter()
+                    .map(|entry| entry.id.clone())
+                    .collect()
+            });
+        match key {
+            OverlayKey::Escape => close_switcher.call(()),
+            OverlayKey::Enter => {
+                if let Some(id) = rows.get(switcher_highlighted()) {
+                    switch_to.call(id.clone());
+                }
+            }
+            OverlayKey::Down => switcher_highlighted.set(
+                (switcher_highlighted() + 1).min(rows.len().saturating_sub(1)),
+            ),
+            OverlayKey::Up => switcher_highlighted
+                .set(switcher_highlighted().saturating_sub(1)),
+        }
+    });
+    let finder_keys =
+        use_callback(move |key: OverlayKey| {
+            let last = finder_hits.peek().len().saturating_sub(1);
+            match key {
+                OverlayKey::Escape => close_finder.call(()),
+                OverlayKey::Enter => {
+                    let path = finder_hits
+                        .peek()
+                        .get(finder_highlighted())
+                        .map(|hit| hit.path.clone());
+                    if let Some(path) = path {
+                        close_finder.call(());
+                        open_loop.call(path);
+                    }
+                }
+                OverlayKey::Down => finder_highlighted
+                    .set((finder_highlighted() + 1).min(last)),
+                OverlayKey::Up => finder_highlighted
+                    .set(finder_highlighted().saturating_sub(1)),
+            }
+        });
+    let loops_keys = use_callback(move |key: OverlayKey| {
+        let last = loops.peek().len().saturating_sub(1);
+        match key {
+            OverlayKey::Escape => loops_open.set(false),
+            OverlayKey::Enter => {
+                let path = loops
+                    .peek()
+                    .get(loops_highlighted())
+                    .map(|line| line.path.clone());
+                if let Some(path) = path {
+                    open_loop.call(path);
+                }
+            }
+            OverlayKey::Down => {
+                loops_highlighted.set((loops_highlighted() + 1).min(last))
+            }
+            OverlayKey::Up => {
+                loops_highlighted.set(loops_highlighted().saturating_sub(1))
+            }
+        }
+    });
+
+    // The one reader every overlay shares. A Ctrl/Alt/Meta chord passes
+    // through to the grammar and the screen's rungs; while an overlay
+    // stands every bare key is its own — a letter or Backspace edits its
+    // query, Escape, Enter and the arrows go to its reader above, and
+    // anything else is dropped, so the grammar never reads "c" as an
+    // operator behind an open picker. Answers whether the key was taken.
+    let overlay_keys =
+        use_callback(move |(key, modifiers): (Key, Modifiers)| {
+            if modifiers.intersects(
+                Modifiers::CONTROL | Modifiers::ALT | Modifiers::META,
+            ) {
+                return false;
+            }
+            if settings_open() {
+                if key == Key::Escape {
+                    settings_open.set(false);
+                }
+                return true;
+            }
+            if notices_open() {
+                if key == Key::Escape {
+                    notices_open.set(false);
+                }
+                return true;
+            }
+            // nothing renders at zero loops, so an empty list owns no key
+            if loops_open() && !loops.read().is_empty() {
+                if let Some(named) = overlay_key(&key) {
+                    loops_keys.call(named);
+                }
+                return true;
+            }
+            let open = [
+                (
+                    palette.read().is_some(),
+                    palette_query,
+                    palette_keys,
+                    Some(palette_highlighted),
+                ),
+                (
+                    creator.read().is_some(),
+                    creator_query,
+                    creator_keys,
+                    Some(creator_highlighted),
+                ),
+                (
+                    picker.read().is_some(),
+                    query,
+                    picker_keys,
+                    Some(highlighted),
+                ),
+                (
+                    filter_picker.read().is_some(),
+                    filter_query,
+                    filter_keys,
+                    Some(filter_highlighted),
+                ),
+                (
+                    switcher.read().is_some(),
+                    switcher_query,
+                    switcher_keys,
+                    Some(switcher_highlighted),
+                ),
+                (
+                    template_picker.read().is_some(),
+                    template_query,
+                    template_keys,
+                    Some(template_highlighted),
+                ),
+                (search_prompt(), search_query, search_keys, None),
+                (ex_prompt(), ex_query, ex_keys, None),
+                (finder_open(), finder_query, finder_keys, None),
+            ]
+            .into_iter()
+            .find_map(|(open, query, keys, highlight)| {
+                open.then_some((query, keys, highlight))
+            });
+            let Some((mut query, keys, highlight)) = open else {
+                return false;
+            };
+            match key {
+                Key::Character(character) => {
+                    query.write().push_str(&character)
+                }
+                Key::Backspace => {
+                    query.write().pop();
+                }
+                other => {
+                    if let Some(named) = overlay_key(&other) {
+                        keys.call(named);
+                    }
+                    return true;
+                }
+            }
+            // a changed query starts the list over, clears the creator's
+            // refusal, and asks the index again for the finder
+            if let Some(mut highlight) = highlight {
+                highlight.set(0);
+            }
+            if creator.peek().is_some() {
+                creator_notice.set(None);
+            }
+            if finder_open() {
+                let asked = finder_query.peek().clone();
+                finder_typed.call(asked);
+            }
+            true
+        });
+
+    // The grammar's turn over an awake block: Acts and Swallow are the
+    // grammar's, a Pass is the phase-0 keymap's — and what neither takes
+    // falls to the screen. Shift+Escape is acted on and still handed
+    // down, since the note it leaves is the sheet's to close
+    // (adr/2026-08-shift-escape-leaves-the-note.md).
+    let grammar_keys = use_callback({
+        let goal = goal.clone();
+        move |event: KeyboardEvent| -> bool {
+            match grammar.call((event.key(), event.modifiers())) {
+                vim::Outcome::Acts(acts) => {
+                    event.prevent_default();
+                    let leaving = event.key() == Key::Escape
+                        && event.modifiers().shift();
+                    apply_vim.call(acts);
+                    !leaving
+                }
+                vim::Outcome::Swallow => {
+                    event.prevent_default();
+                    // a swallowed key ends a j/k run (a pending operator,
+                    // say) — but a count keeps the goal, since 3j is a run
+                    if !vim.peek().counting() {
+                        goal.set(goal.get().forgotten());
+                    }
+                    true
+                }
+                vim::Outcome::Pass => {
+                    match keymap::action(&event.key(), event.modifiers()) {
+                        Some(action) => {
+                            event.prevent_default();
+                            apply_action.call(action);
+                            true
+                        }
+                        None => false,
+                    }
+                }
+            }
+        }
+    });
+
+    // The window's one keyboard reader, behind the sink at the shell's
+    // root and nothing else (adr/2026-09-the-sink-is-the-one-keyboard-socket.md):
+    // a composing keystroke is the IME's, an open overlay's keys are its
+    // own, the grammar speaks over an awake block the screen hosts, and
+    // what none of them took goes to the screen's rungs — the order the
+    // sink and the panes once composed by bubbling, in one place.
+    let sink_keys = use_callback(move |event: KeyboardEvent| {
+        // never touch a composing keystroke: the IME owns it, and an open
+        // preview means the IME owns it whatever isComposing says (the
+        // spike saw both)
+        let owned = *composing.peek();
+        if owned == Composing::Closing {
+            composing.set(Composing::No);
+        }
+        if event.data().is_composing()
+            || event.key() == Key::Dead
+            || owned != Composing::No
+        {
+            return;
+        }
+        if overlay_keys.call((event.key(), event.modifiers())) {
+            // Tab's default would carry the focus off the sink
+            event.prevent_default();
+            return;
+        }
+        // the pane folds are the logs' and normal mode's: insert mode
+        // keeps every alt character typeable (AltGr), and the grammar
+        // would swallow the chord inert before the screen saw it
+        // (adr/2026-09-alt-h-and-alt-l-fold-the-temporal-panes.md)
+        if vim.peek().mode == vim::Mode::Normal
+            && *screen.peek() == Screen::Logs
+            && let Some(fold) = keymap::fold(&event.key(), event.modifiers())
+        {
+            event.prevent_default();
+            fold_pane.call(fold);
+            return;
+        }
+        // the bare table hosts no note for the editor it may still hold
+        // behind a closed sheet, so the grammar speaks only where the
+        // note is drawn (adr/2026-09-sheet-and-screen-join-the-focus-effect.md)
+        let hosted = *screen.peek() == Screen::Logs || sheet.peek().is_some();
+        if hosted
+            && editor.peek().active().is_some()
+            && grammar_keys.call(event.clone())
+        {
+            return;
+        }
+        // read, then released: a rung may switch the screen
+        let showing = *screen.peek();
+        match showing {
+            Screen::Logs => logs_keys.call(event),
+            Screen::Table => table_keys.call(event),
+        }
+    });
 
     rsx! {
         Chrome {
@@ -4105,6 +4056,67 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             on_table: move |_| go_table.call(()),
             on_logs: move |_| go_logs.call(()),
         }
+        // the window's one keyboard socket, mounted once with the shell and
+        // never again: WebKitGTK attaches its IME only to editable elements,
+        // so French dead keys compose here while the app owns everything
+        // drawn (adr/2026-08-hidden-ime-sink.md), and every key the window
+        // receives — a note's, an overlay's, a screen's — is read from here
+        // by `sink_keys`, since nothing else ever holds the focus
+        // (adr/2026-09-the-sink-is-the-one-keyboard-socket.md)
+        input {
+            class: "ime-sink",
+            autofocus: true,
+            onmounted: move |event| async move {
+                let _ = event.set_focus(true).await;
+            },
+            onkeydown: move |event: KeyboardEvent| sink_keys.call(event),
+            oncompositionstart: move |_| {
+                composing.set(Composing::Open);
+                // the IME writes; normal mode does not
+                if vim.peek().mode == vim::Mode::Insert {
+                    preview.set(Some(String::new()));
+                }
+            },
+            oncompositionupdate: move |event: Event<CompositionData>| {
+                if vim.peek().mode == vim::Mode::Insert {
+                    preview.set(Some(event.data().data()));
+                }
+            },
+            oncompositionend: move |event: Event<CompositionData>| {
+                // WebKitGTK can fire an empty end before
+                // the real one (the spike's transcript), so
+                // the early end commits nothing
+                preview.set(None);
+                let committed = event.data().data();
+                if committed.is_empty() {
+                    composing.set(Composing::Closing);
+                    return;
+                }
+                composing.set(Composing::No);
+                if vim.peek().mode == vim::Mode::Insert {
+                    editor.write().insert_at_caret(&committed);
+                    return;
+                }
+                // outside insert the composition wrote
+                // nothing, so its commit is the only way a
+                // dead key ever reaches the grammar — ^ is
+                // dead on a French layout, and ^ is a
+                // motion. One cluster is one keystroke;
+                // anything longer is a real IME's and stays
+                // discarded whole
+                // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
+                if caret::next_cluster(&committed, 0)
+                    != committed.len()
+                {
+                    return;
+                }
+                if let vim::Outcome::Acts(acts) = grammar
+                    .call((Key::Character(committed), Modifiers::empty()))
+                {
+                    apply_vim.call(acts);
+                }
+            },
+        }
         // the palette floats (position: fixed) over whichever screen is
         // up, so it lives beside the panes rather than inside one
         {
@@ -4114,43 +4126,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     rsx! {
                     div { class: "command-palette",
                         div { class: "palette-head type-label", "commands" }
-                        input {
-                            class: "picker-query",
-                            value: "{palette_query}",
-                            placeholder: "command…",
-                            onmounted: move |event| async move {
-                                let _ = event.set_focus(true).await;
-                            },
-                            oninput: move |event| {
-                                palette_query.set(typed.call((palette_query, event.value())));
-                                palette_highlighted.set(0);
-                            },
-                            onkeydown: move |event: KeyboardEvent| {
-                                let key = event.key();
-                                let last = matches.len().saturating_sub(1);
-                                match key {
-                                    Key::Escape => close_palette.call(()),
-                                    Key::Enter => {
-                                        // no matches: the keystroke does
-                                        // nothing rather than guessing
-                                        if let Some((command, _)) = matches.get(palette_highlighted()) {
-                                            run_command.call((frozen, command.id));
-                                        }
-                                    }
-                                    Key::ArrowDown => {
-                                        palette_highlighted.set((palette_highlighted() + 1).min(last));
-                                    }
-                                    Key::ArrowUp => {
-                                        palette_highlighted.set(palette_highlighted().saturating_sub(1));
-                                    }
-                                    _ => {}
-                                }
-                                // the palette owns every plain key while
-                                // it is open; the ctrl chords still bubble
-                                if !event.modifiers().ctrl() {
-                                    event.stop_propagation();
-                                }
-                            },
+                        div { class: "picker-query",
+                            if palette_query.read().is_empty() {
+                                span { class: "picker-placeholder", "command…" }
+                            } else {
+                                "{palette_query}"
+                            }
                         }
                         if rows.is_empty() {
                             div { class: "picker-empty", "no matching command" }
@@ -4188,79 +4169,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     let step_two = frozen.picked.is_some();
                     let hint = if step_two { "title…" } else { "type…" };
                     let rows = if step_two { Vec::new() } else { matches.clone() };
-                    let keydown_frozen = frozen.clone();
                     rsx! {
                     div { class: "command-palette",
                         div { class: "palette-head type-label", "{head}" }
-                        input {
-                            // controlled, unlike the palette's: the step
-                            // transition clears the query signal, and the
-                            // input must follow it — text left behind would
-                            // become a title no one typed
-                            value: "{creator_query}",
-                            class: "picker-query",
-                            placeholder: "{hint}",
-                            onmounted: move |event| async move {
-                                let _ = event.set_focus(true).await;
-                            },
-                            oninput: move |event| {
-                                creator_query.set(typed.call((creator_query, event.value())));
-                                creator_highlighted.set(0);
-                                creator_notice.set(None);
-                            },
-                            onkeydown: move |event: KeyboardEvent| {
-                                let key = event.key();
-                                let last = matches.len().saturating_sub(1);
-                                match key {
-                                    // escape backs out step by step:
-                                    // title → type list → closed
-                                    Key::Escape => {
-                                        if keydown_frozen.picked.is_some() {
-                                            creator_query.set(String::new());
-                                            shown.write().wrote("");
-                                            creator_highlighted.set(0);
-                                            creator_notice.set(None);
-                                            creator.set(Some(Creator {
-                                                picked: None,
-                                            }));
-                                        } else {
-                                            close_creator.call(());
-                                        }
-                                    }
-                                    Key::Enter => match &keydown_frozen.picked {
-                                        // step 2: the input is the title
-                                        Some(picked) => {
-                                            create_note.call((
-                                                picked.clone(),
-                                                creator_query.peek().clone(),
-                                            ));
-                                        }
-                                        // step 1: no matches, no guess
-                                        None => {
-                                            if let Some(picked) = matches.get(creator_highlighted()) {
-                                                creator_query.set(String::new());
-                                                shown.write().wrote("");
-                                                creator_highlighted.set(0);
-                                                creator.set(Some(Creator {
-                                                    picked: Some(picked.clone()),
-                                                }));
-                                            }
-                                        }
-                                    },
-                                    Key::ArrowDown => {
-                                        creator_highlighted.set((creator_highlighted() + 1).min(last));
-                                    }
-                                    Key::ArrowUp => {
-                                        creator_highlighted.set(creator_highlighted().saturating_sub(1));
-                                    }
-                                    _ => {}
-                                }
-                                // the overlay owns every plain key while it
-                                // is open; the ctrl chords still bubble
-                                if !event.modifiers().ctrl() {
-                                    event.stop_propagation();
-                                }
-                            },
+                        div { class: "picker-query",
+                            if creator_query.read().is_empty() {
+                                span { class: "picker-placeholder", "{hint}" }
+                            } else {
+                                "{creator_query}"
+                            }
                         }
                         if let Some(message) = notice {
                             p { class: "render-error", "{message}" }
@@ -4277,7 +4194,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     let picked = entry.clone();
                                     move |_| {
                                         creator_query.set(String::new());
-                                        shown.write().wrote("");
                                         creator_highlighted.set(0);
                                         creator.set(Some(Creator {
                                             picked: Some(picked.clone()),
@@ -4304,15 +4220,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // overlay's input — a click or an Escape must reach this
                 // div itself, not whatever held focus before it opened
                 // (adr/2026-08-palette-order-and-overlay-placement.md)
-                tabindex: "0",
-                onmounted: move |event| async move {
-                    let _ = event.set_focus(true).await;
-                },
-                onkeydown: move |event: KeyboardEvent| {
-                    if event.key() == Key::Escape {
-                        notices_open.set(false);
-                    }
-                },
                 onclick: move |_| notices_open.set(false),
                 div { class: "palette-head type-label", "notices" }
                 if status.read().history().is_empty() {
@@ -4341,31 +4248,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // the palette's own floating box, reused rather than
                 // repeated — the settings overlay's own class does the same
                 class: "command-palette loops-list",
-                tabindex: "0",
-                onmounted: move |event| async move {
-                    let _ = event.set_focus(true).await;
-                },
-                // the link picker's arrow/enter grammar over a list with no
-                // query field to carry it
-                // (adr/2026-09-loop-lines-open-their-notes.md)
-                onkeydown: move |event: KeyboardEvent| {
-                    let last = loops.read().len().saturating_sub(1);
-                    match event.key() {
-                        Key::Escape => loops_open.set(false),
-                        Key::Enter => {
-                            if let Some(line) = loops.read().get(loops_highlighted()) {
-                                open_loop.call(line.path.clone());
-                            }
-                        }
-                        Key::ArrowDown => {
-                            loops_highlighted.set((loops_highlighted() + 1).min(last));
-                        }
-                        Key::ArrowUp => {
-                            loops_highlighted.set(loops_highlighted().saturating_sub(1));
-                        }
-                        _ => {}
-                    }
-                },
                 onclick: move |_| loops_open.set(false),
                 div { class: "loops-head type-label", "open loops" }
                 for (rank, line) in loops().into_iter().enumerate() {
@@ -4394,15 +4276,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         if settings_open() {
             div {
                 class: "command-palette settings",
-                tabindex: "0",
-                onmounted: move |event| async move {
-                    let _ = event.set_focus(true).await;
-                },
-                onkeydown: move |event: KeyboardEvent| {
-                    if event.key() == Key::Escape {
-                        settings_open.set(false);
-                    }
-                },
                 div { class: "palette-head type-label", "settings" }
                 div { class: "settings-row",
                     span { "theme" }
@@ -4456,43 +4329,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             .into_iter()
                             .cloned()
                             .collect();
-                    let keys_rows = rows.clone();
                     rsx! {
                     div { class: "command-palette",
                         div { class: "palette-head type-label", "open note" }
-                        input {
-                            class: "picker-query",
-                            value: "{switcher_query}",
-                            placeholder: "note…",
-                            onmounted: move |event| async move {
-                                let _ = event.set_focus(true).await;
-                            },
-                            oninput: move |event| {
-                                switcher_query.set(typed.call((switcher_query, event.value())));
-                                switcher_highlighted.set(0);
-                            },
-                            onkeydown: move |event: KeyboardEvent| {
-                                let key = event.key();
-                                let last = keys_rows.len().saturating_sub(1);
-                                match key {
-                                    Key::Escape => close_switcher.call(()),
-                                    Key::Enter => {
-                                        if let Some(entry) = keys_rows.get(switcher_highlighted()) {
-                                            switch_to.call(entry.id.clone());
-                                        }
-                                    }
-                                    Key::ArrowDown => {
-                                        switcher_highlighted.set((switcher_highlighted() + 1).min(last));
-                                    }
-                                    Key::ArrowUp => {
-                                        switcher_highlighted.set(switcher_highlighted().saturating_sub(1));
-                                    }
-                                    _ => {}
-                                }
-                                if !event.modifiers().ctrl() {
-                                    event.stop_propagation();
-                                }
-                            },
+                        div { class: "picker-query",
+                            if switcher_query.read().is_empty() {
+                                span { class: "picker-placeholder", "note…" }
+                            } else {
+                                "{switcher_query}"
+                            }
                         }
                         // an empty list says which emptiness it is: a vault
                         // never navigated has no recent notes, a query can
@@ -4529,41 +4374,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         if finder_open() {
             {
                 let rows = finder_hits();
-                let keys_rows = rows.clone();
                 rsx! {
                 div { class: "command-palette",
                     div { class: "palette-head type-label", "search text" }
-                    input {
-                        class: "picker-query",
-                        value: "{finder_query}",
-                        placeholder: "words…",
-                        onmounted: move |event| async move {
-                            let _ = event.set_focus(true).await;
-                        },
-                        oninput: move |event| finder_typed.call(typed.call((finder_query, event.value()))),
-                        onkeydown: move |event: KeyboardEvent| {
-                            let key = event.key();
-                            let last = keys_rows.len().saturating_sub(1);
-                            match key {
-                                Key::Escape => close_finder.call(()),
-                                Key::Enter => {
-                                    if let Some(hit) = keys_rows.get(finder_highlighted()) {
-                                        close_finder.call(());
-                                        open_loop.call(hit.path.clone());
-                                    }
-                                }
-                                Key::ArrowDown => {
-                                    finder_highlighted.set((finder_highlighted() + 1).min(last));
-                                }
-                                Key::ArrowUp => {
-                                    finder_highlighted.set(finder_highlighted().saturating_sub(1));
-                                }
-                                _ => {}
-                            }
-                            if !event.modifiers().ctrl() {
-                                event.stop_propagation();
-                            }
-                        },
+                    div { class: "picker-query",
+                        if finder_query.read().is_empty() {
+                            span { class: "picker-placeholder", "words…" }
+                        } else {
+                            "{finder_query}"
+                        }
                     }
                     if rows.is_empty() {
                         div { class: "picker-empty",
@@ -4599,25 +4418,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // rendered fragment inside stay the same size at every
                 // window width (adr/2026-08-one-font-size-for-source-and-render.md)
                 style: "{prose_size_style(font_size())}",
-                // the enter-to-create keystroke lands here and the theme/quit
-                // chords bubble on up to the .app root — which is why the pane
-                // takes focus back whenever no block holds it
-                tabindex: "0",
-                autofocus: true,
-                onmounted: {
-                    let pane = pane.clone();
-                    move |event: Event<MountedData>| {
-                        pane.borrow_mut().replace(event.data());
-                        // a return from the table must land focus here
-                        // itself: autofocus fired at document load only, and
-                        // the table pane just unmounted the focus with it
-                        let handle = event.data();
-                        async move {
-                            let _ = handle.set_focus(true).await;
-                        }
-                    }
-                },
-                onkeydown: keyboard,
                 nav {
                     class: "rail",
                     class: if rail_folded() { "folded" },
@@ -4895,22 +4695,6 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 // the sheet nests inside this div, so it inherits the same
                 // custom property
                 style: "{prose_size_style(font_size())}",
-                // switching here unmounted the logs pane and the focus it
-                // held; the chords only arrive by bubbling from inside, so
-                // the pane must ask for focus itself — autofocus fires at
-                // document load only (the textarea's onmounted lesson)
-                tabindex: "0",
-                onmounted: {
-                    let pane = pane.clone();
-                    move |event: Event<MountedData>| {
-                        pane.borrow_mut().replace(event.data());
-                        let handle = event.data();
-                        async move {
-                            let _ = handle.set_focus(true).await;
-                        }
-                    }
-                },
-                onkeydown: table_keys,
                 // the pane's observed size feeds the culling; the observer
                 // fires immediately on mount and on every resize — a
                 // refusal keeps the deterministic default
@@ -5117,48 +4901,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     .into_iter()
                                     .cloned()
                                     .collect();
-                            let keys_rows = rows.clone();
                             rsx! {
                             div { class: "command-palette",
                                 div { class: "palette-head type-label", "filter" }
-                                input {
-                                    class: "picker-query",
-                                    value: "{filter_query}",
-                                    placeholder: "tag or type…",
-                                    onmounted: move |event| async move {
-                                        let _ = event.set_focus(true).await;
-                                    },
-                                    oninput: move |event| {
-                                        filter_query.set(typed.call((filter_query, event.value())));
-                                        filter_highlighted.set(0);
-                                    },
-                                    onkeydown: move |event: KeyboardEvent| {
-                                        let key = event.key();
-                                        let last = keys_rows.len().saturating_sub(1);
-                                        match key {
-                                            Key::Escape => close_filter.call(()),
-                                            Key::Enter => {
-                                                // an empty query clears the
-                                                // active filter — the
-                                                // re-summon-and-clear gesture
-                                                if filter_query.peek().is_empty() {
-                                                    apply_filter.call(None);
-                                                } else if let Some(entry) = keys_rows.get(filter_highlighted()) {
-                                                    apply_filter.call(Some(entry.filter.clone()));
-                                                }
-                                            }
-                                            Key::ArrowDown => {
-                                                filter_highlighted.set((filter_highlighted() + 1).min(last));
-                                            }
-                                            Key::ArrowUp => {
-                                                filter_highlighted.set(filter_highlighted().saturating_sub(1));
-                                            }
-                                            _ => {}
-                                        }
-                                        if !event.modifiers().ctrl() {
-                                            event.stop_propagation();
-                                        }
-                                    },
+                                div { class: "picker-query",
+                                    if filter_query.read().is_empty() {
+                                        span { class: "picker-placeholder", "tag or type…" }
+                                    } else {
+                                        "{filter_query}"
+                                    }
                                 }
                                 if rows.is_empty() {
                                     div { class: "picker-empty", "no matching filter" }
@@ -6082,6 +5833,45 @@ struct Palette {
     undoable: bool,
 }
 
+/// The keys an overlay answers besides its query — the pickers' one
+/// grammar (adr/2026-08-palette-order-and-overlay-placement.md). Every
+/// other bare key typed at an overlay is dropped by `overlay_keys`, so no
+/// reader needs a wildcard arm (adr/2026-09-the-sink-is-the-one-keyboard-socket.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OverlayKey {
+    Escape,
+    Enter,
+    Up,
+    Down,
+}
+
+/// Which of the four an overlay answers this key is, if any.
+fn overlay_key(key: &Key) -> Option<OverlayKey> {
+    match key {
+        Key::Escape => Some(OverlayKey::Escape),
+        Key::Enter => Some(OverlayKey::Enter),
+        Key::ArrowUp => Some(OverlayKey::Up),
+        Key::ArrowDown => Some(OverlayKey::Down),
+        _ => None,
+    }
+}
+
+impl Palette {
+    /// What the palette's registry filter needs to know, frozen at the
+    /// chord — read the same way by the view and by its key reader.
+    fn context(&self) -> palette::Context {
+        palette::Context {
+            block_active: self.block_active,
+            note_open: self.note_open,
+            on_table: self.on_table,
+            sheet_open: self.sheet_open,
+            at_bodies: self.at_bodies,
+            conflict: self.conflict,
+            undoable: self.undoable,
+        }
+    }
+}
+
 /// The open create overlay's fixed half — the `Palette` idiom with one more
 /// fact: which step it stands in. `picked: None` is step 1 (the type list);
 /// `Some` is step 2, where the same input is the title prompt
@@ -6114,6 +5904,17 @@ struct Switcher {
 /// by id and title and capped exactly as the Ctrl+L picker matches, so
 /// one rule covers both places a note is named
 /// (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
+/// The template picker's rows: every template whose name holds the query,
+/// case aside — computed the same way by the view and by its key reader.
+fn template_rows(entries: &[String], query: &str) -> Vec<String> {
+    let needle = query.to_lowercase();
+    entries
+        .iter()
+        .filter(|name| name.to_lowercase().contains(&needle))
+        .cloned()
+        .collect()
+}
+
 fn switcher_rows<'a>(
     frozen: &'a Switcher,
     query: &str,
@@ -6343,7 +6144,8 @@ mod tests {
     const fn day_cell(day: usize) -> usize {
         8 + (day + 1) / 7 + day
     }
-    /// Which keydown listener is the logs pane's (the other is the root).
+    /// Which keydown listener is the sink's — the window's one keyboard
+    /// socket, mounted right after the chrome; the other is the root.
     const LOGS_KEYS: usize = 1;
     /// The ember registers with the chrome ahead of everything in the pane,
     /// so in a vault with open loops it takes click listener 2 and every
@@ -6555,52 +6357,6 @@ mod tests {
             Modifiers::CONTROL,
         );
         assert!(closed.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn leaving_the_note_hands_focus_back_to_the_pane() {
-        // the window's chords only reach the app root by bubbling, so
-        // something inside the app must hold focus; with the cursor always
-        // in an open note, only an empty selection frees the pane to take
-        // it (adr/2026-08-cursor-always-in-the-note.md)
-        let vault = temp_vault();
-        let (mut dom, mutations) =
-            mounted_app(Some(vault.path().to_path_buf()), None);
-        let clicks = listeners(&mutations, "click");
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[0],
-        );
-        let taken = focused.load(Ordering::SeqCst);
-
-        // day 24 has no note: the editor closes and the pane reclaims
-        click(&mut dom, clicks[day_cell(24)]);
-        block_on(settle(&mut dom));
-        assert!(
-            focused.load(Ordering::SeqCst) > taken,
-            "the pane asked for focus once the note left"
-        );
-    }
-
-    #[test]
-    fn the_open_loops_list_takes_focus_so_escape_can_close_it() {
-        // the overlay grabs its own focus on mount now (its own onmounted,
-        // adr/2026-08-palette-order-and-overlay-placement.md) rather than
-        // the shared pane-focus effect, which must stand aside while the
-        // overlay is open or the two would race for the same focus
-        let vault = debt_vault();
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-
-        let mutations = click_for_mutations(&mut dom, clicks[EMBER]);
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[0],
-        );
-        assert!(
-            focused.load(Ordering::SeqCst) > 0,
-            "the loops list asks for focus as it mounts"
-        );
     }
 
     #[test]
@@ -6949,9 +6705,8 @@ mod tests {
         assert!(html.contains(r#"class="logs""#), "{html}");
         assert!(html.contains("icon-logs lit"), "{html}");
 
-        let mutations = click_for_mutations(&mut dom, clicks[CHROME_TABLE]);
+        click(&mut dom, clicks[CHROME_TABLE]);
         // the pane asks for focus on mount, like the textarea it replaces
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
         block_on(settle(&mut dom));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="table""#), "{html}");
@@ -6963,44 +6718,6 @@ mod tests {
         assert!(html.contains(r#"class="logs""#), "{html}");
         assert!(html.contains("icon-logs lit"), "{html}");
         assert!(!html.contains(r#"class="table""#), "{html}");
-    }
-
-    #[test]
-    fn a_chrome_icon_switch_asks_the_pane_for_focus_even_before_it_remounts() {
-        // regression: the shared focus effect never read `screen`, so a
-        // mouse-driven switch with a block still active behind it
-        // (adr/2026-08-cursor-always-in-the-note.md keeps it awake across
-        // the switch) never re-ran the effect at all — only the freshly
-        // mounted pane's own onmounted asked for focus, racing WebKitGTK's
-        // native click-focus with nothing backing it up if that race was
-        // lost (adr/2026-09-sheet-and-screen-join-the-focus-effect.md).
-        // The logs pane's own handle is mounted and never replaced here —
-        // the table pane's own mount is deliberately never delivered — so
-        // any rise in the count can only be the effect reaching for
-        // whatever the pane cell already holds, the instant the screen
-        // changes and ahead of the new pane's own mount.
-        let vault = temp_vault();
-        let (mut dom, mutations) =
-            mounted_app(Some(vault.path().to_path_buf()), None);
-        let clicks = listeners(&mutations, "click");
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[0],
-        );
-        block_on(settle(&mut dom));
-        let before = focused.load(Ordering::SeqCst);
-
-        click(&mut dom, clicks[CHROME_TABLE]);
-        block_on(settle(&mut dom));
-        assert!(
-            dioxus_ssr::render(&dom).contains(r#"class="table""#),
-            "the screen switched"
-        );
-        assert!(
-            focused.load(Ordering::SeqCst) > before,
-            "the effect re-asked for focus on the still-registered pane \
-             handle the moment the screen changed"
-        );
     }
 
     #[test]
@@ -7023,7 +6740,7 @@ mod tests {
             Modifiers::CONTROL,
         );
         assert!(dioxus_ssr::render(&dom).contains(r#"class="logs""#));
-        let mutations = press_for_mutations(
+        press(
             &mut dom,
             keys[LOGS_KEYS],
             Key::Character("1".into()),
@@ -7034,7 +6751,7 @@ mod tests {
 
         // the way back rides the table pane's own keydown; the chord for
         // the screen already stood on stays where it is
-        let table_keys = listeners(&mutations, "keydown")[0];
+        let table_keys = sink_target();
         press(
             &mut dom,
             table_keys,
@@ -7109,19 +6826,14 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
         type_into(&mut dom, input, "table");
-        let mutations = press_for_mutations(
-            &mut dom,
-            palette_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="table""#), "{html}");
 
         // from the table the palette offers the way back and nothing the
         // table cannot answer for — the logs' block is active but hidden
         // behind the screen, so the caret commands hide with it
-        let table_keys = listeners(&mutations, "keydown")[0];
+        let table_keys = sink_target();
         let (input, palette_keys) = open_palette(&mut dom, table_keys);
         // a second Ctrl+P while it is open changes nothing
         press(
@@ -7673,98 +7385,6 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_sheet_with_no_active_block_hands_focus_to_the_pane() {
-        // regression: the effect never read `sheet`, so `editing` alone
-        // picked the target. Closing this sheet reactivates the logs'
-        // daily note, which wakes with its own last block active
-        // (adr/2026-08-cursor-always-in-the-note.md) — but the table
-        // screen with no sheet open never mounts a sink for it
-        // (`blocks_view` only mounts on the logs screen or behind an open
-        // sheet), so the old code aimed at a sink nothing had ever mounted
-        // and focus was stranded on `<body>`, the table pane's own chords
-        // (Ctrl+2, Ctrl+D, Ctrl+P) going dead
-        // (adr/2026-09-sheet-and-screen-join-the-focus-effect.md).
-        let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-
-        let mutations = click_for_mutations(&mut dom, clicks[CHROME_TABLE]);
-        let downs = listeners(&mutations, "mousedown");
-        let (pane_target, cards) = (downs[0], downs[1..].to_vec());
-        let keys = listeners(&mutations, "keydown")[0];
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[0],
-        );
-
-        // the sabotaged lookup opens the sheet over a closed editor: no
-        // active block to reactivate the sink with
-        let saboteur =
-            rusqlite::Connection::open(vault.path().join(".index/index.db"))
-                .expect("a second connection opens");
-        saboteur
-            .execute("DELETE FROM notes WHERE id = 'alpha'", [])
-            .expect("the sabotage succeeds");
-        open_sheet_on(&mut dom, pane_target, cards[0]);
-        block_on(settle(&mut dom));
-        assert!(
-            !dioxus_ssr::render(&dom).contains("block-active"),
-            "the failed lookup leaves nothing active: {}",
-            dioxus_ssr::render(&dom)
-        );
-
-        let before = focused.load(Ordering::SeqCst);
-        // Shift+Escape at the pane's own keydown closes the sheet directly,
-        // the same chord `plain_escape_leaves_the_sheet_open_and_shift_escape_closes_it`
-        // exercises
-        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
-        block_on(settle(&mut dom));
-        assert!(
-            !dioxus_ssr::render(&dom).contains(r#"class="sheet""#),
-            "the sheet closed"
-        );
-        assert!(
-            focused.load(Ordering::SeqCst) > before,
-            "the pane asked for focus once the sheet closed, even though \
-             the reopened daily note came back active"
-        );
-    }
-
-    #[test]
-    fn a_sheet_with_an_active_block_keeps_the_sink_focused() {
-        // the fix's other half: a sheet that does hold an active block
-        // must keep routing to the sink — the table screen mounts one for
-        // exactly as long as the sheet stands
-        // (adr/2026-09-sheet-and-screen-join-the-focus-effect.md)
-        let vault = temp_vault();
-        let (mut dom, mutations) =
-            mounted_app(Some(vault.path().to_path_buf()), None);
-        let clicks = listeners(&mutations, "click");
-        // registration order established by
-        // `the_sink_takes_focus_back_when_an_overlay_closes`: the pane,
-        // then the sink
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[1],
-        );
-        block_on(settle(&mut dom));
-
-        let (pane, cards) = table_targets(&mut dom, &clicks);
-        let before = focused.load(Ordering::SeqCst);
-        open_sheet_on(&mut dom, pane, cards[0]);
-        block_on(settle(&mut dom));
-        assert!(
-            dioxus_ssr::render(&dom).contains("block-active"),
-            "the sheet opens with its last block awake: {}",
-            dioxus_ssr::render(&dom)
-        );
-        assert!(
-            focused.load(Ordering::SeqCst) > before,
-            "a sheet with an active block still routes focus to the sink"
-        );
-    }
-
-    #[test]
     fn the_sheet_survives_its_card_vanishing() {
         let vault = temp_vault();
         let (mut dom, clicks, sender) =
@@ -7810,6 +7430,13 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="sheet""#), "{html}");
         assert!(html.contains("sheet: no note has the id alpha"), "{html}");
+
+        // leaving the closed editor the failed lookup produced resolves it
+        // too (adr/2026-09-index-notices-resolve-on-a-good-lookup.md)
+        press(&mut dom, sink_target(), Key::Escape, Modifiers::SHIFT);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="sheet""#), "the sheet left: {html}");
+        assert!(!html.contains("sheet: no note has the id alpha"), "{html}");
     }
 
     /// A good lookup resolves the notice its predecessor left standing —
@@ -8105,13 +7732,7 @@ mod tests {
 
         std::fs::remove_dir(vault.path().join(".index/index.db"))
             .expect("the sabotage lifts");
-        let mutations = press_for_mutations(
-            &mut dom,
-            block_keys,
-            ctrl_l(),
-            Modifiers::CONTROL,
-        );
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        press(&mut dom, block_keys, ctrl_l(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
             !html.contains("notice-warning"),
@@ -8522,12 +8143,7 @@ mod tests {
 
         // inside `[[2026-07-22]]`
         place_caret(&mut dom, block, &hit, 22);
-        let landed = press_for_mutations(
-            &mut dom,
-            keys,
-            Key::Enter,
-            Modifiers::CONTROL,
-        );
+        press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="logs""#), "{html}");
         assert!(!html.contains(r#"class="sheet""#), "{html}");
@@ -8538,7 +8154,7 @@ mod tests {
 
         // regression (final review): `select` pushes the sheet it closes,
         // so the visit log names beta, not the logs selection it stood over
-        let logs_keys = listeners(&landed, "keydown")[0];
+        let logs_keys = sink_target();
         let (_input, _picker_keys, _) = open_switcher(&mut dom, logs_keys);
         assert_eq!(
             picker_ids(&dom),
@@ -9299,7 +8915,10 @@ mod tests {
         );
         // the renderer announces the caret's mount; the scroll-into-view
         // asks and the headless refusal is absorbed
-        mount(&mut dom, listeners(&mutations, "mounted")[2]);
+        let caret = *listeners(&mutations, "mounted")
+            .last()
+            .expect("the caret mounts");
+        mount(&mut dom, caret);
         block_on(settle(&mut dom));
     }
 
@@ -9319,8 +8938,8 @@ mod tests {
         assert!(html.contains("block-active"), "born editing: {html}");
 
         let mutations = click_for_mutations(&mut dom, clicks[BLOCK_LINK]);
-        // the renderer announces the mount and the textarea asks for focus;
-        // the fake backing refuses, which is all the handler has to absorb
+        // the renderer announces the caret's mount; the fake backing
+        // absorbs the scroll it asks for
         mount(&mut dom, listeners(&mutations, "mounted")[0]);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("2026-07-22"), "the link line source: {html}");
@@ -10201,27 +9820,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_key_at_the_table_pane_over_an_open_sheet_is_read_as_the_sink_would()
-     {
-        let vault = temp_vault();
-        let (mut dom, clicks, _) = hit_app(Some(vault.path().to_path_buf()));
-        let (pane, cards) = table_targets(&mut dom, &clicks);
-        let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        sheet_heading_targets(&mut dom, &opened);
-
-        // the sheet's block is awake; A then a letter at the table pane
-        // land in the note the way the sink would read them
-        press(
-            &mut dom,
-            pane,
-            Key::Character("A".into()),
-            Modifiers::empty(),
-        );
-        type_keys(&mut dom, pane, "!");
-        assert_eq!(source_of(&dom), "= alpha!");
-    }
-
-    #[test]
     fn gg_and_g_carry_the_caret_across_blocks() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
@@ -10692,24 +10290,26 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
         // / opens the one-line prompt over the active heading
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("/".into()),
             Modifiers::empty(),
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"placeholder="/""#), "{html}");
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        assert!(html.contains(r#"picker-placeholder">/<"#), "{html}");
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
 
         // the pattern lives in the rendered preamble: enter jumps there,
         // waking the block (adr/2026-08-search-lands-through-place.md)
         type_into(&mut dom, prompt_input, "templates");
         press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(r#"placeholder="/""#), "the prompt closed");
+        assert!(
+            !html.contains(r#"picker-placeholder">/<"#),
+            "the prompt closed"
+        );
         assert!(
             source_of(&dom).contains("#import"),
             "the preamble woke as source: {}",
@@ -10725,19 +10325,21 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("/".into()),
             Modifiers::empty(),
         );
-        let prompt_keys = listeners(&opened, "keydown")[0];
+        let prompt_keys = sink_target();
 
         // neither Escape nor Enter: the prompt's own match falls to its
         // wildcard arm and still swallows the key
         press(&mut dom, prompt_keys, Key::ArrowLeft, Modifiers::empty());
+        // the prompt lists nothing, so the arrows land on nothing either
+        press(&mut dom, prompt_keys, Key::ArrowUp, Modifiers::empty());
         assert!(
-            dioxus_ssr::render(&dom).contains(r#"placeholder="/""#),
+            dioxus_ssr::render(&dom).contains(r#"picker-placeholder">/<"#),
             "an unrelated key leaves the prompt open"
         );
 
@@ -10757,7 +10359,7 @@ mod tests {
 
         press(&mut dom, prompt_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(r#"placeholder="/""#), "{html}");
+        assert!(!html.contains(r#"picker-placeholder">/<"#), "{html}");
         assert_eq!(source_of(&dom), before, "nothing moved");
 
         // n walks on afterwards from the grammar's stored pattern — with
@@ -10771,14 +10373,14 @@ mod tests {
         assert_eq!(source_of(&dom), before);
 
         // a committed pattern the note lacks jumps nowhere either
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character("/".into()),
             Modifiers::empty(),
         );
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
         type_into(&mut dom, prompt_input, "zzz");
         press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
         assert_eq!(source_of(&dom), before);
@@ -12616,59 +12218,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_sink_takes_focus_back_when_an_overlay_closes() {
-        let vault = temp_vault();
-        let (mut dom, mutations) =
-            mounted_app(Some(vault.path().to_path_buf()), None);
-        let keys = listeners(&mutations, "keydown");
-        // registration order: the pane, then the sink, then the caret span
-        // — the sink is the one that also holds a keydown listener
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[1],
-        );
-        block_on(settle(&mut dom));
-        let before = focused.load(Ordering::SeqCst);
-
-        // the picker's input owns the focus while it is up; closing hands
-        // it back to the sink through the focus effect
-        let (_, picker_keys) = open_picker(&mut dom, keys[LOGS_KEYS]);
-        press(&mut dom, picker_keys, Key::Escape, Modifiers::empty());
-        block_on(settle(&mut dom));
-        assert!(
-            focused.load(Ordering::SeqCst) > before,
-            "the sink asked for focus once the picker closed"
-        );
-    }
-
-    #[test]
-    fn the_sink_takes_focus_back_when_the_settings_overlay_closes() {
-        // regression: `settings_open` (and `notices_open`) were missing
-        // from the focus effect's overlay set, so closing the overlay left
-        // the focus stranded on <body> — a dead keyboard, with the typed
-        // keystrokes replaying against the widget on the next click
-        let vault = temp_vault();
-        let (mut dom, mutations) =
-            mounted_app(Some(vault.path().to_path_buf()), None);
-        let keys = listeners(&mutations, "keydown");
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[1],
-        );
-        block_on(settle(&mut dom));
-        let before = focused.load(Ordering::SeqCst);
-
-        let (overlay_keys, _) =
-            open_settings_overlay(&mut dom, keys[LOGS_KEYS]);
-        press(&mut dom, overlay_keys, Key::Escape, Modifiers::empty());
-        block_on(settle(&mut dom));
-        assert!(
-            focused.load(Ordering::SeqCst) > before,
-            "the sink asked for focus once the settings overlay closed"
-        );
-    }
-
     // -- the scale chain jumps -----------------------------------------------
 
     #[test]
@@ -12816,6 +12365,9 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
+        // the caret owns the arrows while a block is awake
+        // (adr/2026-08-cursor-always-in-the-note.md): put it away first
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::SHIFT);
         press(
             &mut dom,
             keys[LOGS_KEYS],
@@ -13372,7 +12924,6 @@ mod tests {
             Key::Enter,
             Modifiers::empty(),
         );
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
         // the rows are the dispatch's only click listeners, in list order
         click(&mut dom, listeners(&opened, "click")[0]);
         let html = dioxus_ssr::render(&dom);
@@ -13465,14 +13016,14 @@ mod tests {
             open_template_picker(&mut dom, keys[LOGS_KEYS]);
         // the chord bubbles through the overlay to the pane: the screen
         // switches and the picker, its input about to unmount, closes
-        let mutations = press_for_mutations(
+        press(
             &mut dom,
             picker_keys,
             Key::Character("1".into()),
             Modifiers::CONTROL,
         );
         assert!(picker_ids(&dom).is_empty());
-        let table_keys = listeners(&mutations, "keydown")[0];
+        let table_keys = sink_target();
 
         // and the mirror: the picker the table now hosts leaves the same
         // way (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md)
@@ -13499,13 +13050,13 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let mutations = press_for_mutations(
+        press(
             &mut dom,
             keys[LOGS_KEYS],
             Key::Character("1".into()),
             Modifiers::CONTROL,
         );
-        let table_keys = listeners(&mutations, "keydown")[0];
+        let table_keys = sink_target();
         assert!(dioxus_ssr::render(&dom).contains(r#"class="table""#));
 
         let (_input, picker_keys) = open_template_picker(&mut dom, table_keys);
@@ -13529,7 +13080,7 @@ mod tests {
             Modifiers::empty(),
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"value="c""#), "{html}");
+        assert!(html.contains(r#"picker-query">c<"#), "{html}");
         assert_eq!(picker_ids(&dom), ["capture", "concept"]);
 
         // and Escape closes it where it stands, the logs' own gesture
@@ -13569,12 +13120,7 @@ mod tests {
 
         let (input, picker_keys) = open_template_picker(&mut dom, table_keys);
         type_into(&mut dom, input, "daily");
-        let landed = press_for_mutations(
-            &mut dom,
-            picker_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains(r#"class="sheet""#), "sheet gone: {html}");
         assert!(html.contains(r#"class="logs""#), "the screen came: {html}");
@@ -13586,7 +13132,7 @@ mod tests {
         // the sheet went onto the visit log on its way out: Escape out of
         // a template lands on the logs selection, so the Ctrl+O switcher's
         // recent rows are the only way back to the card
-        let logs_keys = listeners(&landed, "keydown")[0];
+        let logs_keys = sink_target();
         let (_input, _picker_keys, _) = open_switcher(&mut dom, logs_keys);
         assert_eq!(picker_ids(&dom), ["alpha"]);
     }
@@ -14419,8 +13965,7 @@ mod tests {
         );
         assert!(source_of(&dom).starts_with("[][["), "{}", source_of(&dom));
 
-        let mutations =
-            press_for_mutations(&mut dom, keys, bracket(), Modifiers::empty());
+        press(&mut dom, keys, bracket(), Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-picker"), "the second summons: {html}");
         assert!(
@@ -14428,9 +13973,8 @@ mod tests {
             "the empty pair is taken back out: {}",
             source_of(&dom)
         );
-        let input = listeners(&mutations, "input")[0];
-        let picker_keys = listeners(&mutations, "keydown")[0];
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        let input = sink_target();
+        let picker_keys = sink_target();
         type_into(&mut dom, input, "summer");
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         assert!(
@@ -15290,7 +14834,6 @@ mod tests {
             ctrl_p(),
             Modifiers::CONTROL,
         );
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
         // alphabetized, `toggle theme` is the last of the 24 visible rows
         click(&mut dom, listeners(&mutations, "click")[23]);
         let html = dioxus_ssr::render(&dom);
@@ -15327,20 +14870,14 @@ mod tests {
         let (input, palette_keys) = open_palette(&mut dom, keys);
 
         type_into(&mut dom, input, "insert");
-        let mutations = press_for_mutations(
-            &mut dom,
-            palette_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("link-picker"), "{html}");
         assert!(!html.contains("command-palette"), "{html}");
 
         // the picker works exactly as if Ctrl+L had opened it
-        let picker_input = listeners(&mutations, "input")[0];
-        let picker_keys = listeners(&mutations, "keydown")[0];
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
+        let picker_input = sink_target();
+        let picker_keys = sink_target();
         type_into(&mut dom, picker_input, "summer");
         press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
         assert!(
@@ -16026,39 +15563,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_palette_and_the_pane_takes_focus_back() {
-        let vault = temp_vault();
-        let (mut dom, mutations) =
-            mounted_app(Some(vault.path().to_path_buf()), None);
-        let keys = listeners(&mutations, "keydown")[LOGS_KEYS];
-        let clicks = listeners(&mutations, "click");
-        let focused = mount_counting_focus(
-            &mut dom,
-            listeners(&mutations, "mounted")[0],
-        );
-        // an empty selection: the editor closes, the pane holds the chords
-        // — the one state where no textarea competes for focus
-        click(&mut dom, clicks[day_cell(24)]);
-
-        let (_, palette_keys) = open_palette(&mut dom, keys);
-        block_on(settle(&mut dom));
-        // while the palette is up, the pane leaves focus to its input
-        let up = focused.load(Ordering::SeqCst);
-
-        press(&mut dom, palette_keys, Key::Escape, Modifiers::empty());
-        let html = dioxus_ssr::render(&dom);
-        assert!(
-            !html.contains("command-palette"),
-            "escape closed it: {html}"
-        );
-        block_on(settle(&mut dom));
-        assert!(
-            focused.load(Ordering::SeqCst) > up,
-            "the pane asked for focus once the palette closed"
-        );
-    }
-
-    #[test]
     fn escape_over_a_block_leaves_the_caret_where_the_palette_found_it() {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
@@ -16282,7 +15786,7 @@ mod tests {
         // the sheet closed under it, the frozen command runs into nothing
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "arrange");
-        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
+        click(&mut dom, clicks[CHROME_LOGS]);
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         block_on(settle(&mut dom));
         let saved =
@@ -16323,6 +15827,8 @@ mod tests {
             Key::Character("x".into()),
             Modifiers::empty(),
         );
+        assert_eq!(picker_ids(&dom).len(), 0, "x joined the query");
+        press(&mut dom, filter_keys, Key::Backspace, Modifiers::empty());
         press(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
         press(&mut dom, filter_keys, ctrl_f(), Modifiers::CONTROL);
         assert_eq!(picker_ids(&dom).len(), 9, "still the one overlay");
@@ -16372,7 +15878,6 @@ mod tests {
         let mutations =
             press_for_mutations(&mut dom, keys, ctrl_f(), Modifiers::CONTROL);
         let rows = listeners(&mutations, "click");
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
         click(&mut dom, rows[0]);
         assert!(dioxus_ssr::render(&dom).contains("filter-label"));
 
@@ -16785,7 +16290,7 @@ mod tests {
         open_sheet_on(&mut dom, pane, cards[0]);
         assert!(dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
 
-        let landed = press_for_mutations(
+        press(
             &mut dom,
             keys,
             Key::Character("d".into()),
@@ -16800,7 +16305,7 @@ mod tests {
 
         // the remounted logs pane's own keydown is in the landing's
         // mutations — the pane registers before the sink
-        let logs_keys = listeners(&landed, "keydown")[0];
+        let logs_keys = sink_target();
         let (_input, _picker_keys, _) = open_switcher(&mut dom, logs_keys);
         assert_eq!(
             picker_ids(&dom),
@@ -17355,65 +16860,22 @@ mod tests {
             Key::Character("c".into()),
             Key::Character("x".into()),
             Key::Backspace,
-            Key::Enter,
         ] {
             press(&mut dom, sink, key, Modifiers::empty());
         }
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"value="c""#), "{html}");
+        assert!(html.contains(r#"picker-query">c<"#), "{html}");
         assert!(html.contains(">new note<"), "still step one: {html}");
         assert_eq!(
             picker_ids(&dom),
             vec!["source", "concept", "claim", "project"]
         );
+        // Enter is the overlay's too — picked, not dropped
+        press(&mut dom, sink, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">new source<"), "step two: {html}");
         block_on(settle(&mut dom));
         assert_eq!(source_of(&dom), before, "the note behind never moved");
-    }
-
-    /// The relay's letters reach the field by a patch, and a key typed at
-    /// the field before that patch lands is reported on a stale field: as
-    /// itself alone, or on top of a type name the step change already
-    /// cleared. Either way the report is a delta, never the query
-    /// (adr/2026-09-an-input-event-is-a-delta-against-what-the-field-showed.md)
-    #[test]
-    fn a_key_the_field_reports_on_a_stale_value_is_read_as_a_delta() {
-        let vault = temp_vault();
-        let (mut dom, clicks, keys, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_link(&mut dom, &clicks);
-        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
-        for letter in ["c", "o", "n", "c"] {
-            press(
-                &mut dom,
-                sink,
-                Key::Character(letter.into()),
-                Modifiers::empty(),
-            );
-        }
-        // the field never saw the four letters: it reports the fifth alone
-        type_into(&mut dom, input, "e");
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"value="conce""#), "{html}");
-        // two patches landed before the next key, all of them before the last
-        type_into(&mut dom, input, "cop");
-        type_into(&mut dom, input, "concept");
-        assert_eq!(picker_ids(&dom), vec!["concept"]);
-
-        // the step change clears the query while the field still shows the
-        // type name under the title's first letter
-        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
-        type_into(&mut dom, input, "conceptt");
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"value="t""#), "{html}");
-        type_into(&mut dom, input, "titled before focus");
-        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
-        assert!(
-            vault
-                .path()
-                .join("permanent/titled-before-focus.typ")
-                .exists(),
-            "the title is what was typed after the step change"
-        );
     }
 
     #[test]
@@ -17429,7 +16891,7 @@ mod tests {
             Modifiers::empty(),
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"value="n""#), "{html}");
+        assert!(html.contains(r#"picker-query">n<"#), "{html}");
         let labels = palette_labels(&dom);
         assert!(!labels.is_empty());
         assert!(labels.iter().all(|label| label.contains('n')), "{labels:?}");
@@ -17440,13 +16902,13 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let mutations = press_for_mutations(
+        press(
             &mut dom,
             keys[LOGS_KEYS],
             Key::Character("1".into()),
             Modifiers::CONTROL,
         );
-        let table_keys = listeners(&mutations, "keydown")[0];
+        let table_keys = sink_target();
         open_creator(&mut dom, table_keys);
         press(
             &mut dom,
@@ -17454,7 +16916,7 @@ mod tests {
             Key::Character("i".into()),
             Modifiers::empty(),
         );
-        assert!(dioxus_ssr::render(&dom).contains(r#"value="i""#));
+        assert!(dioxus_ssr::render(&dom).contains(r#"picker-query">i<"#));
         assert_eq!(picker_ids(&dom), vec!["organisation", "claim", "idea"]);
     }
 
@@ -17596,7 +17058,7 @@ mod tests {
         assert!(html.contains("title…"), "the input prompts for one: {html}");
         assert!(picker_ids(&dom).is_empty(), "no rows in step 2: {html}");
         // the controlled input emptied with its signal
-        assert!(!html.contains(r#"value="concept""#), "{html}");
+        assert!(!html.contains(r#"picker-query">concept<"#), "{html}");
     }
 
     #[test]
@@ -17611,7 +17073,6 @@ mod tests {
             Modifiers::CONTROL,
         );
         let rows = listeners(&mutations, "click");
-        mount(&mut dom, listeners(&mutations, "mounted")[0]);
         // the eight types in picker order: concept is the fourth row
         click(&mut dom, rows[3]);
         let html = dioxus_ssr::render(&dom);
@@ -18346,9 +17807,10 @@ mod tests {
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "delete");
         assert_eq!(palette_labels(&dom), vec!["delete note"]);
-        // …then the sheet closes under it — the pane's shift+escape, reached
-        // directly here, is the race the guard below defends against
-        press(&mut dom, keys, Key::Escape, Modifiers::SHIFT);
+        // …then the sheet closes under it — the chrome's logs icon, which
+        // the mouse still reaches with the palette up, is the race the
+        // guard below defends against
+        click(&mut dom, clicks[CHROME_LOGS]);
         assert!(!dioxus_ssr::render(&dom).contains(r#"class="sheet""#));
         assert!(
             dioxus_ssr::render(&dom).contains("command-palette"),
@@ -19396,8 +18858,7 @@ mod tests {
     ) -> (ElementId, Vec<ElementId>, ElementId) {
         let mutations = click_for_mutations(dom, clicks[CHROME_TABLE]);
         let downs = listeners(&mutations, "mousedown");
-        let keys = listeners(&mutations, "keydown")[0];
-        (downs[0], downs[1..].to_vec(), keys)
+        (downs[0], downs[1..].to_vec(), sink_target())
     }
 
     /// Clicks a card open: a press and release on the same point, handing
@@ -19435,22 +18896,36 @@ mod tests {
         })
     }
 
-    /// Fires an input event carrying the textarea's whole new value — the
-    /// shape the oninput handler reads through `event.value()` — without
-    /// driving the debounced autosave, leaving the buffer dirty on purpose.
+    /// What the open overlay's query line shows — nothing while the
+    /// placeholder stands.
+    fn shown_query(dom: &VirtualDom) -> String {
+        dioxus_ssr::render(dom)
+            .split(r#"<div class="picker-query">"#)
+            .nth(1)
+            .and_then(|rest| rest.split("</div>").next())
+            .filter(|shown| !shown.starts_with("<span"))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Types a query the way the window receives one: a keydown per
+    /// character at the sink, which an open overlay reads as its own
+    /// (adr/2026-09-the-sink-is-the-one-keyboard-socket.md).
     fn type_into(dom: &mut VirtualDom, target: ElementId, text: &str) {
-        with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedFormData::new(text.to_string(), Vec::new()),
-            )));
-            dom.runtime().handle_event(
-                "input",
-                Event::new(data, true),
+        // the input event this replaced carried the field's whole value:
+        // what the line shows is taken back first, so a test still names
+        // the query it wants rather than the keys that get there
+        for _ in 0..shown_query(dom).chars().count() {
+            press(dom, target, Key::Backspace, Modifiers::empty());
+        }
+        for character in text.chars() {
+            press(
+                dom,
                 target,
+                Key::Character(character.to_string()),
+                Modifiers::empty(),
             );
-            dom.process_events();
-            dom.render_immediate_to_vec();
-        });
+        }
     }
 
     /// The picker's rows, in order — the assertions want the list itself,
@@ -19574,17 +19049,16 @@ mod tests {
 
     /// Opens whichever overlay the chord summons and returns its input's
     /// (input, keydown) targets — `open_palette`, generalized.
+    /// Opens an overlay by its chord. Every overlay reads its keys from the
+    /// sink, so the pair an opener returns — where to type, where to press
+    /// — is the sink twice; the tests keep naming the two roles.
     fn open_overlay(
         dom: &mut VirtualDom,
         keys: ElementId,
         chord: Key,
     ) -> (ElementId, ElementId) {
-        let mutations =
-            press_for_mutations(dom, keys, chord, Modifiers::CONTROL);
-        let inputs = listeners(&mutations, "input");
-        let keydowns = listeners(&mutations, "keydown");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (inputs[0], keydowns[0])
+        press(dom, keys, chord, Modifiers::CONTROL);
+        (sink_target(), sink_target())
     }
 
     /// Opens the create overlay with Ctrl+N and returns its input's (input,
@@ -19595,12 +19069,7 @@ mod tests {
         dom: &mut VirtualDom,
         keys: ElementId,
     ) -> (ElementId, ElementId) {
-        let mutations =
-            press_for_mutations(dom, keys, ctrl_n(), Modifiers::CONTROL);
-        let inputs = listeners(&mutations, "input");
-        let keydowns = listeners(&mutations, "keydown");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (inputs[0], keydowns[0])
+        open_overlay(dom, keys, ctrl_n())
     }
 
     /// `rendered_app` with a fixed viewport injected — the harness for the
@@ -19634,41 +19103,17 @@ mod tests {
         dom: &mut VirtualDom,
         keys: ElementId,
     ) -> (ElementId, ElementId) {
-        let mutations = press_for_mutations(
+        press(
             dom,
             keys,
             Key::Character("F".into()),
             Modifiers::CONTROL | Modifiers::SHIFT,
         );
-        let inputs = listeners(&mutations, "input");
-        let keydowns = listeners(&mutations, "keydown");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (inputs[0], keydowns[0])
+        (sink_target(), sink_target())
     }
 
     /// `type_into`, handing back the mutations the input caused — the
     /// finder's rows mount on them.
-    fn type_for_mutations(
-        dom: &mut VirtualDom,
-        target: ElementId,
-        text: &str,
-    ) -> Mutations {
-        with_reactor(|| {
-            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
-                SerializedFormData::new(text.to_string(), Vec::new()),
-            )));
-            dom.runtime().handle_event(
-                "input",
-                Event::new(data, true),
-                target,
-            );
-            dom.process_events();
-            let mutations = dom.render_immediate_to_vec();
-            note_sink(&mutations);
-            mutations
-        })
-    }
-
     #[test]
     fn ctrl_shift_f_finds_a_word_past_the_preamble_and_enter_opens_the_sheet()
     {
@@ -19693,13 +19138,8 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert_eq!(picker_ids(&dom), ["beta"], "{html}");
         assert!(html.contains("quick brown fox"), "the snippet: {html}");
-        // a key the finder has no arm for is absorbed by the input
-        press(
-            &mut dom,
-            finder_keys,
-            Key::Character("x".into()),
-            Modifiers::empty(),
-        );
+        // a key the finder has no arm for is dropped, never the grammar's
+        press(&mut dom, finder_keys, Key::ArrowLeft, Modifiers::empty());
         assert_eq!(picker_ids(&dom), ["beta"]);
         // a note with no heading is listed under its stem
         std::fs::write(
@@ -19753,7 +19193,13 @@ mod tests {
 
         // the same landing from a click on the row, and Escape closes
         let (input, finder_keys) = open_finder(&mut dom, keys[LOGS_KEYS]);
-        let typed = type_for_mutations(&mut dom, input, "zebra");
+        type_into(&mut dom, input, "zebr");
+        let typed = press_for_mutations(
+            &mut dom,
+            input,
+            Key::Character("a".into()),
+            Modifiers::empty(),
+        );
         let rows = listeners(&typed, "click");
         click(&mut dom, rows[0]);
         assert!(!dioxus_ssr::render(&dom).contains(">search text<"));
@@ -19837,11 +19283,8 @@ mod tests {
     ) -> (ElementId, ElementId, Vec<ElementId>) {
         let mutations =
             press_for_mutations(dom, keys, ctrl_o(), Modifiers::CONTROL);
-        let inputs = listeners(&mutations, "input");
-        let keydowns = listeners(&mutations, "keydown");
         let rows = listeners(&mutations, "click");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (inputs[0], keydowns[0], rows)
+        (sink_target(), sink_target(), rows)
     }
 
     /// Opens the palette with Ctrl+P and returns its input's (input,
@@ -19850,12 +19293,7 @@ mod tests {
         dom: &mut VirtualDom,
         keys: ElementId,
     ) -> (ElementId, ElementId) {
-        let mutations =
-            press_for_mutations(dom, keys, ctrl_p(), Modifiers::CONTROL);
-        let inputs = listeners(&mutations, "input");
-        let keydowns = listeners(&mutations, "keydown");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (inputs[0], keydowns[0])
+        open_overlay(dom, keys, ctrl_p())
     }
 
     /// Runs "edit template" from the palette and returns the template
@@ -19867,16 +19305,8 @@ mod tests {
     ) -> (ElementId, ElementId) {
         let (input, palette_keys) = open_palette(dom, keys);
         type_into(dom, input, "edit template");
-        let opened = press_for_mutations(
-            dom,
-            palette_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
-        let inputs = listeners(&opened, "input");
-        let keydowns = listeners(&opened, "keydown");
-        mount(dom, listeners(&opened, "mounted")[0]);
-        (inputs[0], keydowns[0])
+        press(dom, palette_keys, Key::Enter, Modifiers::empty());
+        (sink_target(), sink_target())
     }
 
     /// Opens the settings overlay with Ctrl+, and returns its own keydown
@@ -19894,10 +19324,8 @@ mod tests {
             Key::Character(",".into()),
             Modifiers::CONTROL,
         );
-        let keydown = listeners(&mutations, "keydown")[0];
         let clicks = listeners(&mutations, "click");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (keydown, clicks)
+        (sink_target(), clicks)
     }
 
     /// Opens the notices overlay through the palette's "notices" command
@@ -19917,10 +19345,8 @@ mod tests {
             Key::Enter,
             Modifiers::empty(),
         );
-        let keydown = listeners(&mutations, "keydown")[0];
         let click = listeners(&mutations, "click")[0];
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (keydown, click)
+        (sink_target(), click)
     }
 
     /// Opens the loops overlay through the ember and returns its own
@@ -19937,12 +19363,10 @@ mod tests {
         ember: ElementId,
     ) -> (ElementId, ElementId, Vec<ElementId>) {
         let mutations = click_for_mutations(dom, ember);
-        let keydown = listeners(&mutations, "keydown")[0];
         let clicks = listeners(&mutations, "click");
         let click = clicks[0];
         let rows = clicks[1..].to_vec();
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (keydown, click, rows)
+        (sink_target(), click, rows)
     }
 
     /// The constellation svg's inner markup — the chrome icons also hold
@@ -19973,12 +19397,7 @@ mod tests {
         dom: &mut VirtualDom,
         keys: ElementId,
     ) -> (ElementId, ElementId) {
-        let mutations =
-            press_for_mutations(dom, keys, ctrl_l(), Modifiers::CONTROL);
-        let inputs = listeners(&mutations, "input");
-        let keydowns = listeners(&mutations, "keydown");
-        mount(dom, listeners(&mutations, "mounted")[0]);
-        (inputs[0], keydowns[0])
+        open_overlay(dom, keys, ctrl_l())
     }
 
     /// The logs pane's own targets, for the tests that press a key with no
@@ -19992,10 +19411,8 @@ mod tests {
         // the fallback must be an element *inside* the pane — a keydown
         // only reaches the pane handler by bubbling, and the chrome icons
         // at the front of `clicks` sit outside it
-        let mutations = click_for_mutations(dom, clicks[RAIL_DAY_23]);
-        let keys = listeners(&mutations, "keydown");
-        let target = *keys.last().unwrap_or(&clicks[CAL_BACK]);
-        (clicks[CAL_BACK], target, target)
+        click(dom, clicks[RAIL_DAY_23]);
+        (clicks[CAL_BACK], sink_target(), sink_target())
     }
 
     /// Makes `Index::open` fail for every later read: the database path
@@ -20065,10 +19482,7 @@ mod tests {
     /// the raised card's and aside's mousedowns register ahead of the
     /// block's (adr/2026-08-cursor-always-in-the-note.md).
     fn sheet_block_targets(opened: &Mutations) -> (ElementId, ElementId) {
-        (
-            listeners(opened, "mousedown")[2],
-            listeners(opened, "keydown")[0],
-        )
+        (listeners(opened, "mousedown")[2], sink_target())
     }
 
     /// Wakes the sheet's heading directly. Opening the sheet leaves the
@@ -20737,22 +20151,24 @@ mod tests {
 
         // : opens the same one-line prompt / uses, in the same region,
         // wearing the other sigil (AIR LAY-1)
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"placeholder=":""#), "{html}");
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        assert!(html.contains(r#"picker-placeholder">:<"#), "{html}");
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
 
         type_into(&mut dom, prompt_input, "s/2026/2027/");
         press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(r#"placeholder=":""#), "the prompt closed");
+        assert!(
+            !html.contains(r#"picker-placeholder">:<"#),
+            "the prompt closed"
+        );
         assert!(
             source_of(&dom).contains("2027-07-23"),
             "{}",
@@ -20785,34 +20201,40 @@ mod tests {
         let (_, sink) = activate_heading(&mut dom, &clicks);
         let before = source_of(&dom);
 
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
         type_into(&mut dom, prompt_input, "s/2026/2027/");
+        // the prompt lists nothing, so the arrows land on nothing either
+        press(&mut dom, prompt_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, prompt_keys, Key::Escape, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains(r#"placeholder=":""#), "the prompt closed");
+        assert!(
+            !html.contains(r#"picker-placeholder">:<"#),
+            "the prompt closed"
+        );
         assert_eq!(source_of(&dom), before, "and changed nothing (AIR ERR-6)");
 
         // an unrelated key inside the prompt is neither a commit nor a
         // cancel: the prompt owns it and stays open
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        let prompt_keys = sink_target();
         press(&mut dom, prompt_keys, Key::ArrowLeft, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(r#"placeholder=":""#), "still open: {html}");
+        assert!(
+            html.contains(r#"picker-placeholder">:<"#),
+            "still open: {html}"
+        );
     }
 
     /// A submitted line that cannot be read speaks through the status
@@ -20825,15 +20247,14 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
         type_into(&mut dom, prompt_input, "nope");
         press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
@@ -20858,15 +20279,14 @@ mod tests {
             );
         }
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
         type_into(&mut dom, prompt_input, "w");
         press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
         block_on(settle(&mut dom));
@@ -21042,15 +20462,14 @@ mod tests {
         type_into(&mut dom, input, "= pas encore sauvé\n");
 
         lock_dir(&vault.path().join("time"), true);
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
         type_into(&mut dom, prompt_input, "w");
         press(&mut dom, prompt_keys, Key::Enter, Modifiers::empty());
         block_on(settle(&mut dom));
@@ -21070,15 +20489,14 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
-        let opened = press_for_mutations(
+        press(
             &mut dom,
             sink,
             Key::Character(":".into()),
             Modifiers::empty(),
         );
-        let prompt_input = listeners(&opened, "input")[0];
-        let prompt_keys = listeners(&opened, "keydown")[0];
-        mount(&mut dom, listeners(&opened, "mounted")[0]);
+        let prompt_input = sink_target();
+        let prompt_keys = sink_target();
         type_into(&mut dom, prompt_input, "s/2026/2027/");
 
         // the prompt owns every plain key but lets the ctrl chords bubble,
@@ -21180,5 +20598,116 @@ mod tests {
             dioxus_ssr::render(&dom).contains("collée"),
             "the whole line went over"
         );
+    }
+
+    /// The sink is the window's one keyboard socket: it asks for the focus
+    /// at its own mount, and nothing that opens, closes or switches
+    /// afterwards mounts an element that would take it
+    /// (adr/2026-09-the-sink-is-the-one-keyboard-socket.md).
+    #[test]
+    fn the_sink_asks_for_the_focus_once_at_its_mount_and_nothing_else_does() {
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let sink = sink_target();
+        assert!(
+            listeners(&mutations, "mounted").contains(&sink),
+            "the sink mounts with the shell"
+        );
+        let focused = mount_counting_focus(&mut dom, sink);
+        assert_eq!(focused.load(Ordering::SeqCst), 1);
+
+        let (_, palette_keys) = open_palette(&mut dom, sink);
+        let closed = press_for_mutations(
+            &mut dom,
+            palette_keys,
+            Key::Escape,
+            Modifiers::empty(),
+        );
+        assert!(
+            listeners(&closed, "mounted").is_empty(),
+            "an overlay mounts nothing that takes the focus"
+        );
+        let switched = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("1".into()),
+            Modifiers::CONTROL,
+        );
+        assert!(
+            listeners(&switched, "mounted").iter().all(|id| *id != sink),
+            "a screen switch never remounts the sink"
+        );
+        assert_eq!(focused.load(Ordering::SeqCst), 1, "the one grab stands");
+    }
+
+    /// `main` hands the shell the script that keeps the sink focused; the
+    /// shell runs it once, at its first render, and never on a re-render.
+    #[test]
+    fn the_shell_installs_the_focus_keeper_once() {
+        let vault = temp_vault();
+        let installed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = installed.clone();
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(Some(
+            vault.path().to_path_buf(),
+        ))));
+        dom.insert_any_root_context(Box::new(Today(
+            TODAY.parse().expect("the test clock is a valid date"),
+        )));
+        dom.insert_any_root_context(Box::new(KeepFocus(Arc::new(
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        ))));
+        let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
+        assert_eq!(installed.load(Ordering::SeqCst), 1);
+        press(
+            &mut dom,
+            sink_target(),
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(
+            installed.load(Ordering::SeqCst),
+            1,
+            "a render is not a reinstall"
+        );
+    }
+
+    /// The loops flag can stand over an empty vault — the palette's "open
+    /// loops" raises it and nothing renders — and it still blocks the
+    /// chords until Escape clears it, on either screen: the empty list owns
+    /// no key, so the screen's own rung closes it.
+    #[test]
+    fn escape_clears_an_empty_open_loops_flag_on_both_screens() {
+        let vault = temp_vault();
+        let (mut dom, clicks, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, palette_keys) = open_palette(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "open loops");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        assert!(!dioxus_ssr::render(&dom).contains("loops-list"));
+        press(&mut dom, keys[LOGS_KEYS], ctrl_p(), Modifiers::CONTROL);
+        assert!(
+            !dioxus_ssr::render(&dom).contains("command-palette"),
+            "the flag still stands"
+        );
+        press(&mut dom, keys[LOGS_KEYS], Key::Escape, Modifiers::empty());
+        press(&mut dom, keys[LOGS_KEYS], ctrl_p(), Modifiers::CONTROL);
+        assert!(dioxus_ssr::render(&dom).contains("command-palette"));
+        press(&mut dom, palette_keys, Key::Escape, Modifiers::empty());
+
+        let (_, _, table_keys) = table_targets_with_keys(&mut dom, &clicks);
+        let (input, palette_keys) = open_palette(&mut dom, table_keys);
+        type_into(&mut dom, input, "open loops");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
+        press(&mut dom, table_keys, ctrl_p(), Modifiers::CONTROL);
+        assert!(!dioxus_ssr::render(&dom).contains("command-palette"));
+        press(&mut dom, table_keys, Key::Escape, Modifiers::empty());
+        press(&mut dom, table_keys, ctrl_p(), Modifiers::CONTROL);
+        assert!(dioxus_ssr::render(&dom).contains("command-palette"));
     }
 }

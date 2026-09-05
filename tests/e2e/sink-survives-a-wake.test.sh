@@ -1,6 +1,6 @@
 #!/bin/sh
-# The keyboard sink lives beside the blocks and never remounts when
-# another block wakes (adr/2026-09-the-sink-outlives-the-active-block.md).
+# The keyboard sink mounts once with the shell and never remounts when
+# another block wakes (adr/2026-09-the-sink-is-the-one-keyboard-socket.md).
 # Before, `o` unmounted it with the block it sat in and the first letter
 # typed before the fresh sink's focus grab landed fell on <body>:
 # `settings-overlay.test.sh` held "ettings proving ground" one run in
