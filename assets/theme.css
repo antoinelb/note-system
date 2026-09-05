@@ -362,6 +362,24 @@ body {
   margin: 0 auto;
 }
 
+/* the room the note's last lines need to reach the pane's centre: the
+   caret's line is always centred, so a note's end has to be able to scroll
+   half a pane up (adr/2026-09-the-caret-line-sits-at-the-centre.md). Half
+   of a scroll container's own height is not a length CSS can spell, so the
+   measurement arrives inline from the pane the app observes — the logs'
+   `.centre` through its own onresize, the sheet through the same
+   `table::sheet_frame` that draws the card — and the fallback is 0px, so a
+   pane whose size was never reported degrades to no tail rather than to a
+   broken box. Drawn as the scroll box's last child, after the sheet's
+   backlinks footer, and it takes that height only in a pane that holds a
+   note (`:has`), so an empty day still scrolls nothing. Nothing paints
+   here, and it stays a mouse target — on the sheet a press that fell
+   through would reach the void and start a pan. */
+.centre:has(.note-blocks) .scroll-tail,
+.sheet:has(.note-blocks) .scroll-tail {
+  height: var(--scroll-tail, 0px);
+}
+
 /* the sheet's reading column fills the card's content box: the card itself
    bounds the measure, and a second cap inside it would leave the note in a
    narrow strip of a wide card (adr/2026-09-the-sheet-is-an-index-card.md) */

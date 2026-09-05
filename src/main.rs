@@ -115,5 +115,18 @@ fn main() {
                 })
             },
         )))
+        // where a freshly mounted caret puts itself in the pane: said in
+        // the DOM's own words, because Dioxus's ScrollToOptions cannot say
+        // it at all (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+        .with_context(ui::CaretScroll(std::sync::Arc::new(|block| {
+            Box::pin(async move {
+                let eval = dioxus::document::eval(launch::CARET_SCROLL);
+                // a one-element tuple, so the script's `const [block]`
+                // destructures an array — a bare string destructures to
+                // its first character, and `scrollIntoView` refuses it
+                let _ = eval.send((block,));
+                let _ = eval.await;
+            })
+        })))
         .launch(ui::App)
 }

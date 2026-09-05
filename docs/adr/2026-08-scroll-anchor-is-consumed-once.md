@@ -1,5 +1,20 @@
 # The scroll anchor is consumed by the mount that uses it, and j/k always recentre
 
+> Amended by `adr/2026-09-the-caret-line-sits-at-the-centre.md`: the rule
+> below — the anchor is consumed by the mount that uses it and never
+> latches — is unchanged and is what makes the amendment safe. What
+> changed is what a consumed anchor falls back to. It is no longer
+> `Nearest` unconditionally: a mount that draws the caret at an offset the
+> last mount did not scroll to is the user having moved it, and falls back
+> to `Center`; only a mount at the *same* offset — the async fragment
+> landing this file names — still falls back to `Nearest`. So every caret
+> move centres now, not just `j` and `k`, and `Act::WalkVisual`'s own
+> `Center` arm below is gone as redundant. `zz`/`zt`/`zb` are untouched —
+> and they work for the first time: `dioxus-desktop` was dropping the
+> alignment `scroll_to_with_options` carries, so every scroll this file
+> describes landed at the top of the pane. The app now says the alignment
+> to the DOM itself, through a script of its own.
+
 ## Context
 
 The caret's `onmounted` hard-coded `ScrollLogicalPosition::Nearest`: a caret

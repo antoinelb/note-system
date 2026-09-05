@@ -131,6 +131,24 @@ pub struct LineProbe(
     pub Arc<dyn Fn(Option<f64>, bool, usize) -> Walk + Send + Sync>,
 );
 
+/// What the caret's scroll answers: nothing the app reads — the script
+/// either found a caret to move or did not, and either way the next
+/// keystroke decides where the caret goes next.
+pub type Scrolled = Pin<Box<dyn Future<Output = ()>>>;
+
+/// How the caret puts itself somewhere in the pane: `main` injects a
+/// `scrollIntoView` with the alignment the app asked for, the headless
+/// tests inject a scripted fake — the `HitProbe` pattern. It exists
+/// because Dioxus's own `scroll_to_with_options` cannot carry the
+/// alignment at all; `launch::CARET_SCROLL` documents that
+/// (adr/2026-09-the-caret-line-sits-at-the-centre.md). The argument is
+/// the DOM's own word for the alignment: `center`, `start`, `end` or
+/// `nearest`.
+#[derive(Clone)]
+pub struct CaretScroll(
+    pub Arc<dyn Fn(&'static str) -> Scrolled + Send + Sync>,
+);
+
 /// The column a `j`/`k` run holds across its steps: the pixel x the line
 /// probe resolved and the logical cluster column the degraded fallback
 /// keeps, both forgotten together by every key and every mouse-driven
@@ -486,6 +504,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // land at the block's end and the clipboard chords quietly decline
     let hit = try_consume_context::<HitProbe>();
     let line_probe = try_consume_context::<LineProbe>();
+    let caret_scroll = try_consume_context::<CaretScroll>();
     let clipboard = try_consume_context::<Clipboard>();
     let clipboard_image = try_consume_context::<ClipboardImage>();
     let clipboard_write = try_consume_context::<ClipboardWrite>();
@@ -574,10 +593,20 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let mut ex_query = use_signal(String::new);
     // where the next caret mount should sit in the pane, and a nonce so a
     // bare zz — which moves the caret not at all — still remounts it. The
-    // anchor is consumed by the mount that uses it and falls back to
-    // Nearest, so an async fragment landing never moves the viewport on
-    // its own (adr/2026-08-scroll-anchor-is-consumed-once.md)
+    // anchor is consumed by the mount that uses it and falls back to the
+    // caret's own default (adr/2026-08-scroll-anchor-is-consumed-once.md)
     let mut scroll_anchor = use_signal(|| (vim::Anchor::Nearest, 0u32));
+    // the note-global offset the last mount already scrolled to: a mount
+    // at a new one is the user having moved the caret and centres the
+    // line, a mount at the same one is a re-render nobody asked for — an
+    // async fragment landing — and scrolls nothing
+    // (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+    let settled_at = use_signal(|| None::<usize>);
+    // the logs' reading pane, observed the way the table observes its own
+    // (adr/2026-08-viewport-culling-onresize.md): half of it is the room
+    // the note's last lines need to reach the centre. The deterministic
+    // default is the table's, and a refusal keeps it
+    let mut centre_height = use_signal(|| table::DEFAULT_VIEWPORT.1);
     // a drag in flight, and whether a hit probe is already out — plain
     // cells, like QuitFlush: only the mouse handlers read them
     let dragging = use_hook(|| Rc::new(std::cell::Cell::new(false)));
@@ -2352,12 +2381,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         count,
                         extend,
                     } => {
-                        // every vertical move pins the caret to the pane's
-                        // centre — the gjzz / gkzz the user's own vim maps
-                        // (adr/2026-08-scroll-anchor-is-consumed-once.md)
-                        let (_, nonce) = scroll_anchor();
-                        scroll_anchor
-                            .set((vim::Anchor::Center, nonce.wrapping_add(1)));
+                        // no anchor to arm: the caret's own default is the
+                        // pane's centre now, on `j` and `k` as on every
+                        // other move, and a `j` at the note's last line —
+                        // which lands nowhere — rightly scrolls nothing
+                        // (adr/2026-09-the-caret-line-sits-at-the-centre.md)
                         let count = bounded_steps(&editor.peek(), count);
                         spawn(walk_visual(
                             editor,
@@ -2521,6 +2549,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let fragments = fragments.clone();
         let sink = sink.clone();
         let hit = hit.clone();
+        let caret_scroll = caret_scroll.clone();
         let dragging = dragging.clone();
         let probing = probing.clone();
         let goal = goal.clone();
@@ -2550,6 +2579,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     // pieces around selection and caret
                                     // (adr/2026-08-caret-on-editor-note-bytes.md)
                                     let (anchor, head) = editor.read().caret_in_block();
+                                    // the same caret, note-global — a block's
+                                    // content starts where the block does
+                                    // (`Block::content`), so this is exactly
+                                    // `editor.caret().head`, clamped. What
+                                    // the mount compares against to tell a
+                                    // move from a re-render; block-relative
+                                    // would not do it, since the same column
+                                    // in two blocks is the same number
+                                    // (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+                                    let at = start + head;
                                     // the caret is the mode indicator: a
                                     // box thinking, a bar writing
                                     // (adr/2026-08-caret-shape-is-the-mode-indicator.md)
@@ -2764,8 +2803,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                                     span {
                                                                         key: "caret-{head}-{scroll_anchor().1}",
                                                                         class: "caret",
-                                                                        onmounted: move |event: Event<MountedData>| async move {
-                                                                            settle_caret(event, scroll_anchor).await;
+                                                                        onmounted: {
+                                                                            let scroll = caret_scroll.clone();
+                                                                            move |_| {
+                                                                                let scroll = scroll.clone();
+                                                                                async move {
+                                                                                    settle_caret(scroll, scroll_anchor, settled_at, at).await;
+                                                                                }
+                                                                            }
                                                                         },
                                                                     }
                                                                 },
@@ -2774,8 +2819,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                                         key: "caret-{head}-{scroll_anchor().1}",
                                                                         class: "caret-box",
                                                                         "data-start": "{start}",
-                                                                        onmounted: move |event: Event<MountedData>| async move {
-                                                                            settle_caret(event, scroll_anchor).await;
+                                                                        onmounted: {
+                                                                            let scroll = caret_scroll.clone();
+                                                                            move |_| {
+                                                                                let scroll = scroll.clone();
+                                                                                async move {
+                                                                                    settle_caret(scroll, scroll_anchor, settled_at, at).await;
+                                                                                }
+                                                                            }
                                                                         },
                                                                         "{cluster}"
                                                                     }
@@ -4588,6 +4639,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     }
                 }
                 section { class: "centre",
+                  // the reading pane's own size, the idiom the table's
+                  // culling already uses: half of it is the room the
+                  // note's last lines need to reach the centre, and a
+                  // refusal keeps the deterministic default
+                  // (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+                  onresize: move |event: Event<ResizeData>| {
+                      if let Ok(size) = event.get_border_box_size() {
+                          centre_height.set(size.height);
+                      }
+                  },
                   div { class: "centre-column",
                     div { class: "crumbs",
                         // an open template wears its own crumbs: it has no
@@ -4720,6 +4781,16 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             _ => rsx! {},
                         }
                     }
+                  }
+                  // the tail that lets the last line reach the centre —
+                  // last child of the scroll box, after everything the
+                  // column holds. Always written, never always drawn:
+                  // theme.css gives it its height only in a pane that
+                  // holds a note, so an empty day still scrolls nothing
+                  // (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+                  div {
+                      class: "scroll-tail",
+                      style: "--scroll-tail: {centre_height() / 2.0}px",
                   }
                 }
                 aside {
@@ -5017,6 +5088,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 _ => rsx! {},
                             }
                         }
+                        // the card's own tail: half the frame the same
+                        // `sheet_frame` writes above, so the note's last
+                        // lines reach the card's centre — after the
+                        // backlinks footer, which stays where it always sat
+                        // (adr/2026-09-the-caret-line-sits-at-the-centre.md)
+                        div {
+                            class: "scroll-tail",
+                            style: "--scroll-tail: {table::sheet_frame(viewport()).height / 2.0}px",
+                        }
                     }
                 }
                 // the edit-template picker, the same command the logs
@@ -5203,35 +5283,58 @@ fn remember(goal: &Cell<Goal>, store: impl FnOnce(&mut Goal)) {
 /// reach further than its last drawn line, and `999999999j` asks the
 /// webview for a walk it can finish (CLAUDE.md: bounded loops with
 /// explicit iteration limits). No note open, nothing to walk: one step.
-/// Where a freshly mounted caret puts itself in the pane, and the one rule
-/// that keeps it honest: the anchor is **consumed** by the mount that uses
-/// it and falls back to `Nearest`. The caret also remounts whenever an
-/// async fragment compile lands, and a latched `Center` would scroll the
-/// note out from under a reader who pressed nothing at all — the interface
-/// moves only when the user moved it (AIR LAY-2,
-/// adr/2026-08-scroll-anchor-is-consumed-once.md).
+/// Where a freshly mounted caret puts itself in the pane, and the two
+/// rules that keep it honest. The anchor is **consumed** by the mount that
+/// uses it (adr/2026-08-scroll-anchor-is-consumed-once.md), and what it
+/// falls back to is decided by `at` — the note-global offset this mount
+/// draws the caret at, against `settled_at`, the offset the last mount
+/// already scrolled to. A different one is the user having moved the
+/// caret, and the line it landed on takes the pane's centre; the same one
+/// is a re-render nobody asked for — an async fragment compile landing —
+/// and asks for `Nearest`, which scrolls nothing at all. The interface
+/// moves only when the user moved it (AIR LAY-2 / Core rule 5,
+/// adr/2026-09-the-caret-line-sits-at-the-centre.md).
 async fn settle_caret(
-    event: Event<MountedData>,
+    scroll: Option<CaretScroll>,
     mut anchor: Signal<(vim::Anchor, u32)>,
+    mut settled_at: Signal<Option<usize>>,
+    at: usize,
 ) {
     let (wanted, nonce) = anchor();
     if wanted != vim::Anchor::Nearest {
         anchor.set((vim::Anchor::Nearest, nonce));
     }
-    let vertical = match wanted {
-        vim::Anchor::Nearest => ScrollLogicalPosition::Nearest,
-        vim::Anchor::Center => ScrollLogicalPosition::Center,
-        vim::Anchor::Top => ScrollLogicalPosition::Start,
-        vim::Anchor::Bottom => ScrollLogicalPosition::End,
-    };
-    let _ = event
-        .scroll_to_with_options(ScrollToOptions {
-            behavior: ScrollBehavior::Instant,
-            vertical,
-            // the pane never scrolls sideways on its own
-            horizontal: ScrollLogicalPosition::Nearest,
-        })
-        .await;
+    // `peek`: a mount is not a render, and the offset is written on nearly
+    // every one of them — subscribing anything to it would rebuild the
+    // note under the caret it just placed
+    let moved = *settled_at.peek() != Some(at);
+    if moved {
+        settled_at.set(Some(at));
+    }
+    // absent in headless tests that inject no fake: the caret is placed,
+    // the pane stays where it was
+    let Some(scroll) = scroll else { return };
+    // the DOM's own words, since the DOM is what reads them
+    (scroll.0)(match resting_place(wanted, moved) {
+        vim::Anchor::Nearest => "nearest",
+        vim::Anchor::Center => "center",
+        vim::Anchor::Top => "start",
+        vim::Anchor::Bottom => "end",
+    })
+    .await;
+}
+
+/// The default a consumed anchor falls back to: the pane's centre on a
+/// caret the user moved, and nothing at all otherwise. `zz`, `zt` and `zb`
+/// are the explicit asks and still act once each — a `zt` holds the caret
+/// at the top of the pane until the next move re-centres it, which is what
+/// "consumed by the mount that uses it" always meant
+/// (adr/2026-09-the-caret-line-sits-at-the-centre.md).
+fn resting_place(wanted: vim::Anchor, moved: bool) -> vim::Anchor {
+    match wanted {
+        vim::Anchor::Nearest if moved => vim::Anchor::Center,
+        asked => asked,
+    }
 }
 
 fn bounded_steps(editor: &Editor, count: usize) -> usize {
@@ -18384,6 +18487,16 @@ mod tests {
         hit: Option<HitProbe>,
         line: Option<LineProbe>,
     ) -> (VirtualDom, Mutations) {
+        mounted_app_with_probes(root, closer, hit, line, None)
+    }
+
+    fn mounted_app_with_probes(
+        root: Option<PathBuf>,
+        closer: Option<Closer>,
+        hit: Option<HitProbe>,
+        line: Option<LineProbe>,
+        scroll: Option<CaretScroll>,
+    ) -> (VirtualDom, Mutations) {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
@@ -18399,9 +18512,42 @@ mod tests {
         if let Some(line) = line {
             dom.insert_any_root_context(Box::new(line));
         }
+        if let Some(scroll) = scroll {
+            dom.insert_any_root_context(Box::new(scroll));
+        }
         let mutations = dom.rebuild_to_vec();
         note_sink(&mutations);
         (dom, mutations)
+    }
+
+    /// Every alignment the caret's mount asked the DOM for, in order.
+    type ScrollLog = Arc<Mutex<Vec<&'static str>>>;
+
+    /// Like `rendered_app`, but with a scripted caret scroll injected: the
+    /// headless DOM has no `scrollIntoView`, so what a test can see is the
+    /// word the app asked for (adr/2026-09-the-caret-line-sits-at-the-centre.md).
+    fn scroll_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, ScrollLog) {
+        let asked: ScrollLog = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let scroll = CaretScroll(Arc::new(move |block| {
+            log.lock()
+                .expect("the scroll log never poisons")
+                .push(block);
+            Box::pin(async {})
+        }));
+        let (dom, mutations) =
+            mounted_app_with_probes(root, None, None, None, Some(scroll));
+        let clicks = listeners(&mutations, "click");
+        (dom, clicks, asked)
+    }
+
+    /// What the caret's mount asked for since the last read, draining the
+    /// log so each assertion speaks about one keystroke.
+    fn asked_for(log: &ScrollLog) -> Vec<&'static str> {
+        let mut held = log.lock().expect("the scroll log never poisons");
+        std::mem::take(&mut held)
     }
 
     /// A hit cell holding this never answers.
@@ -20756,19 +20902,19 @@ mod tests {
         );
     }
 
-    /// adr/2026-08-scroll-anchor-is-consumed-once.md. The headless DOM
-    /// cannot read a `ScrollLogicalPosition`, but it can see the caret
-    /// span remount — which is the whole mechanism: the span's key carries
-    /// the nonce, so a `zz` that moves the caret not at all still gets a
-    /// fresh mount to scroll from.
+    /// adr/2026-08-scroll-anchor-is-consumed-once.md. The span's key
+    /// carries the nonce, so a `zz` that moves the caret not at all still
+    /// gets a fresh mount to scroll from — and the scripted scroll writes
+    /// down which end of the pane that mount asked for.
     #[test]
     fn each_scroll_anchor_remounts_the_caret_and_the_mount_consumes_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
+        let (mut dom, clicks, scrolls) =
+            scroll_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
 
-        for anchor in ["z", "t", "b"] {
+        for (anchor, wanted) in [("z", "center"), ("t", "start"), ("b", "end")]
+        {
             // z alone only arms the prefix: nothing has moved yet
             let armed = press_for_mutations(
                 &mut dom,
@@ -20788,11 +20934,16 @@ mod tests {
             );
             let mounts = listeners(&asked, "mounted");
             assert!(!mounts.is_empty(), "z{anchor} remounted the caret");
-            // the mount consumes the anchor and falls back to Nearest, so
-            // the async fragment landings that remount this same span
-            // later move nothing (AIR LAY-2)
+            // the mount consumes the anchor, so the async fragment
+            // landings that remount this same span later move nothing
+            // (AIR LAY-2, and the test below)
             mount(&mut dom, mounts[0]);
             block_on(settle(&mut dom));
+            assert_eq!(
+                asked_for(&scrolls),
+                vec![wanted],
+                "z{anchor} put the caret there"
+            );
         }
 
         // this editor has no folds: za asks for no scroll at all
@@ -20809,6 +20960,77 @@ mod tests {
             Modifiers::empty(),
         );
         assert!(listeners(&inert, "mounted").is_empty(), "za moved nothing",);
+    }
+
+    /// adr/2026-09-the-caret-line-sits-at-the-centre.md: with no anchor
+    /// armed at all, where a caret mount puts itself is decided by whether
+    /// the caret is at an offset the last mount already scrolled to. A new
+    /// one is the user having moved it, and the line takes the pane's
+    /// centre; the same one is a re-render nobody asked for — the async
+    /// fragment landings that remount this very span — and asks for
+    /// `Nearest`, which scrolls nothing (AIR LAY-2 / Core rule 5).
+    #[test]
+    fn a_caret_move_centres_its_line_and_a_refresh_moves_nothing() {
+        let vault = temp_vault();
+        let (mut dom, clicks, asked) =
+            scroll_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // `l` walks one cluster along: a move, and no anchor armed
+        let moved = press_for_mutations(
+            &mut dom,
+            sink,
+            Key::Character("l".into()),
+            Modifiers::empty(),
+        );
+        let mounts = listeners(&moved, "mounted");
+        assert!(!mounts.is_empty(), "the move remounted the caret");
+        mount(&mut dom, mounts[0]);
+        block_on(settle(&mut dom));
+        assert_eq!(
+            asked_for(&asked),
+            vec!["center"],
+            "the line the caret landed on takes the centre"
+        );
+
+        // the same span mounting again at the same offset: nothing the
+        // user did, so nothing moves
+        mount(&mut dom, mounts[0]);
+        block_on(settle(&mut dom));
+        assert_eq!(
+            asked_for(&asked),
+            vec!["nearest"],
+            "a re-render scrolls nothing"
+        );
+    }
+
+    /// adr/2026-09-the-caret-line-sits-at-the-centre.md: the tail under
+    /// the note is what lets its last lines reach the pane's centre, and
+    /// it is half of the pane the app observes — the logs' own `.centre`
+    /// here, the index card's computed frame on the table.
+    #[test]
+    fn the_scroll_tail_is_half_the_observed_pane() {
+        let vault = temp_vault();
+        let (mut dom, mutations) =
+            mounted_app(Some(vault.path().to_path_buf()), None);
+        let observer = listeners(&mutations, "resize")[0];
+        assert!(
+            dioxus_ssr::render(&dom).contains("--scroll-tail: 400px"),
+            "half the deterministic default until the pane reports"
+        );
+
+        resize(&mut dom, observer, 1000.0, 900.0);
+        assert!(
+            dioxus_ssr::render(&dom).contains("--scroll-tail: 450px"),
+            "half the pane the observer reported"
+        );
+
+        // an observer that answers nothing keeps the last measurement
+        bare_resize(&mut dom, observer);
+        assert!(
+            dioxus_ssr::render(&dom).contains("--scroll-tail: 450px"),
+            "a refusal moves nothing"
+        );
     }
 
     #[test]
