@@ -3067,7 +3067,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let picker_view = move || -> Element {
         let open = picker.read().as_ref().map(|open| {
             let matches: Vec<links::Completion> =
-                links::filter(&open.entries, &query.read())
+                links::picker_rows(&open.entries, &query.read())
                     .into_iter()
                     .cloned()
                     .collect();
@@ -14055,8 +14055,11 @@ mod tests {
         click(&mut dom, rows[0]);
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("link-picker"), "{html}");
+        // the first row is a permanent note even though every time note
+        // sorts ahead of it by id
+        // (adr/2026-09-time-notes-sort-last-in-the-link-picker.md)
         assert!(
-            source_of(&dom).starts_with(r#"[[2026-07-21]]"#),
+            source_of(&dom).starts_with(r#"[[alpha]]"#),
             "the first row went in at the caret: {}",
             source_of(&dom)
         );

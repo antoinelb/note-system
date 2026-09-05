@@ -7,6 +7,7 @@ use typst_syntax::ast;
 
 use crate::domain::{NoteId, NoteType};
 use crate::index::Backlink;
+use crate::logs;
 use crate::parse::MAX_NODES;
 
 /// The picker never shows more than this many rows: past a handful, reading
@@ -27,25 +28,53 @@ impl Completion {
     }
 }
 
+/// What the link picker offers for `query`: `filter`'s matches with every
+/// time note after every permanent one. A day, a week and a season are
+/// named by the calendar and reached by Ctrl+D or the rail, so they are the
+/// least likely rows to be the link being written, and left in the index's
+/// order (by id) they take the whole capped list
+/// (`adr/2026-09-time-notes-sort-last-in-the-link-picker.md`).
+pub fn picker_rows<'a>(
+    entries: &'a [Completion],
+    query: &str,
+) -> Vec<&'a Completion> {
+    let mut rows: Vec<&Completion> = matching(entries, query).collect();
+    // a stable sort on a two-valued key, so the index's order survives
+    // inside each group; the cap comes after, or a time note that sorts
+    // early by id would still push a permanent note off the list
+    rows.sort_by_key(|entry| logs::scale_of_id(&entry.id).is_some());
+    rows.truncate(MAX_MATCHES);
+    rows
+}
+
 /// The picker's matches for `query`: a case-insensitive substring of either
 /// the id or the title, in the index's order (by id), capped. An empty query
 /// is the whole list — opening the picker shows what is there.
+///
+/// This is the Ctrl+O switcher's rule; the link picker adds an ordering on
+/// top of it through `picker_rows`.
 pub fn filter<'a>(
     entries: &'a [Completion],
     query: &str,
 ) -> Vec<&'a Completion> {
+    matching(entries, query).take(MAX_MATCHES).collect()
+}
+
+/// The one uncapped matching rule both lists read, so the picker and the
+/// switcher can order and cap differently without ever disagreeing about
+/// what the query matches.
+fn matching<'a>(
+    entries: &'a [Completion],
+    query: &str,
+) -> impl Iterator<Item = &'a Completion> {
     let needle = query.to_lowercase();
-    entries
-        .iter()
-        .filter(|entry| {
-            entry.id.to_lowercase().contains(&needle)
-                || entry
-                    .title
-                    .as_ref()
-                    .is_some_and(|t| t.to_lowercase().contains(&needle))
-        })
-        .take(MAX_MATCHES)
-        .collect()
+    entries.iter().filter(move |entry| {
+        entry.id.to_lowercase().contains(&needle)
+            || entry
+                .title
+                .as_ref()
+                .is_some_and(|t| t.to_lowercase().contains(&needle))
+    })
 }
 
 /// The text a completion writes into the buffer. One source, so the picker
@@ -325,6 +354,74 @@ mod tests {
             })
             .collect();
         assert_eq!(filter(&many, "note").len(), MAX_MATCHES);
+    }
+
+    /// The index's own order, by id: every `2026-*` time note sorts ahead
+    /// of every permanent one, which is exactly what the picker undoes.
+    fn mixed() -> Vec<Completion> {
+        [
+            "2026-07-23",
+            "2026-summer",
+            "2026-w30",
+            "atomic-notes",
+            "luhmann",
+        ]
+        .into_iter()
+        .map(|id| Completion {
+            id: id.to_string(),
+            title: None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn the_picker_offers_time_notes_after_every_permanent_one() {
+        assert_eq!(
+            ids(picker_rows(&mixed(), "")),
+            vec![
+                "atomic-notes",
+                "luhmann",
+                "2026-07-23",
+                "2026-summer",
+                "2026-w30"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_matching_both_groups_still_puts_the_time_notes_last() {
+        // "m" is in "atomic-notes", "luhmann" and "2026-summer"
+        assert_eq!(
+            ids(picker_rows(&mixed(), "m")),
+            vec!["atomic-notes", "luhmann", "2026-summer"]
+        );
+    }
+
+    #[test]
+    fn a_vault_of_only_time_notes_keeps_the_index_order() {
+        let time: Vec<Completion> = mixed().into_iter().take(3).collect();
+        assert_eq!(
+            ids(picker_rows(&time, "")),
+            vec!["2026-07-23", "2026-summer", "2026-w30"]
+        );
+    }
+
+    #[test]
+    fn the_cap_falls_after_the_sort_so_a_time_note_pushes_nothing_off() {
+        let mut all = vec![Completion {
+            id: "2026-07-23".to_string(),
+            title: None,
+        }];
+        all.extend((0..MAX_MATCHES).map(|n| Completion {
+            id: format!("note-{n}"),
+            title: None,
+        }));
+        let rows = ids(picker_rows(&all, ""));
+        assert_eq!(rows.len(), MAX_MATCHES);
+        assert!(
+            !rows.contains(&"2026-07-23".to_string()),
+            "the day took a row a permanent note wanted"
+        );
     }
 
     #[test]
