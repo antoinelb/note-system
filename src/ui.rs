@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -1158,6 +1158,49 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
     });
 
+    // Every landing on the table runs through here: the card that just
+    // landed keeps the place the user gave it, and every card it covers
+    // slides clear along its shallower axis, all in one store write
+    // (adr/2026-09-cards-yield-on-drop.md). Answers each pushed card's
+    // prior coordinates, so the arrange can fold them into its own
+    // before-image — the drag and the creation, neither of them undoable,
+    // drop the answer.
+    let settle_cards = use_callback({
+        let fallback = fallback.clone();
+        move |anchor: String| {
+            let placed = table::cards(
+                &table_notes.peek(),
+                &positions.peek(),
+                &mut fallback.borrow_mut(),
+                &edges.peek(),
+                filter.peek().as_ref(),
+                today,
+            );
+            let settled = table::resolve_drop(&anchor, &placed);
+            // taken before the write: a pushed card that had no entry
+            // reverses by unpinning, the arrange's own idiom
+            let prior: Vec<(String, Option<(f64, f64)>)> = settled
+                .moved
+                .iter()
+                .map(|(id, _)| (id.clone(), positions.peek().get(id)))
+                .collect();
+            // one write: one repaint, one debounce restart
+            positions.with_mut(|store| {
+                for (id, (x, y)) in &settled.moved {
+                    store.set(id, *x, *y);
+                }
+            });
+            // a pile too tight to clear is visible debt on the status
+            // line, never a refused drop; a drop that came out clear takes
+            // the word back
+            status.write().settle(
+                Source::Layout,
+                (!settled.clear).then_some(Notice::layout_crowded()),
+            );
+            prior
+        }
+    });
+
     // the create overlay's opening half — summon_palette's twin
     // (adr/2026-08-ctrl-n-two-step-create-overlay.md)
     let open_creator = use_callback(move |()| {
@@ -1216,6 +1259,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         relative,
                         today,
                     ));
+                    // the birth slot is a landing like any other: the new
+                    // card holds the viewport centre and whatever already
+                    // stood there yields
+                    // (adr/2026-09-cards-yield-on-drop.md)
+                    settle_cards.call(id.clone());
                     show_sheet.call((id, Editor::open(path)));
                 }
                 Err(error) => {
@@ -1343,22 +1391,34 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // the before-image: every card about to move, at its prior
             // coordinates — `None` for an auto-placed card, whose reverse
             // is unpinning; an arrange that moved nothing leaves nothing
-            // to take back (adr/2026-08-app-level-undo-register.md)
-            let before = (!laid.is_empty()).then(|| undo::Intent::Arrange {
-                prior: laid
-                    .iter()
-                    .map(|(id, _)| (id.clone(), positions.peek().get(id)))
-                    .collect(),
-            });
-            before
-                .into_iter()
-                .for_each(|intent| undo_register.write().push(intent));
+            // to take back (adr/2026-08-app-level-undo-register.md). A map
+            // keyed by id, because the resolution below can push a card the
+            // spring pass already moved and only the earlier image is the
+            // way back.
+            let mut prior: BTreeMap<String, Option<(f64, f64)>> = laid
+                .iter()
+                .map(|(id, _)| (id.clone(), positions.peek().get(id)))
+                .collect();
             // one write: one repaint, one debounce restart
             positions.with_mut(|store| {
                 for (id, (x, y)) in &laid {
                     store.set(id, *x, *y);
                 }
             });
+            // the cluster landing on the rest of the table: the sheet's own
+            // card holds the place the user is looking at, whatever the
+            // spring pass came to rest on yields, and the pushes join the
+            // arrange's one before-image — so one undo takes both back
+            // (adr/2026-09-cards-yield-on-drop.md)
+            for (id, at) in settle_cards.call(own) {
+                prior.entry(id).or_insert(at);
+            }
+            let before = (!prior.is_empty()).then(|| undo::Intent::Arrange {
+                prior: prior.into_iter().collect(),
+            });
+            before
+                .into_iter()
+                .for_each(|intent| undo_register.write().push(intent));
         }
     });
 
@@ -4741,13 +4801,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 onmouseup: move |event: MouseEvent| {
                     let held = grab.peek().clone();
                     grab.set(None);
-                    if let Some(Grab::Card { id, down, .. }) = held
-                        && table::is_click(
-                            down,
-                            point(&event, zoom.peek().scale()),
-                        )
-                    {
-                        open_sheet.call(id);
+                    // read out first: the zoom's peek guard must drop
+                    // before an arm's own callback reads that signal
+                    let up = point(&event, zoom.peek().scale());
+                    if let Some(Grab::Card { id, down, .. }) = held {
+                        match table::is_click(down, up) {
+                            true => open_sheet.call(id),
+                            // beyond the slop it was a drop: the card holds
+                            // where the hand left it and its neighbours
+                            // yield (adr/2026-09-cards-yield-on-drop.md)
+                            false => {
+                                settle_cards.call(id);
+                            }
+                        }
                     }
                 },
                 div {
@@ -6944,14 +7010,16 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
 
-        // alpha is the first card in id order, on the grid at (32, 32)
+        // alpha is the first card in id order, on the grid at (32, 32); the
+        // drop lands a row clear of the others, so nothing yields to it
+        // (adr/2026-09-cards-yield-on-drop.md)
         mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
-        mouse(&mut dom, "mousemove", pane, (140.0, 88.0));
-        mouse(&mut dom, "mousemove", pane, (150.0, 90.0));
-        mouse(&mut dom, "mouseup", pane, (150.0, 90.0));
+        mouse(&mut dom, "mousemove", pane, (140.0, 188.0));
+        mouse(&mut dom, "mousemove", pane, (150.0, 190.0));
+        mouse(&mut dom, "mouseup", pane, (150.0, 190.0));
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains("left: 82px; top: 22px"),
+            html.contains("left: 82px; top: 122px"),
             "the card followed both moves: {html}"
         );
         // the other unplaced cards kept the slots they were first given —
@@ -6963,7 +7031,80 @@ mod tests {
         let saved =
             std::fs::read_to_string(vault.path().join(".index/positions"))
                 .expect("the debounced write reached the file");
-        assert_eq!(saved.trim(), "alpha 82 22");
+        assert_eq!(saved.trim(), "alpha 82 122");
+    }
+
+    #[test]
+    fn a_card_dropped_on_its_neighbours_pushes_them_and_persists_them() {
+        // the grid's row is 192 apart and a card needs 184 of clearance, so
+        // dragging alpha 50 to the right lands it on capture-idea — which
+        // yields onto digest: one drop, a chain, one debounced write
+        // (adr/2026-09-cards-yield-on-drop.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (150.0, 90.0));
+        mouse(&mut dom, "mouseup", pane, (150.0, 90.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("left: 82px; top: 22px"),
+            "the drop stands exactly where the hand left it: {html}"
+        );
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(
+            saved.trim(),
+            "alpha 82 22\n\
+             capture-idea 266 32\n\
+             digest 450 32",
+            "every card that yielded kept its new place: {saved}"
+        );
+    }
+
+    #[test]
+    fn a_drop_into_a_pile_too_tight_to_clear_speaks_and_places_anyway() {
+        // capture-idea is wedged between alpha, whose id outranks it, and
+        // the drop itself: 80 of canvas where it needs 128, so the passes
+        // run out. The drop still stands and the crowding is a line, never
+        // a refusal (adr/2026-09-cards-yield-on-drop.md).
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join(".index"))
+            .expect("the index dir is creatable");
+        std::fs::write(
+            vault.path().join(".index/positions"),
+            "alpha 0 0\ncapture-idea 0 40\ndigest 0 80\n",
+        )
+        .expect("the pile is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        // digest is the last card in id order — the drop, and the only one
+        // of the three whose id outranks capture-idea's
+        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (110.0, 100.0));
+        mouse(&mut dom, "mouseup", pane, (110.0, 100.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("layout: too tight to clear"), "{html}");
+        assert!(
+            html.contains("left: 10px; top: 80px"),
+            "the drop was never refused: {html}"
+        );
+
+        // and a later drop that comes out clear takes the word back
+        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (600.0, 600.0));
+        mouse(&mut dom, "mouseup", pane, (600.0, 600.0));
+        assert!(
+            !dioxus_ssr::render(&dom).contains("layout: too tight"),
+            "the clear drop resolved it"
+        );
     }
 
     #[test]
@@ -15767,11 +15908,42 @@ mod tests {
                 .expect("the debounced write reached the file");
         assert!(saved.contains("alpha "), "the anchor arranged: {saved}");
         assert!(saved.contains("beta "), "its neighbour too: {saved}");
+        // the cluster landing where the rest of the table stands is a drop
+        // like any other: the cards it came to rest on yielded and were
+        // pinned by the same write (adr/2026-09-cards-yield-on-drop.md)
         assert_eq!(
             saved.trim().lines().count(),
-            2,
-            "cards outside the component were never touched: {saved}"
+            4,
+            "the bystanders yielded rather than being buried: {saved}"
         );
+        assert!(
+            cards_never_overlap(&saved),
+            "and nothing overlaps afterwards: {saved}"
+        );
+    }
+
+    /// The invariant read straight off the positions file: no two entries
+    /// within a card's width and height of each other
+    /// (adr/2026-09-cards-yield-on-drop.md).
+    fn cards_never_overlap(saved: &str) -> bool {
+        let placed: Vec<(f64, f64)> = saved
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace().skip(1);
+                Some((
+                    fields.next()?.parse().ok()?,
+                    fields.next()?.parse().ok()?,
+                ))
+            })
+            .collect();
+        placed.iter().enumerate().all(|(rank, one)| {
+            placed[(rank + 1)..].iter().all(|other| {
+                (one.0 - other.0).abs()
+                    >= crate::table::CARD_WIDTH + crate::table::CARD_GAP
+                    || (one.1 - other.1).abs()
+                        >= crate::table::CARD_HEIGHT + crate::table::CARD_GAP
+            })
+        })
     }
 
     #[test]
@@ -17103,6 +17275,46 @@ mod tests {
         // no viewport injected: the deterministic default centres it —
         // (1280/2 − 88, 800/2 − 28), carried by the raised card at pan 0
         assert!(html.contains("left: 552px; top: 372px"), "{html}");
+    }
+
+    #[test]
+    fn a_new_card_keeps_the_centre_and_the_card_standing_there_yields() {
+        // alpha is hand-placed on the very spot the birth slot names, so
+        // the creation is a drop like any other: the new card holds the
+        // viewport centre and alpha slides one card-height clear, its new
+        // place persisted by the same debounce
+        // (adr/2026-09-cards-yield-on-drop.md)
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join(".index"))
+            .expect("the index dir is creatable");
+        std::fs::write(
+            vault.path().join(".index/positions"),
+            "alpha 552 372\n",
+        )
+        .expect("the hand placement is written");
+        let (mut dom, _, keys, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (input, creator_keys) = open_creator(&mut dom, keys[LOGS_KEYS]);
+        type_into(&mut dom, input, "concept");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+        type_into(&mut dom, input, "Deep Modules");
+        press(&mut dom, creator_keys, Key::Enter, Modifiers::empty());
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("left: 552px; top: 372px"),
+            "the new card kept the centre: {html}"
+        );
+        assert!(
+            html.contains("left: 552px; top: 436px"),
+            "and alpha yielded a card-height plus the gap: {html}"
+        );
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(saved.trim(), "alpha 552 436", "{saved}");
     }
 
     // -- the app indexes its own writes ---------------------------------

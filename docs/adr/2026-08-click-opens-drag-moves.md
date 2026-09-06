@@ -33,3 +33,10 @@ one gesture, two meanings, disambiguated somewhere.
   repaint; buffering it until the click/drag verdict would add a branch to
   the one total mousemove handler to hide a movement the user actually
   made.
+
+## Amended by `2026-09-cards-yield-on-drop.md` (2026-09-06)
+
+The mouseup's verdict gained a second job: beyond the slop the release is a
+drop, and the cards the dropped one covers yield to it. Within the slop
+nothing yields — a click opens a sheet and moves nothing, the sub-slop
+wobble's honest pixel or two included.

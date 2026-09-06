@@ -422,6 +422,113 @@ pub fn is_click(down: (f64, f64), up: (f64, f64)) -> bool {
     (up.0 - down.0).abs() <= CLICK_SLOP && (up.1 - down.1).abs() <= CLICK_SLOP
 }
 
+/// The clear canvas a resolved drop leaves between two card rectangles —
+/// the design's 8, like every other gap
+/// (adr/2026-09-cards-yield-on-drop.md).
+pub const CARD_GAP: f64 = 8.0;
+
+/// The card's drawn height at titles zoom: twice the tether's drop, the one
+/// card height the layout declares. Overlap is resolved against this box
+/// whatever zoom the drop happened at — body zoom's 296-tall cards overlap
+/// by construction, the fallback grid's own 96-unit row pitch included
+/// (adr/2026-09-cards-yield-on-drop.md).
+pub const CARD_HEIGHT: f64 = 2.0 * TETHER_DROP;
+
+/// How many separation passes one drop gets before the resolver stops and
+/// says so. A chain pushed against id order advances one card per pass, so
+/// the cap is a pile depth, not a running time.
+pub const RESOLVE_PASSES: usize = 32;
+
+/// What a drop's resolution came to.
+#[derive(Debug, PartialEq)]
+pub struct Settled {
+    /// Every card the drop pushed, at its new canvas coordinates, in id
+    /// order — what the caller writes to the store.
+    pub moved: Vec<(String, (f64, f64))>,
+    /// Whether a pass found nothing left to separate. `false` means the cap
+    /// ran out: what the passes managed stands and the caller speaks it —
+    /// never a refused drop (no hard blocks).
+    pub clear: bool,
+}
+
+/// The neighbours yielding to a drop: `anchor` stays exactly where it was
+/// put, and every card whose rectangle comes within `CARD_GAP` of another
+/// slides clear along its shallower axis, in passes capped at
+/// `RESOLVE_PASSES`. Pure — the caller persists what comes back
+/// (adr/2026-09-cards-yield-on-drop.md).
+pub fn resolve_drop(anchor: &str, cards: &[Card]) -> Settled {
+    let mut standing: Vec<Standing> = cards
+        .iter()
+        .map(|card| Standing {
+            id: card.id.as_str(),
+            from: (card.x, card.y),
+            now: (card.x, card.y),
+        })
+        .collect();
+    // by id: the same drop pushes the same cards the same way on every run
+    standing.sort_by(|one, other| one.id.cmp(other.id));
+    // the first pass that separates nothing is the early stop; running out
+    // of passes is the crowded verdict
+    let clear = (0..RESOLVE_PASSES).any(|_| sweep(anchor, &mut standing));
+    let moved = standing
+        .iter()
+        .filter(|card| card.now != card.from)
+        .map(|card| (card.id.to_string(), card.now))
+        .collect();
+    Settled { moved, clear }
+}
+
+/// One card in the resolver's working set: where it stood when the drop
+/// landed, and where the passes have pushed it to.
+struct Standing<'cards> {
+    id: &'cards str,
+    from: (f64, f64),
+    now: (f64, f64),
+}
+
+/// One pass over every pair, lower id first: the anchor never yields, and
+/// between two neighbours the higher id does — so a chain's pushes are the
+/// same on every run. Answers whether the pass found nothing to separate.
+fn sweep(anchor: &str, standing: &mut [Standing]) -> bool {
+    let mut clear = true;
+    for one in 0..standing.len() {
+        for other in (one + 1)..standing.len() {
+            let (mover, held) = match standing[other].id == anchor {
+                true => (one, other),
+                false => (other, one),
+            };
+            let Some((dx, dy)) =
+                yield_step(standing[mover].now, standing[held].now)
+            else {
+                continue;
+            };
+            standing[mover].now.0 += dx;
+            standing[mover].now.1 += dy;
+            clear = false;
+        }
+    }
+    clear
+}
+
+/// How far the mover slides to leave `CARD_GAP` of clear canvas around the
+/// card it stands on: along the shallower axis, away from it, and `None`
+/// when the two rectangles are already clear. Every card is the same size,
+/// so the corner-to-corner delta is the centre-to-centre one; two
+/// coincident cards separate downward rather than dividing by zero.
+fn yield_step(mover: (f64, f64), held: (f64, f64)) -> Option<(f64, f64)> {
+    let (dx, dy) = (mover.0 - held.0, mover.1 - held.1);
+    let depth_x = CARD_WIDTH + CARD_GAP - dx.abs();
+    let depth_y = CARD_HEIGHT + CARD_GAP - dy.abs();
+    if depth_x <= 0.0 || depth_y <= 0.0 {
+        return None;
+    }
+    let away = |delta: f64| if delta < 0.0 { -1.0 } else { 1.0 };
+    match depth_x <= depth_y {
+        true => Some((away(dx) * depth_x, 0.0)),
+        false => Some((0.0, away(dy) * depth_y)),
+    }
+}
+
 /// One drawn edge in canvas coordinates, endpoints already clipped to the
 /// card borders — where the line runs and where its node dots sit
 /// (adr/2026-08-edges-svg-under-cards.md).
@@ -1234,5 +1341,146 @@ mod tests {
         );
         // b is the first unplaced note, so it takes the grid's first slot
         assert_eq!((drawn[1].x, drawn[1].y), (32.0, 32.0));
+    }
+
+    // -- the drop's neighbours yield (adr/2026-09-cards-yield-on-drop.md) ----
+
+    /// Every pair of drawn cards, `CARD_GAP` of clear canvas between them.
+    fn all_clear(cards: &[(String, (f64, f64))]) -> bool {
+        cards.iter().enumerate().all(|(rank, (_, one))| {
+            cards[(rank + 1)..].iter().all(|(_, other)| {
+                (one.0 - other.0).abs() >= CARD_WIDTH + CARD_GAP
+                    || (one.1 - other.1).abs() >= CARD_HEIGHT + CARD_GAP
+            })
+        })
+    }
+
+    #[test]
+    fn a_card_dropped_on_its_neighbour_pushes_it_along_the_short_axis() {
+        // b sits 16 below a and dead on its column: the vertical overlap is
+        // 48 deep, the horizontal one 184 — b slides down, a never moves
+        let dropped =
+            [placed_card("a", 0.0, 0.0), placed_card("b", 0.0, 16.0)];
+        let settled = resolve_drop("a", &dropped);
+        assert!(settled.clear);
+        assert_eq!(
+            settled.moved,
+            vec![("b".to_string(), (0.0, CARD_HEIGHT + CARD_GAP))]
+        );
+        assert!(all_clear(&settled.moved));
+    }
+
+    #[test]
+    fn a_neighbour_above_and_left_yields_away_from_the_drop() {
+        // the mirror: b is up and left of the anchor, so both pushes are
+        // negative — and a mostly-horizontal overlap slides along x
+        let dropped =
+            [placed_card("a", 0.0, 0.0), placed_card("b", -20.0, -8.0)];
+        let settled = resolve_drop("a", &dropped);
+        assert_eq!(
+            settled.moved,
+            vec![("b".to_string(), (-20.0, -(CARD_HEIGHT + CARD_GAP)))],
+            "the shallower axis here is y, so b slid straight up"
+        );
+
+        let sideways =
+            [placed_card("a", 0.0, 0.0), placed_card("b", -180.0, 0.0)];
+        assert_eq!(
+            resolve_drop("a", &sideways).moved,
+            vec![("b".to_string(), (-(CARD_WIDTH + CARD_GAP), 0.0))],
+            "184 of horizontal depth against 64 of vertical: b slid left"
+        );
+    }
+
+    #[test]
+    fn the_anchor_holds_whichever_side_of_the_pair_it_is_on() {
+        // the pair is walked in id order, so this exercises the arm where
+        // the anchor is the second of the two: the lower id yields
+        let dropped =
+            [placed_card("a", 0.0, 0.0), placed_card("b", 0.0, 16.0)];
+        let settled = resolve_drop("b", &dropped);
+        assert_eq!(
+            settled.moved,
+            vec![("a".to_string(), (0.0, 16.0 - CARD_HEIGHT - CARD_GAP))]
+        );
+    }
+
+    #[test]
+    fn two_coincident_cards_separate_downward() {
+        let dropped =
+            [placed_card("a", 40.0, 40.0), placed_card("b", 40.0, 40.0)];
+        assert_eq!(
+            resolve_drop("a", &dropped).moved,
+            vec![("b".to_string(), (40.0, 40.0 + CARD_HEIGHT + CARD_GAP))]
+        );
+    }
+
+    #[test]
+    fn a_clear_layout_moves_nothing_on_either_axis() {
+        // one neighbour clear on x alone, one clear on y alone
+        let dropped = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", CARD_WIDTH + CARD_GAP, 8.0),
+            placed_card("c", 0.0, CARD_HEIGHT + CARD_GAP),
+        ];
+        let settled = resolve_drop("a", &dropped);
+        assert!(settled.clear);
+        assert_eq!(settled.moved, vec![]);
+    }
+
+    #[test]
+    fn a_pushed_card_pushes_the_next_one_in_the_chain() {
+        // three cards stacked 16 apart: the drop clears b, and b clears c
+        let dropped = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 0.0, 16.0),
+            placed_card("c", 0.0, 32.0),
+        ];
+        let settled = resolve_drop("a", &dropped);
+        assert!(settled.clear);
+        assert_eq!(
+            settled.moved,
+            vec![
+                ("b".to_string(), (0.0, CARD_HEIGHT + CARD_GAP)),
+                ("c".to_string(), (0.0, 2.0 * (CARD_HEIGHT + CARD_GAP))),
+            ]
+        );
+        assert!(all_clear(&settled.moved));
+    }
+
+    #[test]
+    fn a_card_wedged_between_two_that_outrank_it_runs_the_cap_out() {
+        // b is the only card free to move — a outranks it by id and c is
+        // the drop itself — and the two of them stand 80 apart where b
+        // needs 128 to clear both. Each pass slides it off one and onto the
+        // other; the cap is what stops the pair of pushes repeating, and
+        // the caller speaks the crowding rather than refusing the drop.
+        let wedged = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 0.0, 40.0),
+            placed_card("c", 0.0, 80.0),
+        ];
+        let settled = resolve_drop("c", &wedged);
+        assert!(!settled.clear, "the cap ran out: {settled:?}");
+        assert_eq!(
+            settled.moved,
+            vec![("b".to_string(), (0.0, 16.0))],
+            "what the last pass managed stands"
+        );
+    }
+
+    #[test]
+    fn the_same_drop_resolves_the_same_way_whatever_order_it_is_given() {
+        let one = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 0.0, 16.0),
+            placed_card("c", 0.0, 32.0),
+        ];
+        let other = [
+            placed_card("c", 0.0, 32.0),
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 0.0, 16.0),
+        ];
+        assert_eq!(resolve_drop("a", &one), resolve_drop("a", &other));
     }
 }

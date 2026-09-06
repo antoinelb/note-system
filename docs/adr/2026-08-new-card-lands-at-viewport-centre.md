@@ -15,3 +15,8 @@ The origin fallback grid is deterministic but may be far off-screen from where t
 
 - **Unplaced (origin grid)** — a note created "here" appearing somewhere else breaks the gesture's promise.
 - **Probing the window at call time from `ui`** — `dioxus::desktop::window()` does not exist headless; injection keeps the component testable, the established pattern.
+
+## Amended by `2026-09-cards-yield-on-drop.md` (2026-09-06)
+
+The new card still lands on the viewport centre and still keeps it; what
+already stood there yields and is pinned by the same write.
