@@ -90,7 +90,7 @@ pub fn seed(vault: &Path) -> Result<(), TemplateError> {
 /// vault's, embedded at compile time so the fixtures stay the single
 /// source of truth and `make check-vault` their compile gate
 /// (adr/2026-08-templates-seeded-from-embedded-fixtures.md).
-const DEFAULTS: [(&str, &str); 13] = [
+const DEFAULTS: [(&str, &str); 14] = [
     (
         "template",
         include_str!("../tests/fixtures/vault/templates/template.typ"),
@@ -126,6 +126,10 @@ const DEFAULTS: [(&str, &str); 13] = [
     (
         "project",
         include_str!("../tests/fixtures/vault/templates/project.typ"),
+    ),
+    (
+        "tool",
+        include_str!("../tests/fixtures/vault/templates/tool.typ"),
     ),
     (
         "daily",
@@ -441,6 +445,7 @@ mod tests {
             NoteType::Idea,
             NoteType::Personal,
             NoteType::Project,
+            NoteType::Tool,
         ] {
             written.push(
                 create(

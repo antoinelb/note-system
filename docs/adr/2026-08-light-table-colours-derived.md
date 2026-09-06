@@ -1,5 +1,7 @@
 # Light table colours derived by one rule: hue kept, value inverted
 
+> Amended by `2026-09-tool-is-the-ninth-permanent-type.md`: a ninth bar, `--type-tool`, `#609f80` dark and `#4da378` light — derived by this ADR's own two rules (the ~25%/50% mute, then the light-side chroma gain) at the unused hue 150°.
+
 ## Context
 
 The wireframes leave most light-mode table colours undrawn — the "—" cells in the palette table (card fill, capture fill, star field, generated border) — and draw only six of the eight type bars, in dark mode only (`design/wireframes-v0.md` § Palette).

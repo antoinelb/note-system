@@ -1,5 +1,7 @@
 # A course is a `project`; the `course` type is removed
 
+> Amended by `2026-09-tool-is-the-ninth-permanent-type.md`: the closed set is nine again, `tool` taking the ninth row. The reasoning below stands — `course` was removed because it carried nothing `project` did not, and `tool` earns its row on that same test.
+
 ## Context
 
 `adr/2026-09-course-type-and-due-loops.md` added `course` as the ninth permanent type, with its own template, hue and picker row.
