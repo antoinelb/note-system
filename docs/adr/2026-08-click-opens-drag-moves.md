@@ -40,3 +40,11 @@ The mouseup's verdict gained a second job: beyond the slop the release is a
 drop, and the cards the dropped one covers yield to it. Within the slop
 nothing yields — a click opens a sheet and moves nothing, the sub-slop
 wobble's honest pixel or two included.
+
+## Amended by `2026-09-shift-drag-selects-cards.md` (2026-09-06)
+
+The slop verdict gained a third reader: on the void it now tells a pan from
+a click, and a click there clears the card selection. A press carrying
+Shift is neither — on the void it starts a marquee, on a card it toggles
+that card's membership and opens no sheet. A plain click on a card still
+opens its sheet whether or not the card is picked.

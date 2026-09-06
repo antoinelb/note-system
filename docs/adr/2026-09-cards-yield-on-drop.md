@@ -59,3 +59,12 @@ Taken with the user (2026-09-06):
 
 The origin grid still ignores the store: an unplaced, unlinked note takes its session slot near the origin whether or not a hand-placed card stands there.
 That slot is a proposal, not a landing — no drop happened — and the first drop involving either card resolves it.
+
+## Amended by `2026-09-shift-drag-selects-cards.md` (2026-09-06)
+
+`resolve_drop` is now the one-card case of `resolve_group`, which takes a
+slice of anchors: a whole dropped set holds where the hand left it, no
+member ever yields, and a pair of members is skipped outright — the set is
+one rigid body. Everything else is unchanged: the shallower axis, the 8px
+gap, the id order between two ordinary neighbours, the 32-pass cap and the
+crowded notice.

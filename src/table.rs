@@ -422,6 +422,74 @@ pub fn is_click(down: (f64, f64), up: (f64, f64)) -> bool {
     (up.0 - down.0).abs() <= CLICK_SLOP && (up.1 - down.1).abs() <= CLICK_SLOP
 }
 
+/// The rubber band a Shift+drag on the void draws, in canvas units — the
+/// four numbers the `.marquee` div is written with
+/// (adr/2026-09-shift-drag-selects-cards.md).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Marquee {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The band between the press and where the pointer stands, whichever
+/// corner each one is: a band drawn up and to the left measures the same
+/// as one drawn down and to the right.
+pub fn marquee(from: (f64, f64), to: (f64, f64)) -> Marquee {
+    Marquee {
+        left: from.0.min(to.0),
+        top: from.1.min(to.1),
+        width: (to.0 - from.0).abs(),
+        height: (to.1 - from.1).abs(),
+    }
+}
+
+/// Every card the band touched, in the order the canvas draws them:
+/// *intersects*, not contains — a half-covered card counts, because the
+/// band is aimed by hand and a card is 176 units wide. The rectangle is
+/// the same `CARD_WIDTH` × `CARD_HEIGHT` box a drop is resolved against,
+/// and touching edges count: a band dragged onto a card's border has
+/// reached it (adr/2026-09-shift-drag-selects-cards.md).
+pub fn marquee_hits(band: Marquee, cards: &[Card]) -> Vec<String> {
+    cards
+        .iter()
+        .filter(|card| {
+            card.x <= band.left + band.width
+                && card.x + CARD_WIDTH >= band.left
+                && card.y <= band.top + band.height
+                && card.y + CARD_HEIGHT >= band.top
+        })
+        .map(|card| card.id.clone())
+        .collect()
+}
+
+/// What a press on a card drags: the whole picked set — every member at
+/// its own coordinates, so the arrangement survives the move — when the
+/// card pressed is one of them, and that card alone otherwise, the
+/// selection left standing (adr/2026-09-shift-drag-selects-cards.md).
+pub fn drag_set(
+    id: &str,
+    at: (f64, f64),
+    picked: &[(String, (f64, f64))],
+) -> Vec<(String, (f64, f64))> {
+    match picked.iter().any(|(held, _)| held == id) {
+        true => picked.to_vec(),
+        false => vec![(id.to_string(), at)],
+    }
+}
+
+/// The dragged set one frame on: the same delta on every member, which is
+/// the whole of what keeps a group move rigid.
+pub fn move_set(
+    set: &[(String, (f64, f64))],
+    delta: (f64, f64),
+) -> Vec<(String, (f64, f64))> {
+    set.iter()
+        .map(|(id, (x, y))| (id.clone(), (x + delta.0, y + delta.1)))
+        .collect()
+}
+
 /// The clear canvas a resolved drop leaves between two card rectangles —
 /// the design's 8, like every other gap
 /// (adr/2026-09-cards-yield-on-drop.md).
@@ -455,8 +523,20 @@ pub struct Settled {
 /// put, and every card whose rectangle comes within `CARD_GAP` of another
 /// slides clear along its shallower axis, in passes capped at
 /// `RESOLVE_PASSES`. Pure — the caller persists what comes back
-/// (adr/2026-09-cards-yield-on-drop.md).
+/// (adr/2026-09-cards-yield-on-drop.md). The one-card case of
+/// `resolve_group`.
 pub fn resolve_drop(anchor: &str, cards: &[Card]) -> Settled {
+    resolve_group(std::slice::from_ref(&anchor), cards)
+}
+
+/// The neighbours yielding to a whole dropped set. Every member of
+/// `anchors` holds exactly where the hand left it and no member ever
+/// yields to another — the set is one rigid body, so a group move
+/// preserves the arrangement it started with — while every outside card
+/// whose rectangle comes within `CARD_GAP` of another slides clear along
+/// its shallower axis, in passes capped at `RESOLVE_PASSES`
+/// (adr/2026-09-shift-drag-selects-cards.md).
+pub fn resolve_group(anchors: &[&str], cards: &[Card]) -> Settled {
     let mut standing: Vec<Standing> = cards
         .iter()
         .map(|card| Standing {
@@ -469,7 +549,7 @@ pub fn resolve_drop(anchor: &str, cards: &[Card]) -> Settled {
     standing.sort_by(|one, other| one.id.cmp(other.id));
     // the first pass that separates nothing is the early stop; running out
     // of passes is the crowded verdict
-    let clear = (0..RESOLVE_PASSES).any(|_| sweep(anchor, &mut standing));
+    let clear = (0..RESOLVE_PASSES).any(|_| sweep(anchors, &mut standing));
     let moved = standing
         .iter()
         .filter(|card| card.now != card.from)
@@ -486,14 +566,21 @@ struct Standing<'cards> {
     now: (f64, f64),
 }
 
-/// One pass over every pair, lower id first: the anchor never yields, and
-/// between two neighbours the higher id does — so a chain's pushes are the
-/// same on every run. Answers whether the pass found nothing to separate.
-fn sweep(anchor: &str, standing: &mut [Standing]) -> bool {
+/// One pass over every pair, lower id first: an anchor never yields, a
+/// pair of anchors is skipped outright — two members of the dropped set
+/// are one body and never separate — and between two ordinary neighbours
+/// the higher id yields, so a chain's pushes are the same on every run.
+/// Answers whether the pass found nothing to separate.
+fn sweep(anchors: &[&str], standing: &mut [Standing]) -> bool {
     let mut clear = true;
     for one in 0..standing.len() {
         for other in (one + 1)..standing.len() {
-            let (mover, held) = match standing[other].id == anchor {
+            let held_one = anchors.contains(&standing[one].id);
+            let held_other = anchors.contains(&standing[other].id);
+            if held_one && held_other {
+                continue;
+            }
+            let (mover, held) = match held_other {
                 true => (one, other),
                 false => (other, one),
             };
@@ -1482,5 +1569,137 @@ mod tests {
             placed_card("b", 0.0, 16.0),
         ];
         assert_eq!(resolve_drop("a", &one), resolve_drop("a", &other));
+    }
+
+    // -- the marquee and the group drag
+    //    (adr/2026-09-shift-drag-selects-cards.md) ------------------------
+
+    #[test]
+    fn a_band_measures_the_same_whichever_corner_it_started_from() {
+        let down_right = marquee((10.0, 20.0), (110.0, 70.0));
+        assert_eq!(
+            down_right,
+            Marquee {
+                left: 10.0,
+                top: 20.0,
+                width: 100.0,
+                height: 50.0
+            }
+        );
+        assert_eq!(marquee((110.0, 70.0), (10.0, 20.0)), down_right);
+    }
+
+    #[test]
+    fn the_band_takes_every_card_it_touches_and_no_card_it_misses() {
+        // a's box is x 0..176, y 0..56; b's is x 300..476 — the band
+        // covers a whole, clips b's left edge, and never reaches c
+        let cards = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 300.0, 0.0),
+            placed_card("c", 700.0, 0.0),
+        ];
+        let hits =
+            marquee_hits(marquee((-10.0, -10.0), (320.0, 20.0)), &cards);
+        assert_eq!(hits, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_band_that_only_grazes_a_border_has_reached_the_card() {
+        // the band ends exactly on a's left edge, and a card 1 unit past
+        // its right edge is missed: the two sides of the same comparison
+        let cards = [placed_card("a", 100.0, 100.0)];
+        let touching = marquee((0.0, 100.0), (100.0, 120.0));
+        assert_eq!(marquee_hits(touching, &cards), vec!["a".to_string()]);
+        let short = marquee((0.0, 100.0), (99.0, 120.0));
+        assert!(marquee_hits(short, &cards).is_empty());
+        // and the same on the vertical: a's box ends 56 below its top
+        let below = marquee((100.0, 157.0), (200.0, 200.0));
+        assert!(marquee_hits(below, &cards).is_empty());
+        let above = marquee((100.0, 0.0), (200.0, 99.0));
+        assert!(marquee_hits(above, &cards).is_empty());
+    }
+
+    #[test]
+    fn pressing_a_picked_card_drags_the_whole_set_and_an_unpicked_one_alone() {
+        let picked = vec![
+            ("a".to_string(), (0.0, 0.0)),
+            ("b".to_string(), (300.0, 0.0)),
+        ];
+        assert_eq!(drag_set("a", (0.0, 0.0), &picked), picked);
+        assert_eq!(
+            drag_set("c", (40.0, 60.0), &picked),
+            vec![("c".to_string(), (40.0, 60.0))],
+            "an unpicked card travels alone and the set is left standing"
+        );
+        assert_eq!(
+            drag_set("c", (40.0, 60.0), &[]),
+            vec![("c".to_string(), (40.0, 60.0))],
+            "with nothing picked every drag is the one-card drag"
+        );
+    }
+
+    #[test]
+    fn a_dragged_set_takes_the_same_delta_on_every_member() {
+        let set = [
+            ("a".to_string(), (0.0, 0.0)),
+            ("b".to_string(), (300.0, 40.0)),
+        ];
+        assert_eq!(
+            move_set(&set, (-20.0, 12.0)),
+            vec![
+                ("a".to_string(), (-20.0, 12.0)),
+                ("b".to_string(), (280.0, 52.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_members_of_a_dropped_set_never_push_each_other_apart() {
+        // a and b stand right on top of each other; as one body they are
+        // left exactly there, and the resolution still comes out clear
+        let dropped =
+            [placed_card("a", 40.0, 40.0), placed_card("b", 40.0, 48.0)];
+        let settled = resolve_group(&["a", "b"], &dropped);
+        assert!(settled.clear);
+        assert_eq!(settled.moved, vec![]);
+    }
+
+    #[test]
+    fn an_outsider_yields_to_the_whole_set_at_once() {
+        // c is covered by a on its left and b on its right: it must clear
+        // both, and neither member may move to make room for it
+        let dropped = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 200.0, 0.0),
+            placed_card("c", 100.0, 16.0),
+        ];
+        let settled = resolve_group(&["a", "b"], &dropped);
+        assert!(settled.clear);
+        assert_eq!(
+            settled.moved,
+            vec![("c".to_string(), (100.0, CARD_HEIGHT + CARD_GAP))],
+            "only the outsider moved, and it slid clear of both"
+        );
+        assert!(all_clear(&[
+            ("a".to_string(), (0.0, 0.0)),
+            ("b".to_string(), (200.0, 0.0)),
+            ("c".to_string(), (100.0, CARD_HEIGHT + CARD_GAP)),
+        ]));
+    }
+
+    #[test]
+    fn a_card_wedged_between_two_members_runs_the_cap_out() {
+        // b is the only card free to move and the two members stand 80
+        // apart where it needs 128 to clear both: every pass slides it off
+        // one and onto the other, and the cap is what ends that. What the
+        // passes managed stands, and neither member ever moved.
+        let wedged = [
+            placed_card("a", 0.0, 0.0),
+            placed_card("b", 0.0, 40.0),
+            placed_card("c", 0.0, 80.0),
+        ];
+        let settled = resolve_group(&["a", "c"], &wedged);
+        assert!(!settled.clear, "the cap ran out: {settled:?}");
+        assert_eq!(settled.moved, vec![("b".to_string(), (0.0, 16.0))]);
     }
 }

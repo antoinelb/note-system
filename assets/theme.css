@@ -1244,10 +1244,17 @@ body {
 /* the panned layer; its transform is set inline from the zoom and pan
    signals — origin at the corner, or the scale would orbit the centre
    (adr/2026-08-body-zoom-scale-and-metrics.md) */
+/* the canvas paints but never takes a press: its transform would make a
+   press's own offset coordinates canvas-local at one zoom and pane-local
+   at another, and the marquee needs one answer. Every void press lands on
+   the pane itself, so `offsetX/offsetY` are pane coordinates whatever the
+   zoom and the pan are (adr/2026-09-shift-drag-selects-cards.md); the
+   cards take their own presses back. */
 .canvas {
   position: absolute;
   inset: 0;
   transform-origin: 0 0;
+  pointer-events: none;
 }
 
 /* the constellation (adr/2026-08-edges-svg-under-cards.md): a 1×1 box whose
@@ -1283,6 +1290,9 @@ body {
   border: 1px solid var(--border);
   border-left: 3px solid var(--bar-untyped);
   cursor: grab;
+  /* taken back from the canvas, which declines every press so the void's
+     own coordinates stay pane-local */
+  pointer-events: auto;
 }
 
 .card.bar-person {
@@ -1321,6 +1331,32 @@ body {
    (adr/2026-08-filter-overlay-ctrl-f.md); opacity, not a colour */
 .card.dimmed {
   opacity: 0.25;
+}
+
+/* picked by a Shift+drag's marquee or a Shift+click
+   (adr/2026-09-shift-drag-selects-cards.md): the selection hue on the
+   border *and* a fill laid over the card's own — hue and weight, never
+   hue alone (AIR INP-3). The fill is a background *image*, so a capture's
+   and a generated card's own ground still shows through it, and the
+   border only changes colour, so nothing on the canvas moves. Two
+   classes, so it outranks .card-capture whatever the source order. */
+.card.picked {
+  border-color: var(--selection);
+  background-image: linear-gradient(
+    var(--select-fill),
+    var(--select-fill)
+  );
+}
+
+/* the rubber band a Shift+drag draws: a child of .canvas, so the pan and
+   the zoom carry it over the cards it is measuring, and never the target
+   of a press — the drag it belongs to is the pane's */
+.marquee {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--selection);
+  background: var(--select-fill);
+  pointer-events: none;
 }
 
 /* capture: dimmer fill, grey bar, muted title — second-class until promoted */

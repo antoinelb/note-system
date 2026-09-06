@@ -417,6 +417,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // cards keep their canvas coordinates
     let mut pan = use_signal(|| (0.0f64, 0.0f64));
     let mut grab = use_signal(|| None::<Grab>);
+    // the picked cards, in the order the marquee found them or the
+    // Shift+clicks arrived: session state like the pan, and it dies with
+    // the table view (adr/2026-09-shift-drag-selects-cards.md)
+    let mut selection = use_signal(Vec::<String>::new);
     // the open sheet's card id — the frozen half; where the card stands
     // re-derives from `placed` every render, which is what keeps the tether
     // on it through drags (adr/2026-08-sheet-stacking-dom-order.md)
@@ -638,6 +642,19 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let pending = editor.read().trouble().is_some();
         if pending && let Some(trouble) = editor.write().take_trouble() {
             status.write().report(Notice::from_trouble(trouble));
+        }
+    });
+
+    // The selection belongs to the table the user is looking at: every
+    // route off it — Ctrl+2, the chrome icon, a loop line, the switcher,
+    // Ctrl+D — drops the set, so it never survives to the logs and back
+    // (adr/2026-09-shift-drag-selects-cards.md). One effect over `screen`
+    // rather than a line in `go_logs`, because four other callbacks set
+    // the screen themselves. `.peek()` on the set, or the effect would
+    // subscribe to its own write.
+    use_effect(move || {
+        if screen() != Screen::Table && !selection.peek().is_empty() {
+            selection.set(Vec::new());
         }
     });
 
@@ -1158,16 +1175,18 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
     });
 
-    // Every landing on the table runs through here: the card that just
-    // landed keeps the place the user gave it, and every card it covers
+    // Every landing on the table runs through here: the cards that just
+    // landed keep the place the user gave them, and every card they cover
     // slides clear along its shallower axis, all in one store write
-    // (adr/2026-09-cards-yield-on-drop.md). Answers each pushed card's
-    // prior coordinates, so the arrange can fold them into its own
-    // before-image — the drag and the creation, neither of them undoable,
-    // drop the answer.
+    // (adr/2026-09-cards-yield-on-drop.md). A group drop hands its whole
+    // set, which the resolver treats as one rigid body — members never
+    // push each other apart (adr/2026-09-shift-drag-selects-cards.md).
+    // Answers each pushed card's prior coordinates, so the arrange can
+    // fold them into its own before-image — the drag and the creation,
+    // neither of them undoable, drop the answer.
     let settle_cards = use_callback({
         let fallback = fallback.clone();
-        move |anchor: String| {
+        move |anchors: Vec<String>| {
             let placed = table::cards(
                 &table_notes.peek(),
                 &positions.peek(),
@@ -1176,7 +1195,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 filter.peek().as_ref(),
                 today,
             );
-            let settled = table::resolve_drop(&anchor, &placed);
+            let held: Vec<&str> = anchors.iter().map(String::as_str).collect();
+            let settled = table::resolve_group(&held, &placed);
             // taken before the write: a pushed card that had no entry
             // reverses by unpinning, the arrange's own idiom
             let prior: Vec<(String, Option<(f64, f64)>)> = settled
@@ -1198,6 +1218,54 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 (!settled.clear).then_some(Notice::layout_crowded()),
             );
             prior
+        }
+    });
+
+    // the marquee's verdict, taken at mouseup: every card the band touched
+    // becomes the selection, replacing whatever stood before — the band is
+    // the gesture that names a set, not one that adds to it
+    // (adr/2026-09-shift-drag-selects-cards.md). The cards are derived
+    // from the same seam `settle_cards` reads, so a card the viewport
+    // culled is still hit-tested.
+    let pick_marquee = use_callback({
+        let fallback = fallback.clone();
+        move |band: table::Marquee| {
+            let placed = table::cards(
+                &table_notes.peek(),
+                &positions.peek(),
+                &mut fallback.borrow_mut(),
+                &edges.peek(),
+                filter.peek().as_ref(),
+                today,
+            );
+            selection.set(table::marquee_hits(band, &placed));
+        }
+    });
+
+    // What a press on a card hands the drag: the whole picked set, every
+    // member at its own coordinates, when the pressed card is one of them
+    // — and that card alone otherwise
+    // (adr/2026-09-shift-drag-selects-cards.md). Derived at the press from
+    // the same seam `settle_cards` reads, so a member the viewport culled
+    // still travels and a member standing on a fallback slot carries it.
+    let drag_set = use_callback({
+        let fallback = fallback.clone();
+        move |(id, at): (String, (f64, f64))| {
+            let placed = table::cards(
+                &table_notes.peek(),
+                &positions.peek(),
+                &mut fallback.borrow_mut(),
+                &edges.peek(),
+                filter.peek().as_ref(),
+                today,
+            );
+            let held = selection.peek().clone();
+            let picked: Vec<(String, (f64, f64))> = placed
+                .iter()
+                .filter(|card| held.iter().any(|id| id == &card.id))
+                .map(|card| (card.id.clone(), (card.x, card.y)))
+                .collect();
+            table::drag_set(&id, at, &picked)
         }
     });
 
@@ -1263,7 +1331,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // card holds the viewport centre and whatever already
                     // stood there yields
                     // (adr/2026-09-cards-yield-on-drop.md)
-                    settle_cards.call(id.clone());
+                    settle_cards.call(vec![id.clone()]);
                     show_sheet.call((id, Editor::open(path)));
                 }
                 Err(error) => {
@@ -1410,7 +1478,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // spring pass came to rest on yields, and the pushes join the
             // arrange's one before-image — so one undo takes both back
             // (adr/2026-09-cards-yield-on-drop.md)
-            for (id, at) in settle_cards.call(own) {
+            for (id, at) in settle_cards.call(vec![own]) {
                 prior.entry(id).or_insert(at);
             }
             let before = (!prior.is_empty()).then(|| undo::Intent::Arrange {
@@ -3091,16 +3159,54 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // markup itself stays inline in the canvas loop: its key must sit
     // directly on the loop's node for the keyed diff to hold.
     let sheet_open = sheet();
+    // the picked cards at the coordinates this render draws them: what a
+    // press on any member hands the drag, and what marks the cards
+    // (adr/2026-09-shift-drag-selects-cards.md). Rebuilt from `placed`, so
+    // a card picked while unplaced carries its fallback slot like any
+    // other, and an id the store has since lost simply drops out.
+    let picked_now: Vec<(String, (f64, f64))> = {
+        let held = selection.read();
+        placed
+            .iter()
+            .filter(|card| held.iter().any(|id| id == &card.id))
+            .map(|card| (card.id.clone(), (card.x, card.y)))
+            .collect()
+    };
+    // the band a Shift+drag is drawing right now, if one is: reading
+    // `grab` here is what repaints it as the pointer moves, and the
+    // coordinates are the canvas's own, so it is drawn inside the panned
+    // canvas beside the cards it is measuring
+    // (adr/2026-09-shift-drag-selects-cards.md)
+    let band = grab.read().as_ref().and_then(|held| match held {
+        Grab::Marquee { from, to, .. } => Some(table::marquee(*from, *to)),
+        _ => None,
+    });
     let mut seed_grab =
         move |event: MouseEvent, id: String, x: f64, y: f64| {
             // a card grab must not also start a pan — this stop is the whole
             // card-vs-void disambiguation
             event.stop_propagation();
+            // Shift on a card toggles its membership and starts no drag and
+            // no sheet: the one gesture that builds the set card by card
+            // (adr/2026-09-shift-drag-selects-cards.md)
+            if event.modifiers().shift() {
+                selection.with_mut(|held| {
+                    match held.iter().position(|member| member == &id) {
+                        Some(rank) => {
+                            held.remove(rank);
+                        }
+                        None => held.push(id.clone()),
+                    }
+                });
+                return;
+            }
             let at = point(&event, zoom.peek().scale());
+            // a picked card drags the whole set, each member keeping its
+            // offset; an unpicked one moves alone and the set stands
+            let set = drag_set.call((id.clone(), (x, y)));
             grab.set(Some(Grab::Card {
                 id,
-                x,
-                y,
+                set,
                 last: at,
                 down: at,
             }));
@@ -3116,6 +3222,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 table::sheet_frame(viewport()),
             );
             let seed = (card.id.clone(), card.x, card.y);
+            // a picked card whose sheet is open is still picked, and still
+            // says so: a plain click opens a sheet without touching the set
+            // (adr/2026-09-shift-drag-selects-cards.md)
+            let picked =
+                picked_now.iter().any(|(id, _)| id == &card.id);
             // the raised copy is a `.table` child outside the panned
             // canvas, so its inline position carries the pan itself
             let (left, top) = (card.x + pan().0, card.y + pan().1);
@@ -3123,6 +3234,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 div {
                     class: "card card-{card.kind.as_dir()} {card.bar} raised",
                     class: if card.dimmed { "dimmed" },
+                    class: if picked { "picked" },
                     style: "left: {left}px; top: {top}px",
                     onmousedown: move |event: MouseEvent| {
                         seed_grab(event, seed.0.clone(), seed.1, seed.2);
@@ -3407,6 +3519,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // table pane's twin of the logs arm's rung, so the ember and
             // the palette's open-loops command both close from here
             Key::Escape if loops_open() => loops_open.set(false),
+            // a standing selection is a destination you leave too, one rung
+            // below the overlay and one above the notice: Escape drops the
+            // set before it acknowledges anything
+            // (adr/2026-09-shift-drag-selects-cards.md)
+            Key::Escape if !selection().is_empty() => {
+                selection.set(Vec::new())
+            }
             // the ladder's bottom, the logs arm's twin: acknowledge the
             // visible notice, gated so a clean line writes nothing
             Key::Escape => {
@@ -4764,10 +4883,25 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         viewport.set((size.width, size.height));
                     }
                 },
-                // a mousedown that no card stopped is the void: pan
+                // a mousedown that no card stopped is the void: bare, it
+                // pans; with Shift it draws the marquee
+                // (adr/2026-09-shift-drag-selects-cards.md)
                 onmousedown: move |event: MouseEvent| {
-                    grab.set(Some(Grab::Void {
-                        last: point(&event, zoom.peek().scale()),
+                    let scale = zoom.peek().scale();
+                    let at = point(&event, scale);
+                    // the pane is the press's own target — the canvas
+                    // declines every one — so its origin is measurable
+                    // right here and holds for the whole band
+                    let origin = pane_origin(&event);
+                    let corner =
+                        canvas_point(&event, origin, scale, *pan.peek());
+                    grab.set(Some(match event.modifiers().shift() {
+                        true => Grab::Marquee {
+                            origin,
+                            from: corner,
+                            to: corner,
+                        },
+                        false => Grab::Void { last: at, down: at },
                     }));
                 },
                 // one total handler moves whatever is held; `.peek()`
@@ -4778,19 +4912,39 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     let held = grab.peek().clone();
                     match held {
                         None => {}
-                        Some(Grab::Void { last }) => {
+                        Some(Grab::Void { last, down }) => {
                             let now = point(&event, zoom.peek().scale());
                             let (x, y) = *pan.peek();
                             pan.set((x + now.0 - last.0, y + now.1 - last.1));
-                            grab.set(Some(Grab::Void { last: now }));
+                            grab.set(Some(Grab::Void { last: now, down }));
                         }
-                        Some(Grab::Card { id, x, y, last, down }) => {
+                        Some(Grab::Card { id, set, last, down }) => {
                             let now = point(&event, zoom.peek().scale());
-                            let (x, y) = (x + now.0 - last.0, y + now.1 - last.1);
+                            let delta = (now.0 - last.0, now.1 - last.1);
+                            // rigid: one delta on every member, so a group
+                            // drag preserves the arrangement it started with
+                            let set = table::move_set(&set, delta);
                             // the live repaint and the debounce restart are
-                            // the same write
-                            positions.write().set(&id, x, y);
-                            grab.set(Some(Grab::Card { id, x, y, last: now, down }));
+                            // the same write, whether one card moved or ten
+                            positions.with_mut(|store| {
+                                for (member, (x, y)) in &set {
+                                    store.set(member, *x, *y);
+                                }
+                            });
+                            grab.set(Some(Grab::Card { id, set, last: now, down }));
+                        }
+                        Some(Grab::Marquee { origin, from, .. }) => {
+                            let to = canvas_point(
+                                &event,
+                                origin,
+                                zoom.peek().scale(),
+                                *pan.peek(),
+                            );
+                            grab.set(Some(Grab::Marquee {
+                                origin,
+                                from,
+                                to,
+                            }));
                         }
                     }
                 },
@@ -4804,15 +4958,34 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // read out first: the zoom's peek guard must drop
                     // before an arm's own callback reads that signal
                     let up = point(&event, zoom.peek().scale());
-                    if let Some(Grab::Card { id, down, .. }) = held {
-                        match table::is_click(down, up) {
-                            true => open_sheet.call(id),
-                            // beyond the slop it was a drop: the card holds
-                            // where the hand left it and its neighbours
-                            // yield (adr/2026-09-cards-yield-on-drop.md)
-                            false => {
-                                settle_cards.call(id);
+                    match held {
+                        None => {}
+                        Some(Grab::Card { id, set, down, .. }) => {
+                            match table::is_click(down, up) {
+                                true => open_sheet.call(id),
+                                // beyond the slop it was a drop: the cards
+                                // hold where the hand left them and their
+                                // outside neighbours yield
+                                // (adr/2026-09-cards-yield-on-drop.md)
+                                false => {
+                                    settle_cards.call(
+                                        set.into_iter()
+                                            .map(|(member, _)| member)
+                                            .collect(),
+                                    );
+                                }
                             }
+                        }
+                        // a bare click on the void clears the selection; a
+                        // pan leaves it standing
+                        // (adr/2026-09-shift-drag-selects-cards.md)
+                        Some(Grab::Void { down, .. }) => {
+                            if table::is_click(down, up) {
+                                selection.set(Vec::new());
+                            }
+                        }
+                        Some(Grab::Marquee { from, to, .. }) => {
+                            pick_marquee.call(table::marquee(from, to));
                         }
                     }
                 },
@@ -4855,6 +5028,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             class: "card card-{card.kind.as_dir()} {card.bar}",
                             class: if zoom() == table::Zoom::Bodies { "bodies" },
                             class: if card.dimmed { "dimmed" },
+                            // hue on the border and weight in the fill, both
+                            // from tokens the theme already carries — a
+                            // selection a greyscale eye can still read
+                            // (AIR INP-3, adr/2026-09-shift-drag-selects-cards.md)
+                            class: if picked_now.iter().any(|(id, _)| id == &card.id) { "picked" },
                             style: "left: {card.x}px; top: {card.y}px",
                             onmousedown: {
                                 let seed = (card.id.clone(), card.x, card.y);
@@ -4887,6 +5065,20 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+                    // the rubber band, last child so it paints over the
+                    // cards it is measuring; absolutely positioned, so its
+                    // arrival moves nothing already on screen (AIR LAY-1)
+                    {
+                        match band {
+                            Some(band) => rsx! {
+                                div {
+                                    class: "marquee",
+                                    style: "left: {band.left}px; top: {band.top}px; width: {band.width}px; height: {band.height}px",
+                                }
+                            },
+                            None => rsx! {},
                         }
                     }
                 }
@@ -5240,24 +5432,38 @@ fn push_visit(history: &mut Vec<Visit>, visit: Visit) {
     }
 }
 
-/// What the mouse holds on the table: the void (panning) or a card (moving
-/// it). `last` is the previous mousemove in client coordinates; the card's
-/// `x, y` are its canvas coordinates, authoritative while the drag lasts —
-/// seeded from the render, so a click that never moves writes nothing.
-/// `down` is where the press landed, never mutated: mouseup measures the
-/// whole travel against it to tell a click from a drag
-/// (adr/2026-08-click-opens-drag-moves.md).
+/// What the mouse holds on the table: the void (panning), a card (moving
+/// it and every other member of the picked set with it), or the rubber
+/// band a Shift+press on the void draws
+/// (adr/2026-09-shift-drag-selects-cards.md). `last` is the previous
+/// mousemove in client coordinates; a card grab's `set` is every member's
+/// canvas coordinates, authoritative while the drag lasts — seeded from
+/// the render, so a click that never moves writes nothing — with the
+/// pressed card's own entry among them. `down` is where the press landed,
+/// never mutated: mouseup measures the whole travel against it to tell a
+/// click from a drag (adr/2026-08-click-opens-drag-moves.md), which is
+/// what tells a void click (clears the selection) from a pan (leaves it).
+/// The band's two corners are canvas coordinates, not client ones: they
+/// are compared against where the cards stand.
 #[derive(Clone, PartialEq)]
 enum Grab {
     Void {
         last: (f64, f64),
+        down: (f64, f64),
     },
     Card {
         id: String,
-        x: f64,
-        y: f64,
+        set: Vec<(String, (f64, f64))>,
         last: (f64, f64),
         down: (f64, f64),
+    },
+    Marquee {
+        /// The pane's own top-left in client coordinates, measured off the
+        /// press that started the band: the chrome's height, whatever the
+        /// header came out to. Every later move subtracts it.
+        origin: (f64, f64),
+        from: (f64, f64),
+        to: (f64, f64),
     },
 }
 
@@ -5269,6 +5475,38 @@ enum Grab {
 fn point(event: &MouseEvent, scale: f64) -> (f64, f64) {
     let coordinates = event.client_coordinates();
     (coordinates.x / scale, coordinates.y / scale)
+}
+
+/// The pane's top-left in client coordinates, read off a press that landed
+/// on the pane itself: `offsetX/offsetY` are the same point measured from
+/// the pane's own padding edge, so the difference is the chrome's height.
+/// The canvas declines every press (`.canvas { pointer-events: none }`),
+/// which is what makes the void's offsets pane-local at every zoom
+/// (adr/2026-09-shift-drag-selects-cards.md).
+fn pane_origin(event: &MouseEvent) -> (f64, f64) {
+    let client = event.client_coordinates();
+    let element = event.element_coordinates();
+    (client.x - element.x, client.y - element.y)
+}
+
+/// Where a client point stands on the canvas: the pane's origin off it,
+/// then the zoom and the pan undone, since a pane coordinate p and a
+/// canvas coordinate c are related by p = s·(c + pan)
+/// (adr/2026-08-body-zoom-scale-and-metrics.md). A drag delta needs none
+/// of this — the origin and the pan are both constant across a drag — but
+/// the marquee is an absolute rectangle, measured against the `left` and
+/// `top` the cards themselves carry.
+fn canvas_point(
+    event: &MouseEvent,
+    origin: (f64, f64),
+    scale: f64,
+    pan: (f64, f64),
+) -> (f64, f64) {
+    let client = event.client_coordinates();
+    (
+        (client.x - origin.0) / scale - pan.0,
+        (client.y - origin.1) / scale - pan.1,
+    )
 }
 
 /// The one-line chrome (adr/2026-08-shipped-ui-is-the-spec.md): two 14×14 stroked icons, the
@@ -7107,6 +7345,282 @@ mod tests {
         );
     }
 
+    // -- Shift picks cards, and a picked set moves as one
+    //    (adr/2026-09-shift-drag-selects-cards.md) -----------------------
+
+    #[test]
+    fn a_shift_drag_on_the_void_picks_every_card_the_band_touched() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, _) = table_targets(&mut dom, &clicks);
+
+        // the three cards stand on the grid at x 32, 224 and 416; the band
+        // covers the first whole and clips the second, and never reaches
+        // the third — intersects, not contains
+        shift_mouse(&mut dom, "mousedown", pane, (0.0, 0.0));
+        shift_mouse(&mut dom, "mousemove", pane, (300.0, 100.0));
+        let drawing = dioxus_ssr::render(&dom);
+        assert!(
+            drawing.contains(
+                r#"class="marquee" style="left: 0px; top: 0px; width: 300px; height: 100px""#
+            ),
+            "the band is drawn while the drag is in flight: {drawing}"
+        );
+        assert!(
+            drawing.contains("transform: scale(1) translate(0px, 0px)"),
+            "a shift drag never pans: {drawing}"
+        );
+
+        shift_mouse(&mut dom, "mouseup", pane, (300.0, 100.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains(r#"class="marquee""#), "{html}");
+        assert!(
+            html.contains(r#"picked" style="left: 32px; top: 32px""#),
+            "the card the band covered is picked: {html}"
+        );
+        assert!(
+            html.contains(r#"picked" style="left: 224px; top: 32px""#),
+            "the card the band clipped is picked too: {html}"
+        );
+        assert!(
+            !html.contains(r#"picked" style="left: 416px; top: 32px""#),
+            "the card the band never reached is not: {html}"
+        );
+    }
+
+    #[test]
+    fn the_band_is_measured_on_the_canvas_and_not_on_the_glass() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, _) = table_targets(&mut dom, &clicks);
+
+        // pan the canvas 100 to the left, so a pane point stands 100
+        // further right on the canvas than it looks
+        mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
+        mouse(&mut dom, "mousemove", pane, (100.0, 200.0));
+        mouse(&mut dom, "mouseup", pane, (100.0, 200.0));
+
+        // the band covers pane x 0..150, which is canvas x 100..250: it
+        // reaches the second card, which sits at 224 and would be well
+        // outside a band read straight off the glass
+        shift_mouse(&mut dom, "mousedown", pane, (0.0, 0.0));
+        shift_mouse(&mut dom, "mousemove", pane, (150.0, 100.0));
+        let drawing = dioxus_ssr::render(&dom);
+        assert!(
+            drawing.contains(
+                r#"class="marquee" style="left: 100px; top: 0px; width: 150px; height: 100px""#
+            ),
+            "the band is drawn in the canvas's own coordinates: {drawing}"
+        );
+
+        shift_mouse(&mut dom, "mouseup", pane, (150.0, 100.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"picked" style="left: 32px; top: 32px""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"picked" style="left: 224px; top: 32px""#),
+            "the pan was taken off before the hit test: {html}"
+        );
+        assert!(
+            !html.contains(r#"picked" style="left: 416px; top: 32px""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn shift_clicking_a_card_toggles_it_and_opens_no_sheet() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"picked" style="left: 32px; top: 32px""#),
+            "the shift press picked it: {html}"
+        );
+        assert!(
+            !html.contains(r#"class="sheet""#),
+            "and opened no sheet: {html}"
+        );
+
+        // the same press again takes it back out
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        assert!(
+            !dioxus_ssr::render(&dom).contains("picked"),
+            "the toggle is a toggle"
+        );
+    }
+
+    #[test]
+    fn dragging_a_picked_card_moves_every_member_by_the_same_offset() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        // alpha and capture-idea, picked by the band
+        shift_mouse(&mut dom, "mousedown", pane, (0.0, 0.0));
+        shift_mouse(&mut dom, "mousemove", pane, (300.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (300.0, 100.0));
+
+        // the drag takes alpha 10 right and 300 down; capture-idea keeps
+        // its 192 of offset and travels the same delta
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (110.0, 400.0));
+        mouse(&mut dom, "mouseup", pane, (110.0, 400.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 42px; top: 332px"), "{html}");
+        assert!(html.contains("left: 234px; top: 332px"), "{html}");
+        assert!(
+            html.contains("left: 416px; top: 32px"),
+            "the card nobody picked stood still: {html}"
+        );
+
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the debounced write reached the file");
+        assert_eq!(
+            saved.trim(),
+            "alpha 42 332\n\
+             capture-idea 234 332",
+            "the whole set persisted, and nothing else did: {saved}"
+        );
+    }
+
+    #[test]
+    fn dragging_an_unpicked_card_moves_it_alone_and_leaves_the_set() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+
+        // digest is nobody's member: it travels by itself
+        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (110.0, 400.0));
+        mouse(&mut dom, "mouseup", pane, (110.0, 400.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 426px; top: 332px"), "{html}");
+        assert!(
+            html.contains(r#"picked" style="left: 32px; top: 32px""#),
+            "the picked card neither moved nor was dropped: {html}"
+        );
+    }
+
+    #[test]
+    fn a_picked_card_still_says_so_with_its_sheet_open() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        // a plain click still opens the sheet and leaves the set standing
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(r#"raised  picked" style="left: 32px; top: 32px""#),
+            "the raised copy carries the mark too: {html}"
+        );
+    }
+
+    #[test]
+    fn a_bare_void_click_clears_the_selection_and_a_pan_does_not() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+
+        // past the slop it was a pan: the set stands
+        mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
+        mouse(&mut dom, "mousemove", pane, (180.0, 230.0));
+        mouse(&mut dom, "mouseup", pane, (180.0, 230.0));
+        assert!(
+            dioxus_ssr::render(&dom).contains("picked"),
+            "panning is not a click"
+        );
+
+        // within it, it was a click: the set goes
+        mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
+        mouse(&mut dom, "mouseup", pane, (200.0, 200.0));
+        assert!(!dioxus_ssr::render(&dom).contains("picked"));
+    }
+
+    #[test]
+    fn escape_clears_the_selection_before_it_acknowledges_the_notice() {
+        // the crowded pile of the resolver's own scenario, so a notice is
+        // standing while the set is: the selection rung answers first
+        let vault = temp_vault();
+        std::fs::create_dir_all(vault.path().join(".index"))
+            .expect("the index dir is creatable");
+        std::fs::write(
+            vault.path().join(".index/positions"),
+            "alpha 0 0\ncapture-idea 0 40\ndigest 0 80\n",
+        )
+        .expect("the pile is written");
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (110.0, 100.0));
+        mouse(&mut dom, "mouseup", pane, (110.0, 100.0));
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        assert!(dioxus_ssr::render(&dom).contains("picked"));
+
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        let once = dioxus_ssr::render(&dom);
+        assert!(!once.contains("picked"), "the set went first: {once}");
+        assert!(
+            once.contains("layout: too tight to clear"),
+            "and the notice stayed: {once}"
+        );
+
+        press(&mut dom, keys, Key::Escape, Modifiers::empty());
+        assert!(
+            !dioxus_ssr::render(&dom).contains("layout: too tight to clear"),
+            "the second press reached the notice"
+        );
+    }
+
+    #[test]
+    fn the_selection_dies_with_the_table_view() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        assert!(dioxus_ssr::render(&dom).contains("picked"));
+
+        // the clear is an effect over the screen, so it lands on the tick
+        // after the switch — while the table is not drawn at all
+        click(&mut dom, clicks[CHROME_LOGS]);
+        block_on(settle(&mut dom));
+        click(&mut dom, clicks[CHROME_TABLE]);
+        assert!(
+            !dioxus_ssr::render(&dom).contains("picked"),
+            "it never survives to the logs and back"
+        );
+    }
+
     #[test]
     fn a_click_that_never_moves_writes_no_position() {
         let vault = temp_vault();
@@ -8267,7 +8781,7 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         // the raised card is now alpha's, on alpha's slot; beta went back
         assert!(
-            html.contains(r#"raised " style="left: 32px; top: 32px""#),
+            html.contains(r#"raised  " style="left: 32px; top: 32px""#),
             "the sheets swapped: {html}"
         );
         assert!(html.contains(">beta</div>"), "{html}");
@@ -8325,7 +8839,7 @@ mod tests {
         press(&mut dom, keys, Key::Enter, Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(r#"raised " style="left: 608px; top: 32px""#),
+            html.contains(r#"raised  " style="left: 608px; top: 32px""#),
             "gamma's sheet stayed put: {html}"
         );
     }
@@ -19024,6 +19538,43 @@ mod tests {
         target: ElementId,
         at: (f64, f64),
     ) -> Mutations {
+        mouse_with(dom, kind, target, at, (0.0, 0.0), Modifiers::empty())
+    }
+
+    /// The chrome's height in the tests' fiction: the pane hangs below the
+    /// header, so a press's client point and the pane-local offset the
+    /// browser reports alongside it differ by exactly this much — which is
+    /// what the marquee measures its band from
+    /// (adr/2026-09-shift-drag-selects-cards.md).
+    const PANE_TOP: f64 = 36.0;
+
+    /// The same press with Shift held, at a point given in the *pane's*
+    /// coordinates: the marquee's drag on the void and the Shift+click
+    /// that toggles a card both ride this modifier.
+    fn shift_mouse(
+        dom: &mut VirtualDom,
+        kind: &'static str,
+        target: ElementId,
+        at: (f64, f64),
+    ) {
+        mouse_with(
+            dom,
+            kind,
+            target,
+            (at.0, at.1 + PANE_TOP),
+            at,
+            Modifiers::SHIFT,
+        );
+    }
+
+    fn mouse_with(
+        dom: &mut VirtualDom,
+        kind: &'static str,
+        target: ElementId,
+        at: (f64, f64),
+        offset: (f64, f64),
+        modifiers: Modifiers,
+    ) -> Mutations {
         with_reactor(|| {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedMouseData::new(
@@ -19034,11 +19585,11 @@ mod tests {
                         Coordinates::new(
                             ScreenPoint::zero(),
                             ClientPoint::new(at.0, at.1),
-                            ElementPoint::zero(),
+                            ElementPoint::new(offset.0, offset.1),
                             PagePoint::zero(),
                         )
                     },
-                    Modifiers::empty(),
+                    modifiers,
                 ),
             )));
             dom.runtime()
