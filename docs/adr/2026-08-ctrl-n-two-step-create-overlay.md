@@ -1,5 +1,7 @@
 # Ctrl+N creates a permanent note through one two-step overlay
 
+> Amended by `2026-09-a-course-is-a-project.md` and `2026-09-tool-is-the-ninth-permanent-type.md`: step 1 lists nine types now — the eight below, `course` never among them again, plus `tool` last.
+
 ## Context
 
 Phase 4 needs creation without leaving the table: a keystroke, a type, a title — `template::create` needs the last two, and the id derives from the title.

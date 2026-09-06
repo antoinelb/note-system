@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use crate::domain::{NoteCategory, NoteType, stem_of};
 use crate::template::{self, TemplateError};
 
-/// The eight permanent types, in the order the picker lists them — the
+/// The nine permanent types, in the order the picker lists them — the
 /// wireframe palette's order plus the two turn-1 additions, the same order
 /// the type bars are documented in. A course is a `project`
-/// (adr/2026-09-a-course-is-a-project.md).
-pub const TYPES: [NoteType; 8] = [
+/// (adr/2026-09-a-course-is-a-project.md); `tool` is anything that helps
+/// do work and comes last, the one type added after the set closed
+/// (adr/2026-09-tool-is-the-ninth-permanent-type.md).
+pub const TYPES: [NoteType; 9] = [
     NoteType::Person,
     NoteType::Organisation,
     NoteType::Source,
@@ -21,6 +23,7 @@ pub const TYPES: [NoteType; 8] = [
     NoteType::Idea,
     NoteType::Personal,
     NoteType::Project,
+    NoteType::Tool,
 ];
 
 /// The types a query leaves — the palette's contains rule, over a closed
@@ -87,7 +90,8 @@ mod tests {
                 "claim",
                 "idea",
                 "personal",
-                "project"
+                "project",
+                "tool"
             ]
         );
     }
