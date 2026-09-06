@@ -49,3 +49,13 @@ Taken with the user (2026-08-13):
   name; git already is the durable history.
 - **Drag undo** — the gesture corrects itself; the register is for
   one-shot destructions.
+
+## Reaffirmed by `2026-09-shift-drag-selects-cards.md` (2026-09-06)
+
+`docs/plans/2026-09-multi-select-cards.md` argued that "the gesture
+corrects itself by dragging back" had been voided by the yield rule
+(`2026-09-cards-yield-on-drop.md`): dragging a group back does not un-yield
+the neighbours it pushed. The user reaffirmed the rejection anyway — no
+`Intent::Move`, single or group. A drag's consequence on its neighbours is
+accepted as the price of the layout rule, and the register stays what it
+is: a bounded list of one-shot destructions.

@@ -19,3 +19,14 @@ Phase 8's on-demand layout: at most a command, force-directed never the default;
 - **A chord** — layout is rare and deliberate; "at most a command".
 - **Radial rings around the anchor** — trivially bounded but discards the cluster's existing arrangement, which the seed-from-current-positions pass preserves in outline.
 - **Iterating to convergence** — the bound must be structural; 50 clamped steps settle small clusters and merely improve large ones, both acceptable outcomes of an explicit command.
+
+## Amended by `2026-09-cards-yield-on-drop.md` (2026-09-06)
+
+The cluster's landing is a drop like any other: once the spring pass has
+written its positions, the cards outside the component that it came to rest
+on yield and are pinned, with the sheet's own card holding the place the
+user is looking at.
+"Only component members move" was a statement about the *spring pass*, and
+it still holds — it was never a promise that a bystander would be buried.
+The pushes join the arrange's own `Intent::Arrange` before-image, so one
+undo still takes the whole landing back.

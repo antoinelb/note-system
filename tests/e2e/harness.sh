@@ -165,6 +165,27 @@ e2e_click_at() {
     xdotool mousemove --sync "$1" "$2" click 1
 }
 
+# A press at ($1, $2), a move to ($3, $4) and a release there — the
+# table's own drag. Two moves, not one: a lone --sync move can be
+# coalesced with the press, and the pane needs a mousemove to read the
+# gesture as a drag rather than a click.
+e2e_drag_at() {
+    xdotool mousemove --sync "$1" "$2"
+    xdotool mousedown 1
+    xdotool mousemove --sync "$(( ($1 + $3) / 2 ))" "$(( ($2 + $4) / 2 ))"
+    xdotool mousemove --sync "$3" "$4"
+    xdotool mouseup 1
+    e2e_shot "$E2E_DIR/probe.png"
+}
+
+# The same drag with Shift held for the whole of it: on the table's void
+# that is the marquee (adr/2026-09-shift-drag-selects-cards.md).
+e2e_shift_drag_at() {
+    xdotool keydown shift
+    e2e_drag_at "$@"
+    xdotool keyup shift
+}
+
 # The chrome header (assets/theme.css .chrome: flex, 8px/16px padding,
 # 16px gap, align-items center, 20px min-height) packs two 14x14 icons
 # left to right, table then logs, both centred on the header's 20px-tall

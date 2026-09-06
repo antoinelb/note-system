@@ -72,6 +72,10 @@ pub enum Source {
     /// an earlier refusal (adr/2026-09-export-writes-the-pdf-beside-the-note.md).
     Export,
     Clipboard,
+    /// The table's drop resolver running out of passes: the next drop that
+    /// comes out clear resolves it
+    /// (adr/2026-09-cards-yield-on-drop.md).
+    Layout,
 }
 
 /// Whether the index tracks the vault — rendered by the chrome's liveness
@@ -141,6 +145,18 @@ impl Status {
     /// (`adr/2026-08-status-surface-owns-notices.md`).
     pub fn resolve(&mut self, source: Source) {
         self.active.retain(|standing| standing.source != source);
+    }
+
+    /// Report or resolve in one move: a source with news reports it, a
+    /// source with none resolves whatever of its own still stands. For the
+    /// caller that runs on every gesture and has a verdict either way —
+    /// the table's drop resolver — so the branch lives here rather than in
+    /// the component (adr/2026-09-cards-yield-on-drop.md).
+    pub fn settle(&mut self, source: Source, notice: Option<Notice>) {
+        match notice {
+            Some(notice) => self.report(notice),
+            None => self.resolve(source),
+        }
     }
 
     /// Whether a source has a notice standing — the callers' write gate, so
@@ -240,6 +256,21 @@ impl Notice {
                 "positions: {detail} — placements held in memory; \
                  the next move retries"
             ),
+        }
+    }
+
+    /// The drop resolver running out of passes with cards still on top of
+    /// each other: every push it managed stands and the drop itself was
+    /// never refused — crowding is visible debt, not a save-blocker
+    /// (adr/2026-09-cards-yield-on-drop.md).
+    pub fn layout_crowded() -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Layout,
+            text: "layout: too tight to clear every card — the cards that \
+                   could yield did; drag one out of the pile and drop it \
+                   again"
+                .to_string(),
         }
     }
 
@@ -511,6 +542,20 @@ mod tests {
         status.resolve(Source::Save);
         assert!(!status.has(Source::Save));
         assert_eq!(status.line(), None);
+        assert_eq!(status.history().len(), 1, "the record survives");
+    }
+
+    #[test]
+    fn settle_reports_a_verdict_and_clears_it_when_it_stops_holding() {
+        // the drop resolver's one call site: crowded, then clear
+        let mut status = Status::default();
+        status.settle(Source::Layout, Some(Notice::layout_crowded()));
+        let line = status.line().expect("the crowding is standing");
+        assert_eq!(line.severity, Severity::Warning, "{line:?}");
+        assert!(line.text.starts_with("layout: "), "{line:?}");
+
+        status.settle(Source::Layout, None);
+        assert!(!status.has(Source::Layout), "a clear drop resolved it");
         assert_eq!(status.history().len(), 1, "the record survives");
     }
 
