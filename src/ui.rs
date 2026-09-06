@@ -9713,9 +9713,20 @@ mod tests {
 
         retype(&mut dom, sink, "> Une idée _importante_. _Simone Weil_\n");
 
-        assert_eq!(
-            source_of(&dom),
-            "> Une idée _importante_. _Simone Weil_\n"
+        // the newline ended the quote's block, so the awake block is the
+        // bare line Enter opened — no `> ` repeated into it
+        // (adr/2026-09-a-new-line-is-its-own-block.md)
+        assert_eq!(source_of(&dom), "");
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(
+                r#"<span class="mk-marker" data-start="0">&#62; </span>"#
+            ),
+            "the quote it left behind kept its own literal marker: {html}"
+        );
+        assert!(
+            !html.contains(r#"class="block-active mk-quote""#),
+            "and the fresh line wears no quote rule: {html}"
         );
     }
 
@@ -9736,8 +9747,8 @@ mod tests {
         type_keys(&mut dom, sink, "ouvert");
         assert_eq!(
             source_of(&dom),
-            "= 2026-07-23\nouvert",
-            "the line opened below the caret's line"
+            "ouvert",
+            "the opened line is its own block, below the caret's line"
         );
     }
 
@@ -9767,7 +9778,7 @@ mod tests {
         assert_eq!(sink_target(), sink, "the one sink is still the one");
         // the letter that used to fall on <body> lands on the new line
         type_keys(&mut dom, sink, "s");
-        assert_eq!(source_of(&dom), "= 2026-07-23\ns");
+        assert_eq!(source_of(&dom), "s");
 
         // Escape, then gg: a wake by motion, same sink, same proof
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
@@ -10706,6 +10717,56 @@ mod tests {
                 r#"<span class="mk-marker" data-start="0">= </span>"#
             ),
             "the heading marker keeps its role while active: {html}"
+        );
+    }
+
+    /// A line opened under a heading is prose, not a second heading line:
+    /// the newline ends the heading's block, so the fresh line is its own
+    /// block and the heading's `mk-h1` stays behind on the line that owns
+    /// it (adr/2026-09-a-new-line-is-its-own-block.md).
+    #[test]
+    fn a_line_opened_under_a_heading_draws_as_prose() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+
+        // insert mode's Enter at the heading's end
+        press(
+            &mut dom,
+            sink,
+            Key::Character("A".into()),
+            Modifiers::empty(),
+        );
+        press(&mut dom, sink, Key::Enter, Modifiers::empty());
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains(r#"class="block-active mk-h1""#),
+            "the fresh line does not wear the heading's role: {html}"
+        );
+        assert!(
+            html.contains(r#"class="block-active mk-blank""#),
+            "it is a blank prose line: {html}"
+        );
+
+        // and normal mode's `o`, the other opener the user named
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("o".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            !html.contains(r#"class="block-active mk-h1""#),
+            "`o` opens a prose line too: {html}"
+        );
+        assert!(
+            html.contains(r#"class="block-active mk-blank""#),
+            "`o`'s fresh line is blank prose: {html}"
         );
     }
 
@@ -11711,7 +11772,7 @@ mod tests {
 
         let rendered = dioxus_ssr::render(&dom);
         assert!(
-            rendered.contains(r#"class="caret-box" data-start="16""#),
+            rendered.contains(r#"class="caret-box" data-start="4""#),
             "the late landing left the caret where h put it: {rendered}"
         );
         press(
@@ -11870,8 +11931,9 @@ mod tests {
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, sink) = activate_heading(&mut dom, &clicks);
-        // three lines in one block, the middle one too short to hold the
-        // column the run starts at
+        // three lines, the middle one too short to hold the column the run
+        // starts at — one block each, since a written newline ends the
+        // block it lands in (adr/2026-09-a-new-line-is-its-own-block.md)
         retype(&mut dom, sink, "abcdefgh\nij\nklmnopqr");
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
         block_on(settle(&mut dom));
@@ -11894,7 +11956,7 @@ mod tests {
         block_on(settle(&mut dom));
         let clamped = dioxus_ssr::render(&dom);
         assert!(
-            clamped.contains(r#"class="caret-box" data-start="10""#),
+            clamped.contains(r#"class="caret-box" data-start="1""#),
             "the short line clamps the walk onto its last cluster: {clamped}"
         );
 
