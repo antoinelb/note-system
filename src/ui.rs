@@ -10837,6 +10837,63 @@ mod tests {
         );
     }
 
+    /// A wrapped list or checklist item hangs its continuation rows under
+    /// its own text (adr/2026-09-wrapped-items-hang-under-their-text.md).
+    /// The hang lives entirely in the stylesheet — no class and no
+    /// attribute changed, so SSR has nothing to assert on — and the pair
+    /// that makes it safe is what this reads: `.mk-item` adds `--mk-hang`
+    /// to the padding *and* pulls the first line back out of it by the
+    /// same length, so an unwrapped item starts exactly where it did
+    /// before and its line box stays one line tall. The stylesheet is read
+    /// from the file the way the picker's own box is
+    /// (adr/2026-08-theme-css-inlined.md), and the four `--mk-hang` values
+    /// are the four prefixes the two states draw.
+    #[test]
+    fn a_wrapped_item_hangs_under_its_text() {
+        let sheet = include_str!("../assets/theme.css");
+        let rule = sheet
+            .split("\n.mk-item {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet carries the item's box");
+        assert!(
+            rule.contains(
+                "padding-left: calc(16px + var(--mk-indent, 0) * 16px + \
+                 var(--mk-hang));"
+            ),
+            "the padding carries the hang on top of the nesting step: {rule}"
+        );
+        assert!(
+            rule.contains("text-indent: calc(-1 * var(--mk-hang));"),
+            "the first line is pulled back out of that same hang, so an \
+             unwrapped item does not move: {rule}"
+        );
+        // the four prefixes, and the source order the cascade needs: the
+        // three two-class rules tie on specificity, so an inactive
+        // checklist only reaches its own width because the three-class
+        // rule is last
+        let mut at = 0;
+        for selector in [
+            "\n.mk-item {",
+            "\n.mk-item:has(.mk-checkbox) {",
+            "\n.block-css.mk-item {",
+            "\n.block-css.mk-item:has(.mk-checkbox) {",
+        ] {
+            let found = sheet.find(selector).unwrap_or(0);
+            assert!(found > at, "{selector} follows the rule before it");
+            at = found;
+            let kind = sheet
+                .split(selector)
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_default();
+            assert!(
+                kind.contains("--mk-hang:"),
+                "{selector} names its own prefix width: {kind}"
+            );
+        }
+    }
+
     /// A block CSS cannot draw (an equation) stays unstyled even as the
     /// active widget: no markup class anywhere, and the caret drawn over it
     /// is untouched by the fallback.

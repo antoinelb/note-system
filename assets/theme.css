@@ -736,9 +736,72 @@ body {
 /* the base indent, stepped out per nesting level by the `--mk-indent`
    custom property src/ui.rs sets inline from `markup::item_indent_style`
    (unbounded depth, so a class per level is not an option — see the
-   `[class*="mk-h"]` comment above) */
+   `[class*="mk-h"]` comment above), plus the hanging indent a wrapped item
+   keeps under its own text (adr/2026-09-wrapped-items-hang-under-their-text.md).
+
+   The hang is one pair of declarations: `padding-left` carries `--mk-hang`
+   on top of the base indent and `text-indent` pulls the first line back
+   out of it by exactly the same length. So the first row starts where it
+   always did — nothing on screen moves for a line that does not wrap, and
+   the line box stays one line tall (adr/2026-09-every-line-shares-the-quote-rhythm.md)
+   — while every wrapped row starts at the padding edge, level with the
+   text after the marker.
+
+   `--mk-hang` is the width of everything drawn before that text, and CSS
+   cannot ask the layout for it: the prose face is proportional, so `ch` is
+   not the advance of any of these glyphs. The five advances below are
+   Cormorant Garamond's own, read off CormorantGaramond-Regular.ttf
+   (unitsPerEm 1000) and written in `em` — which on these blocks is
+   `var(--prose-size)`, so the hang follows the settings overlay's size
+   knob. A face change is the one thing that invalidates them.
+
+   Four prefixes, because two states draw two kinds of item: the active and
+   the selected block show the source (`- `, `- [ ] `), while `.block-css`
+   hides those spans and draws `•  ` / `○ ` in their place
+   (adr/2026-09-inactive-blocks-hide-their-syntax.md). A nested item adds
+   its own leading spaces on top of all four: `caret::INDENT` is two spaces
+   per level and they carry `Role::Text`, so both states paint them. */
 .mk-item {
-  padding-left: calc(16px + var(--mk-indent, 0) * 16px);
+  /* one glyph's advance in the prose face */
+  --mk-space: 0.234em;
+  --mk-hyphen: 0.323em;
+  --mk-bracket: 0.274em;
+  --mk-bullet: 0.306em;
+  --mk-circle: 0.767em;
+  --mk-lead: calc(var(--mk-indent, 0) * 2 * var(--mk-space));
+  /* the source's own "- ", shown on the active and the selected block */
+  --mk-hang: calc(var(--mk-lead) + var(--mk-hyphen) + var(--mk-space));
+  padding-left: calc(16px + var(--mk-indent, 0) * 16px + var(--mk-hang));
+  text-indent: calc(-1 * var(--mk-hang));
+}
+
+/* the source's own "- [ ] " on those same two blocks. `:has` is how the
+   inactive checklist already finds its box just above, and the checkbox
+   spans exist on every state's model — only the painting differs */
+.mk-item:has(.mk-checkbox) {
+  --mk-hang: calc(
+    var(--mk-lead) + var(--mk-hyphen) + var(--mk-space) + var(--mk-bracket) +
+      var(--mk-space) + var(--mk-bracket) + var(--mk-space)
+  );
+}
+
+/* the bullet an inactive block draws in the hidden marker's place. One
+   space, not the two `content: "\2022  "` spells: a space in generated
+   content is collapsible whatever `white-space` the block inherits, so
+   the pair renders as one — measured in the running window, 10px of the
+   18px prose size. Ties with the rule above on specificity, so it must
+   stay below it and above the one below, which outranks both */
+.block-css.mk-item {
+  --mk-hang: calc(var(--mk-lead) + var(--mk-bullet) + var(--mk-space));
+}
+
+/* the circle in the hidden box's place. One space again, and for the
+   mirrored reason: `content: "\25CB "`'s own space is collapsible and the
+   source's space after `]` is not — that byte is `Role::Text`, not
+   `Role::Checkbox`, so it is the one byte of a checklist's prefix an
+   inactive block still paints, and the collapsible one folds into it */
+.block-css.mk-item:has(.mk-checkbox) {
+  --mk-hang: calc(var(--mk-lead) + var(--mk-circle) + var(--mk-space));
 }
 
 .mk-quote {
