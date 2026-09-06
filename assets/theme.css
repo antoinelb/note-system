@@ -1113,10 +1113,16 @@ body {
   color: var(--ink-bright);
 }
 
+/* the week number and the dates beside it sit on one baseline: a day cell
+   carries a 1px border and 2px of padding the gutter has none of, and the
+   grid's default stretch left the gutter's text 3px above its own row.
+   Baseline alignment is the idiom .rail-row and .palette-row already use,
+   and it costs no height — the row stays as tall as the day cell */
 .cal-grid {
   display: grid;
   grid-template-columns: 24px repeat(7, 1fr);
   gap: 4px;
+  align-items: baseline;
   font: 14px Lato, sans-serif;
   font-variant-numeric: tabular-nums;
 }
