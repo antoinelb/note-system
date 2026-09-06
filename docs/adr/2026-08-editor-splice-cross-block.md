@@ -1,5 +1,7 @@
 # `Editor::splice`: one entry point, two routes
 
+**The within-block route's "no resegment" is amended by `adr/2026-09-a-new-line-is-its-own-block.md`**: a replacement that carries a newline resegments on the spot, so the line Enter, `o`/`O` or a paste opens is its own block immediately rather than at the next activate/deactivate — otherwise it drew under the role of the line above it. Everything else here stands: the two routes, the linewise span rule, and the one staleness policy.
+
 ## Context
 
 A phase-3 change can span the whole note (`dG`, `dj` on a block's last line), but the editor's one edit op was block-scoped `edit` (`adr/2026-07-hybrid-active-block-textarea.md`). `Buffer::replace_range` already spans the note; the open decision was the `Editor` entry point's shape.

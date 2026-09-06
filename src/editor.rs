@@ -163,8 +163,10 @@ impl Editor {
 
     /// One widget edit: the active block's whole new content, spliced into
     /// the buffer (the trailing separator is not the widget's to touch),
-    /// with every later block shifted by the delta. No reparse — block
-    /// boundaries move only on activate/deactivate.
+    /// with every later block shifted by the delta. No reparse of its own —
+    /// block boundaries move on activate/deactivate, and on a newline
+    /// written into the block, which its callers answer with `resplit`
+    /// (adr/2026-09-a-new-line-is-its-own-block.md).
     pub fn edit(&mut self, value: &str) {
         let (Some(index), Some(note)) = (self.active, self.buffer.as_mut())
         else {
@@ -206,7 +208,13 @@ impl Editor {
         // `active_slice` proved the block fits the buffer, which is the
         // same validity `edit` re-checks — the splice cannot refuse here
         self.edit(&value);
-        self.place(content.start + span.start + text.len());
+        let landed = content.start + span.start + text.len();
+        self.place(landed);
+        // a newline written into a block ends it there
+        // (adr/2026-09-a-new-line-is-its-own-block.md)
+        if text.contains('\n') {
+            self.resplit(landed);
+        }
     }
 
     /// One typed cluster, the only insertion that closes its own pair.
@@ -545,11 +553,13 @@ impl Editor {
     }
 
     /// A grammar change, note-global: a span inside the active block's
-    /// content routes through `edit` — the typing path, no resegment, so a
-    /// blank line still splits at the next resegmentation — while a span
-    /// that crosses the block splices the whole buffer and resegments, the
-    /// deactivation mechanism (adr/2026-08-editor-splice-cross-block.md).
-    /// The caret lands at `caret`, a post-splice coordinate.
+    /// content routes through `edit` — the typing path, no resegment
+    /// unless the replacement carries a newline, which ends the block it
+    /// lands in (`resplit`, adr/2026-09-a-new-line-is-its-own-block.md) —
+    /// while a span that crosses the block splices the whole buffer and
+    /// resegments, the deactivation mechanism
+    /// (adr/2026-08-editor-splice-cross-block.md). The caret lands at
+    /// `caret`, a post-splice coordinate.
     pub fn splice(
         &mut self,
         span: Range<usize>,
@@ -586,6 +596,12 @@ impl Editor {
                 .map(|(_, text)| floor_boundary(text, caret))
                 .unwrap_or(caret);
             self.place(landed);
+            // the same rule the typing path takes: a replacement carrying
+            // a newline ends the block it lands in
+            // (adr/2026-09-a-new-line-is-its-own-block.md)
+            if replacement.contains('\n') {
+                self.resplit(landed);
+            }
             return;
         }
         let Some(note) = self.buffer.as_mut() else {
@@ -808,6 +824,27 @@ impl Editor {
                 index + 1 < self.blocks.len()
             }
         })
+    }
+
+    /// The block map rebuilt around a write that added a newline, and the
+    /// block owning `caret` woken. `edit` alone never reparses — block
+    /// boundaries move on activate/deactivate — but a block is one
+    /// physical line, so a written newline has to end the block it landed
+    /// in immediately, or the line it opened keeps drawing under the
+    /// role of the line above it (a heading's size, a quote's rule).
+    /// `blocks::segment` stays the sole authority on what actually splits:
+    /// a newline inside a raw fence or a multi-line construct is one child
+    /// of the parse tree and merges exactly as it always did. It never
+    /// flushes — this runs mid-typing (adr/2026-09-a-new-line-is-its-own-block.md).
+    fn resplit(&mut self, caret: usize) {
+        let text = self
+            .buffer
+            .as_ref()
+            .map(|note| note.text().to_string())
+            .unwrap_or_default();
+        self.blocks = blocks::segment(&text);
+        self.active = (!self.blocks.is_empty())
+            .then(|| blocks::block_at(&self.blocks, caret));
     }
 
     /// The collapsed caret after an edit: both ends at `head`, the goal
@@ -1722,9 +1759,12 @@ mod tests {
             editor.insert_newline();
             let (_, text) = editor.note().expect("still open");
             assert_eq!(text, expected, "after {line}");
+            // note-global: the newline ended the block it was written
+            // into, so the fresh marker is a block of its own
+            // (adr/2026-09-a-new-line-is-its-own-block.md)
             assert_eq!(
-                editor.caret_in_block(),
-                (expected.len(), expected.len()),
+                editor.caret().map(|caret| caret.head),
+                Some(expected.len()),
                 "the caret follows the new marker"
             );
         }
@@ -1777,6 +1817,38 @@ mod tests {
             text, "- une\n idée",
             "away from the end, an ordinary split"
         );
+        // and it stays one block: the newline resegments, but the parse
+        // tree is the authority on what splits, and typst reads the
+        // indented continuation as part of the same `ListItem` — which is
+        // also what it renders (adr/2026-09-a-new-line-is-its-own-block.md,
+        // adr/2026-08-per-line-block-segmentation.md)
+        assert_eq!(editor.blocks().len(), 1, "{:?}", editor.blocks());
+        assert_eq!(editor.active_source(), Some("- une\n idée"));
+    }
+
+    #[test]
+    fn enter_at_a_headings_end_leaves_the_new_line_its_own_block() {
+        // the newline ends the heading's block there and now: a block is
+        // one physical line, so the fresh line is its own block and draws
+        // as prose rather than wearing the heading's role
+        // (adr/2026-09-a-new-line-is-its-own-block.md)
+        let (_dir, mut editor) = open_note("= Titre");
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "= Titre\n");
+        assert_eq!(editor.blocks().len(), 2, "{:?}", editor.blocks());
+        assert_eq!(editor.active(), Some(1), "the fresh line is awake");
+        assert_eq!(editor.active_source(), Some(""), "and it is empty");
+
+        // mid-line too: a heading ends at its newline, so the tail is a
+        // block — and prose — of its own
+        let (_dir, mut editor) = open_note("= Titre");
+        editor.place_at(4);
+        editor.insert_newline();
+        let (_, text) = editor.note().expect("still open");
+        assert_eq!(text, "= Ti\ntre");
+        assert_eq!(editor.blocks().len(), 2, "{:?}", editor.blocks());
+        assert_eq!(editor.active_source(), Some("tre"), "the tail is awake");
     }
 
     #[test]
@@ -2417,14 +2489,17 @@ mod tests {
         for step in 1..=120u32 {
             editor.checkpoint();
             editor.select_all();
-            editor.insert_at_caret(&format!("{step}\n"));
+            // no newline in the step: one would end the block and take
+            // `select_all`'s reach with it, which this test is not about
+            // (adr/2026-09-a-new-line-is-its-own-block.md)
+            editor.insert_at_caret(&format!("{step}"));
         }
         for _ in 0..200 {
             editor.undo();
         }
         let (_, text) = editor.note().expect("open");
         assert_eq!(
-            text, "20\n\n",
+            text, "20\n",
             "the oldest steps fell off a hundred deep; the note's own \
              separator from the opened file is untouched by content edits"
         );
