@@ -57,6 +57,10 @@ pub enum Source {
     /// with no upstream, so a refused write is the same class of failure
     /// (adr/2026-09-palette-orders-by-usage.md).
     Usage,
+    /// Where each note was left, the positions file's other sibling: user
+    /// data with no upstream, so a refused write is the same class of
+    /// failure (adr/2026-09-a-note-reopens-where-it-was-left.md).
+    Carets,
     Watcher,
     Editor,
     Capture,
@@ -285,6 +289,22 @@ impl Notice {
             text: format!(
                 "usage: {detail} — the command ran; the palette's order \
                  will not remember it"
+            ),
+        }
+    }
+
+    /// The carets file refusing the write a note being left makes: the
+    /// note itself reached disk, so no prose is at stake — only where the
+    /// caret will stand the next time it opens
+    /// (adr/2026-09-a-note-reopens-where-it-was-left.md). A warning, the
+    /// usage file's rank, for the usage file's reason.
+    pub fn carets_failed(detail: &str) -> Notice {
+        Notice {
+            severity: Severity::Warning,
+            source: Source::Carets,
+            text: format!(
+                "carets: {detail} — the note is saved; it will reopen at \
+                 its title instead of where you left it"
             ),
         }
     }
