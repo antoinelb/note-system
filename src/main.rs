@@ -52,9 +52,10 @@ fn main() {
                 window.inner_size().to_logical::<f64>(window.scale_factor());
             (size.width, size.height)
         })))
-        // the app's single clock read
-        // (adr/2026-07-today-injected-root-context.md)
-        .with_context(ui::Today(time::today()))
+        // the app's single clock source, re-read by every reader at its
+        // own moment (adr/2026-07-today-injected-root-context.md,
+        // adr/2026-09-the-clock-is-a-source-not-a-value.md)
+        .with_context(ui::Today(time::clock()))
         // what a `#link` destination is handed to: the desktop's opener,
         // started and forgotten (adr/2026-09-link-is-for-resources.md)
         .with_context(ui::Launcher(std::sync::Arc::new(|target| {

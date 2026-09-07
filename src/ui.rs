@@ -284,11 +284,20 @@ pub type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 #[derive(Clone, Default)]
 struct QuitFlush(Rc<RefCell<Option<Callback<(), bool>>>>);
 
-/// Today's date, injected at the root by `main` — the app's single clock
-/// edge, replaced by a fixed date in the headless tests
-/// (adr/2026-07-today-injected-root-context.md).
-#[derive(Clone, Copy, Debug)]
-pub struct Today(pub Date);
+/// The app's clock, injected at the root by `main` — one source at one
+/// edge, asked for the date again by every reader at its own moment, so an
+/// app left running past midnight opens the new day. Pinned to a fixed
+/// date in the headless tests (adr/2026-07-today-injected-root-context.md,
+/// adr/2026-09-the-clock-is-a-source-not-a-value.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Today(pub time::Clock);
+
+impl Today {
+    /// The date, read at this moment.
+    pub fn now(self) -> Date {
+        self.0.now()
+    }
+}
 
 /// The app-global commands as callbacks, provided by `App` so the Shell's
 /// palette runs them through the very code paths the root chords use
@@ -352,7 +361,7 @@ pub fn App() -> Element {
                 // intact (adr/2026-08-startup-survey-async.md)
                 match &vault.0 {
                     Some(root) => {
-                        rsx! { Shell { root: root.clone(), today: today.0 } }
+                        rsx! { Shell { root: root.clone(), today } }
                     }
                     None => rsx! {
                         div { class: "vault-error",
@@ -369,7 +378,7 @@ pub fn App() -> Element {
 /// pane with its scale chain and "captured today" block, month-grid jump
 /// panel. Everything it decides comes from `logs`; the component is wiring.
 #[component]
-fn Shell(root: PathBuf, today: Date) -> Element {
+fn Shell(root: PathBuf, today: Today) -> Element {
     // the compute tier this shell submits to: `main` injects the threaded
     // adapter, the headless tests inject a scripted one or nothing and get
     // inline (adr/2026-08-compute-tier-worker-seam.md)
@@ -381,7 +390,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // (adr/2026-08-startup-survey-async.md)
     let mut editor = use_signal({
         let root = root.clone();
-        let id = time::day_id(today);
+        let id = time::day_id(today.now());
         move || open_selected(&root, time_note_path(&root, &id).exists(), &id)
     });
     let mut notes = use_signal(Vec::new);
@@ -468,8 +477,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // and push like any other
     // (adr/2026-09-ctrl-o-is-the-one-note-switcher.md).
     let mut restoring_history = use_signal(|| false);
-    let mut selected = use_signal(|| (NoteType::Daily, time::day_id(today)));
-    let mut month = use_signal(|| today.first_of_month());
+    let mut selected =
+        use_signal(|| (NoteType::Daily, time::day_id(today.now())));
+    let mut month = use_signal(|| today.now().first_of_month());
     // the fragment cache is a memo store, not UI state: nothing should
     // re-render when it fills, so a plain hook value rather than a signal
     let fragments =
@@ -490,11 +500,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let feed = feed.clone();
         move || {
             if !feed.inline {
-                (feed.submit)(compute::rescan(&root, false, today));
+                (feed.submit)(compute::rescan(&root, false, today.now()));
                 return;
             }
-            match compute::refresh(&root, &[watch::VaultChange::Rescan], today)
-            {
+            match compute::refresh(
+                &root,
+                &[watch::VaultChange::Rescan],
+                today.now(),
+            ) {
                 Ok((time_notes, open, table, links)) => {
                     notes.set(time_notes);
                     loops.set(open);
@@ -749,7 +762,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         root: root.clone(),
                         batch,
                         escalated: false,
-                        today,
+                        today: today.now(),
                     });
                 }
             });
@@ -848,7 +861,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 if !escalated {
                                     bodies.borrow_mut().clear();
                                     (feed.submit)(compute::rescan(
-                                        &root, true, today,
+                                        &root,
+                                        true,
+                                        today.now(),
                                     ));
                                 }
                             }
@@ -951,7 +966,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             let anchor = logs::selection_date(&target.0, &target.1);
             // every selectable id comes from our own formatters, so the today
             // fallback guards the type system, not a reachable path
-            month.set(anchor.unwrap_or(today).first_of_month());
+            month.set(anchor.unwrap_or(today.now()).first_of_month());
             let exists = notes
                 .peek()
                 .iter()
@@ -1188,7 +1203,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // waiting on the watcher (adr/2026-09-the-app-indexes-its-own-writes.md)
             if let Some(relative) = relative {
                 bodies.borrow_mut().invalidate(&relative);
-                (feed.submit)(compute::removed(&root, relative, today));
+                (feed.submit)(compute::removed(&root, relative, today.now()));
             }
             sheet.set(None);
             positions.write().remove(&own);
@@ -1220,7 +1235,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 &mut fallback.borrow_mut(),
                 &edges.peek(),
                 filter.peek().as_ref(),
-                today,
+                today.now(),
             );
             let held: Vec<&str> = anchors.iter().map(String::as_str).collect();
             let settled = table::resolve_group(&held, &placed);
@@ -1263,7 +1278,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 &mut fallback.borrow_mut(),
                 &edges.peek(),
                 filter.peek().as_ref(),
-                today,
+                today.now(),
             );
             selection.set(table::marquee_hits(band, &placed));
         }
@@ -1284,7 +1299,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 &mut fallback.borrow_mut(),
                 &edges.peek(),
                 filter.peek().as_ref(),
-                today,
+                today.now(),
             );
             let held = selection.peek().clone();
             let picked: Vec<(String, (f64, f64))> = placed
@@ -1320,7 +1335,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let feed = feed.clone();
         let bodies = bodies.clone();
         move |(picked, title): (NoteType, String)| {
-            let created = today.to_string();
+            let created = today.now().to_string();
             match crate::create::permanent(&root, &picked, &title, &created) {
                 Ok((id, path)) => {
                     creator.set(None);
@@ -1356,7 +1371,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         &root,
                         NoteCategory::Permanent,
                         relative,
-                        today,
+                        today.now(),
                     ));
                     // the birth slot is a landing like any other: the new
                     // card holds the viewport centre and whatever already
@@ -1475,7 +1490,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 &mut fallback.borrow_mut(),
                 &edges.peek(),
                 filter.peek().as_ref(),
-                today,
+                today.now(),
             );
             // only component members with cards arrange; dangling ids in
             // the component lay out nothing
@@ -1554,7 +1569,10 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         let category = dir_category(&relative);
                         bodies.borrow_mut().invalidate(&relative);
                         (feed.submit)(compute::touched(
-                            &root, category, relative, today,
+                            &root,
+                            category,
+                            relative,
+                            today.now(),
                         ));
                     }
                     Err(error) => {
@@ -1637,13 +1655,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         keymap::Fold::Jump => jump_folded.set(!jump_folded()),
     });
     let open_daily = use_callback(move |()| {
-        select.call((NoteType::Daily, time::day_id(today)))
+        select.call((NoteType::Daily, time::day_id(today.now())))
     });
     let open_weekly = use_callback(move |()| {
-        select.call((NoteType::Weekly, time::week_id(today)))
+        select.call((NoteType::Weekly, time::week_id(today.now())))
     });
     let open_season = use_callback(move |()| {
-        select.call((NoteType::Seasonal, time::season_id(today)))
+        select.call((NoteType::Seasonal, time::season_id(today.now())))
     });
     // the Enter arm's creation half, lifted so the palette's "open next"
     // shares it: create from template and push onto the note list, only —
@@ -1657,7 +1675,8 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         let feed = feed.clone();
         let bodies = bodies.clone();
         move |(scale, id): (NoteType, String)| -> bool {
-            let created = logs::selection_date(&scale, &id).unwrap_or(today);
+            let created =
+                logs::selection_date(&scale, &id).unwrap_or(today.now());
             match crate::template::create(
                 &root,
                 &NoteCategory::Time,
@@ -1673,7 +1692,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         &root,
                         NoteCategory::Time,
                         relative,
-                        today,
+                        today.now(),
                     ));
                     notes.with_mut(|list| list.push((id, scale)));
                     true
@@ -1695,7 +1714,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let step_time = use_callback(move |(scale, forward): (NoteType, bool)| {
         let anchor =
             logs::selection_date(&selected.peek().0, &selected.peek().1)
-                .unwrap_or(today);
+                .unwrap_or(today.now());
         if forward {
             logs::next_period(&scale, anchor)
                 .into_iter()
@@ -1944,7 +1963,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             &root,
                             NoteCategory::Capture,
                             relative,
-                            today,
+                            today.now(),
                         ));
                         Notice::captured(&crate::domain::stem_of(&path))
                     }
@@ -3201,7 +3220,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         &mut fallback.borrow_mut(),
         &edges.read(),
         filter.read().as_ref(),
-        today,
+        today.now(),
     );
     let day_ids: HashSet<&str> =
         note_list.iter().map(|(note, _)| note.as_str()).collect();
@@ -4927,7 +4946,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         for (label, target) in seasons {
                             span {
                                 class: "cal-season",
-                                class: if target.1 == time::season_id(today) { "lit" },
+                                class: if target.1 == time::season_id(today.now()) { "lit" },
                                 class: if target.1 == id { "selected" },
                                 onclick: move |_| select.call(target.clone()),
                                 "{label}"
@@ -6607,6 +6626,12 @@ mod tests {
     /// The same clock as a date, for the survey legs the tests call by hand.
     fn test_today() -> Date {
         TODAY.parse().expect("the test clock is a valid date")
+    }
+
+    /// The clock the tests inject where `main` injects the live one: the
+    /// fixture week, standing still.
+    fn pinned_today() -> Today {
+        Today(crate::time::Clock::Pinned(test_today()))
     }
 
     /// Initial click-listener layout, established empirically (see the
@@ -13740,9 +13765,7 @@ mod tests {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(VaultFeed {
             changes: Arc::new(Mutex::new(Some(receiver))),
             trouble: None,
@@ -13922,9 +13945,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultRoot(Some(
             vault.path().to_path_buf(),
         ))));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(VaultFeed {
             changes: Arc::new(Mutex::new(None)),
             trouble: Some("inotify refused".to_string()),
@@ -13948,9 +13969,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultRoot(Some(
             vault.path().to_path_buf(),
         ))));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(SeedTrouble(Some(
             "permission denied".to_string(),
         ))));
@@ -13967,9 +13986,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultRoot(Some(
             vault.path().to_path_buf(),
         ))));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(SeedTrouble(None)));
         with_reactor(|| dom.rebuild_to_vec());
         assert!(!dioxus_ssr::render(&dom).contains("templates:"));
@@ -14392,9 +14409,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultRoot(Some(
             vault.path().to_path_buf(),
         ))));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         // the cell arrives empty, as it would on a second shell
         dom.insert_any_root_context(Box::new(VaultFeed {
             changes: Arc::new(Mutex::new(None)),
@@ -14417,9 +14432,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultRoot(Some(
             vault.path().to_path_buf(),
         ))));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(ComputeFeed {
             submit: Arc::new(|_| {}),
             outcomes: Arc::new(Mutex::new(None)),
@@ -14500,9 +14513,7 @@ mod tests {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(VaultFeed {
             changes: Arc::new(Mutex::new(Some(receiver))),
             trouble: None,
@@ -16190,6 +16201,35 @@ mod tests {
         );
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("cal-day has-note selected\">23"), "{html}");
+    }
+
+    #[test]
+    fn ctrl_d_follows_the_clock_across_midnight() {
+        // the bug this replaced: the date was read once at launch, so an
+        // app left running overnight kept opening the day it started on
+        // (adr/2026-09-the-clock-is-a-source-not-a-value.md)
+        let vault = temp_vault();
+        let (mut dom, keys, clock) =
+            ticking_app(Some(vault.path().to_path_buf()));
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("d".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("cal-day has-note selected\">23"), "{html}");
+
+        // midnight, with the window still open
+        clock.set(crate::time::next_day(test_today()));
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("d".into()),
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("no note for july 24"), "the new day: {html}");
     }
 
     #[test]
@@ -19484,6 +19524,29 @@ mod tests {
         (dom, clicks, keydown, closed)
     }
 
+    /// Mounts the App on a clock the test can move: the returned cell holds
+    /// the date every reader will see at its next read, so a day change can
+    /// be staged between two keystrokes — the one thing no test can wait
+    /// for (adr/2026-09-the-clock-is-a-source-not-a-value.md).
+    fn ticking_app(
+        root: Option<PathBuf>,
+    ) -> (VirtualDom, Vec<ElementId>, &'static Cell<Date>) {
+        // leaked so the clock is 'static like the one the root context
+        // carries; one cell per test run is bounded
+        let cell: &'static Cell<Date> =
+            Box::leak(Box::new(Cell::new(test_today())));
+        set_event_converter(Box::new(TestEvents));
+        let mut dom = VirtualDom::new(App);
+        dom.insert_any_root_context(Box::new(VaultRoot(root)));
+        dom.insert_any_root_context(Box::new(Today(
+            crate::time::Clock::Ticking(cell),
+        )));
+        let mutations = dom.rebuild_to_vec();
+        note_sink(&mutations);
+        let keys = listeners(&mutations, "keydown");
+        (dom, keys, cell)
+    }
+
     /// Mounts the App without a vault — the theme wrapper encloses the error
     /// screen too, so this is the cheapest mount — and returns the keydown
     /// target on the `.app` root.
@@ -19519,9 +19582,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         if let Some(closer) = closer {
             dom.insert_any_root_context(Box::new(closer));
         }
@@ -19623,7 +19684,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(test_today())));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(hit));
         dom.insert_any_root_context(Box::new(recorder));
         let mutations = dom.rebuild_to_vec();
@@ -19825,9 +19886,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
             move || {
                 let pasted = pasted.clone();
@@ -19900,9 +19959,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
             move || {
                 let pasted = pasted.clone();
@@ -19936,7 +19993,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(test_today())));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
             move || {
                 let pasted = pasted.clone();
@@ -20154,9 +20211,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         let pasted = Arc::new(std::sync::Mutex::new(pasted));
         dom.insert_any_root_context(Box::new(Clipboard(Arc::new(
             move || {
@@ -20676,9 +20731,7 @@ mod tests {
         set_event_converter(Box::new(TestEvents));
         let mut dom = VirtualDom::new(App);
         dom.insert_any_root_context(Box::new(VaultRoot(root)));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(Viewport(Arc::new(move || {
             size
         }))));
@@ -22294,9 +22347,7 @@ mod tests {
         dom.insert_any_root_context(Box::new(VaultRoot(Some(
             vault.path().to_path_buf(),
         ))));
-        dom.insert_any_root_context(Box::new(Today(
-            TODAY.parse().expect("the test clock is a valid date"),
-        )));
+        dom.insert_any_root_context(Box::new(pinned_today()));
         dom.insert_any_root_context(Box::new(KeepFocus(Arc::new(
             move || {
                 counter.fetch_add(1, Ordering::SeqCst);

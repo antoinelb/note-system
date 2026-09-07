@@ -1,4 +1,5 @@
-//! Time-note ids derived from a date: day, ISO week, season.
+//! The app's clock source, and the time-note ids derived from a date:
+//! day, ISO week, season.
 //!
 //! Derivation is total — every date has all three ids whether or not the
 //! notes exist; existence is the index's answer, checked at call sites
@@ -7,23 +8,52 @@
 use jiff::ToSpan;
 use jiff::civil::{Date, ISOWeekDate, Weekday};
 
-/// The one clock read in the app: `main` injects this value at the root,
-/// everything below it takes the date as a parameter
-/// (adr/2026-07-today-injected-root-context.md).
-pub fn today() -> Date {
-    today_from(std::env::var_os("NOTE_TODAY"))
+/// Where every date in the app comes from. `main` builds one of these at
+/// the one clock edge and injects it at the root; every reader below calls
+/// `now()` at its own moment, so an app left running past midnight opens
+/// the new day instead of the day it launched on
+/// (adr/2026-09-the-clock-is-a-source-not-a-value.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    /// The wall clock, read afresh at every call.
+    Live,
+    /// A date that never moves: `NOTE_TODAY` for the e2e harness, and the
+    /// fixture week for the UI tests.
+    Pinned(Date),
+    /// A date a test can move between two keystrokes. No test can wait for
+    /// midnight, so this is the only way the day change is provable; it
+    /// does not exist outside `cfg(test)`.
+    #[cfg(test)]
+    Ticking(&'static std::cell::Cell<Date>),
 }
 
-/// The one clock read — unless `NOTE_TODAY` pins it, which only the e2e
-/// harness does: the shipped binary has no root context to inject a date
-/// through, and the environment is the seam `NOTE_VAULT` already crosses
+impl Clock {
+    /// The date this clock reads right now.
+    pub fn now(self) -> Date {
+        match self {
+            Clock::Live => jiff::Zoned::now().date(),
+            Clock::Pinned(date) => date,
+            #[cfg(test)]
+            Clock::Ticking(cell) => cell.get(),
+        }
+    }
+}
+
+/// The clock the shipped binary runs on: read once, at `main`'s one edge.
+pub fn clock() -> Clock {
+    clock_from(std::env::var_os("NOTE_TODAY"))
+}
+
+/// Live — unless `NOTE_TODAY` pins it, which only the e2e harness does:
+/// the shipped binary has no root context to inject a date through, and
+/// the environment is the seam `NOTE_VAULT` already crosses
 /// (adr/2026-09-note-today-pins-the-clock-for-e2e.md). A value the parser
 /// refuses is not a request to stop the clock; the harness's own file
 /// oracles catch a pin that did not take.
-fn today_from(pinned: Option<std::ffi::OsString>) -> Date {
+fn clock_from(pinned: Option<std::ffi::OsString>) -> Clock {
     pinned
         .and_then(|value| value.to_str()?.parse().ok())
-        .unwrap_or_else(|| jiff::Zoned::now().date())
+        .map_or(Clock::Live, Clock::Pinned)
 }
 
 /// The ids a date belongs to, smallest scale first: day, week, season.
@@ -203,26 +233,38 @@ mod tests {
     }
 
     #[test]
-    fn today_sits_between_two_clock_reads() {
+    fn the_unpinned_clock_reads_between_two_wall_clock_reads() {
         // bracketed, so a midnight between the reads cannot fail it
         let before = jiff::Zoned::now().date();
-        let today = today();
+        let now = clock().now();
         let after = jiff::Zoned::now().date();
-        assert!(before <= today && today <= after);
+        assert!(before <= now && now <= after);
     }
 
     #[test]
-    fn a_pinned_today_replaces_the_clock_and_a_bad_pin_does_not() {
-        assert_eq!(today_from(Some("2026-07-24".into())), date("2026-07-24"));
+    fn a_pinned_clock_replaces_the_wall_clock_and_a_bad_pin_does_not() {
+        assert_eq!(
+            clock_from(Some("2026-07-24".into())),
+            Clock::Pinned(date("2026-07-24"))
+        );
         let not_utf8 =
             std::os::unix::ffi::OsStringExt::from_vec(vec![0xff, 0xfe]);
         for bad in [Some("yesterday".into()), Some(not_utf8), None] {
-            let before = jiff::Zoned::now().date();
-            let unpinned = today_from(bad);
-            assert!(
-                before <= unpinned && unpinned <= jiff::Zoned::now().date()
-            );
+            assert_eq!(clock_from(bad), Clock::Live);
         }
+    }
+
+    #[test]
+    fn a_pinned_clock_stands_still_and_a_ticking_one_follows_its_cell() {
+        let start = date("2026-07-24");
+        assert_eq!(Clock::Pinned(start).now(), start);
+        // leaked so the clock is 'static like the one the root context
+        // carries; one cell per test run is bounded
+        let cell = Box::leak(Box::new(std::cell::Cell::new(start)));
+        let ticking = Clock::Ticking(cell);
+        assert_eq!(ticking.now(), start);
+        cell.set(next_day(start));
+        assert_eq!(ticking.now(), date("2026-07-25"));
     }
 
     #[test]
