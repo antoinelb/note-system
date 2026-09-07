@@ -272,6 +272,20 @@ pub fn line_label(index: usize, caret_line: usize) -> usize {
     }
 }
 
+/// The physical line `byte` falls on — how many newlines precede it. The
+/// gutter's unit, since `j`/`k` walk physical lines even inside a block
+/// that holds several (a nested list, a raw fence, the folded preamble). A
+/// byte past the end or off a char boundary counts the whole text.
+pub fn line_of(text: &str, byte: usize) -> usize {
+    text.get(..byte).unwrap_or(text).matches('\n').count()
+}
+
+/// How many physical lines the note has: one more than its newlines, so a
+/// note ending in a newline counts the empty last line the caret rests on.
+pub fn line_count(text: &str) -> usize {
+    text.matches('\n').count() + 1
+}
+
 /// How many digits wide the gutter reserves for a note of `blocks` lines:
 /// the widest absolute number it can ever show, never under two. Fixed for
 /// the whole note rather than measured per line, so typing a line that
@@ -575,6 +589,22 @@ mod tests {
     }
 
     // -- guide_depths -----------------------------------------------------
+
+    #[test]
+    fn a_byte_names_its_physical_line_and_the_note_counts_its_last() {
+        let text = "- parent\n  - child\nprose\n";
+        assert_eq!(line_of(text, 0), 0);
+        assert_eq!(line_of(text, 8), 0);
+        assert_eq!(line_of(text, 9), 1);
+        assert_eq!(line_of(text, 19), 2);
+        assert_eq!(line_of(text, text.len()), 3);
+        // past the end, or mid-char: the whole text's count, never a panic
+        assert_eq!(line_of(text, 999), 3);
+        assert_eq!(line_of("é\n", 1), 1);
+        assert_eq!(line_count(text), 4);
+        assert_eq!(line_count(""), 1);
+        assert_eq!(line_count("one"), 1);
+    }
 
     #[test]
     fn a_nested_run_draws_one_guide_per_two_space_level() {

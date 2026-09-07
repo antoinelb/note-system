@@ -483,10 +483,11 @@ body {
 
    Out of flow, so it can touch neither the shared block box below nor
    .mk-item's hanging indent: the slot is the containing block (all five
-   carry `position: relative`) and `right: calc(100% + 4px)` puts the
-   number's right edge 4px short of the slot's own left edge, whatever the
-   number's width — which is what right-aligns the column for free, with
-   no width to state. The 4px is air between the digits and a quote's
+   carry `position: relative`, and .source-line deliberately does not, or
+   an item's padding would shift its numbers) and `right: calc(100% +
+   4px)` puts the number's right edge 4px short of the slot's own left
+   edge, whatever the number's width — which is what right-aligns the
+   column for free, with no width to state. The 4px is air between the digits and a quote's
    rule, which paints on that very edge; the 8px between the digits and
    the prose is the block box's own horizontal gutter, not a second one.
 
@@ -495,7 +496,10 @@ body {
 .line-number {
   position: absolute;
   right: calc(100% + 4px);
-  top: 0;
+  /* no `top`: the number keeps its static position, the top of the
+     source line it is the first child of, so a block holding several
+     physical lines numbers each on its own row — the one row a `top: 0`
+     against the slot could not tell apart */
   font: var(--line-number-size) "DejaVu Sans Mono", monospace;
   line-height: calc(var(--prose-size) * var(--prose-leading));
   color: var(--line-number);

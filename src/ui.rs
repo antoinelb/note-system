@@ -2583,23 +2583,30 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                 !feed.inline,
                 visual_linewise,
             )?;
-            // the gutter's two numbers: which line the caret is on, and
-            // how wide the widest number can get. `block_panes` emits
-            // exactly one pane per block, in order, so a pane's own index
-            // *is* its line — no pane needs to carry a number of its own,
-            // and the width is the note's, fixed while it is open
+            // the gutter counts physical lines, not blocks: a block can
+            // hold several (a nested list, a raw fence, the folded
+            // preamble) and `j`/`k` walk them one at a time, so each
+            // source line wears its own number and the caret's line is
+            // the caret's, not its block's. The width is the note's,
+            // fixed while it is open
             // (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
-            // `block_panes` already returned `None` for an editor with no
-            // active block, so the clamp is the same one it made.
-            let caret_line = editor
-                .read()
-                .active()
-                .unwrap_or(0)
-                .min(panes.len().saturating_sub(1));
-            let digits = blocks::gutter_width(panes.len());
+            let (caret_line, digits, firsts) = {
+                let editor = editor.read();
+                // `block_panes` already answered `None` for a closed
+                // editor, so the empty fallback is never the one drawn
+                let text = editor.note().map_or("", |(_, text)| text);
+                (
+                    blocks::line_of(text, editor.head()),
+                    blocks::gutter_width(blocks::line_count(text)),
+                    panes
+                        .iter()
+                        .map(|pane| blocks::line_of(text, pane.start()))
+                        .collect::<Vec<_>>(),
+                )
+            };
             Some(rsx! {
                 div { class: "note-blocks", style: "--line-digits: {digits}",
-                    for (line_index, pane) in panes.into_iter().enumerate() {
+                    for (first, pane) in firsts.into_iter().zip(panes) {
                         {
                             match pane {
                                 Pane::Source { start, text, guides } => {
@@ -2780,9 +2787,9 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                                 let dragging = dragging.clone();
                                                 move |_| dragging.set(false)
                                             },
-                                            {line_number(line_index, caret_line)}
                                             for (row, line) in rendered_lines.into_iter().enumerate() {
                                                 div { key: "{row}", class: "source-line",
+                                                    {line_number(first + row, caret_line)}
                                                     for (tag, piece) in line {
                                                         {
                                                             // the piece's own existing class stays exactly what it
@@ -2946,10 +2953,10 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                                 fragments.borrow_mut().sweep();
                                             }
                                         },
-                                        {line_number(line_index, caret_line)}
                                         div { class: "selected-source",
                                             for (row, line) in rendered_lines.into_iter().enumerate() {
                                                 div { key: "{row}", class: "source-line",
+                                                    {line_number(first + row, caret_line)}
                                                     for (tag, piece) in line {
                                                         {
                                                             let (selected, piece_start, text) = piece_span(piece);
@@ -3005,10 +3012,10 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                                     fragments.borrow_mut().sweep();
                                                 }
                                             },
-                                            {line_number(line_index, caret_line)}
                                             div { class: "block-source",
                                                 for (row, line) in lines.into_iter().enumerate() {
                                                     div { key: "{row}", class: "source-line",
+                                                        {line_number(first + row, caret_line)}
                                                         for (role, delimiter, piece) in line {
                                                             {
                                                                 let (piece_start, piece_text) = css_piece_span(piece);
@@ -3043,7 +3050,7 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                                 fragments.borrow_mut().sweep();
                                             }
                                         },
-                                        {line_number(line_index, caret_line)}
+                                        {line_number(first, caret_line)}
                                         {
                                             match rendered {
                                                 Ok(svg) => rsx! {
@@ -3086,7 +3093,7 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                                     fragments.borrow_mut().sweep();
                                                 }
                                             },
-                                            {line_number(line_index, caret_line)}
+                                            {line_number(first, caret_line)}
                                             {
                                                 match shelved {
                                                     Some(svg) => rsx! {
@@ -5034,8 +5041,7 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                         viewport.set((size.width, size.height));
                     }
                 },
-                // Ctrl+wheel zooms around the pointer; a bare wheel is left
-                // to whatever the pane does with it, which is nothing
+                // the wheel zooms around the pointer, no modifier asked
                 // (adr/2026-09-the-table-zooms-continuously.md). The pane
                 // is this event's own target — the canvas declines every
                 // one and the cards answer their own below — so its offset
@@ -5657,17 +5663,15 @@ enum Grab {
 }
 
 /// Which way a wheel notch zooms, or `None` when the notch is not the
-/// zoom's: only Ctrl+wheel zooms, and a wheel that reports no vertical
-/// travel names no direction. Away from the hand — a negative delta —
+/// zoom's: a wheel that reports no vertical travel names no direction. Away from the hand — a negative delta —
 /// zooms closer, which is what every map and every document already does
 /// (adr/2026-09-the-table-zooms-continuously.md).
 fn wheel_notch(event: &Event<WheelData>) -> Option<bool> {
-    if !event.modifiers().ctrl() {
-        return None;
-    }
     // the webview owns Ctrl+wheel as page zoom, the way it owns Ctrl+=:
     // left uncancelled it scales the whole window under a composited
-    // session, chrome and all, and the table's own zoom vanishes inside it
+    // session, chrome and all, and the table's own zoom vanishes inside
+    // it. A bare wheel has no default the table wants either, so every
+    // notch is cancelled before it is read
     event.prevent_default();
     let delta = event.delta().strip_units().y;
     match delta == 0.0 {
@@ -6125,6 +6129,20 @@ enum Pane {
     },
 }
 
+impl Pane {
+    /// The byte the pane's block starts at — what `blocks::line_of` turns
+    /// into the number its first source line wears.
+    fn start(&self) -> usize {
+        match self {
+            Pane::Source { start, .. }
+            | Pane::Selected { start, .. }
+            | Pane::Css { start, .. }
+            | Pane::Fragment { start, .. }
+            | Pane::Pending { start, .. } => *start,
+        }
+    }
+}
+
 /// Splits the note into one pane per block: the active block stays raw
 /// source, every other block the visual selection reaches into draws as
 /// highlighted raw source, and every remaining block draws from the markup
@@ -6291,13 +6309,16 @@ fn piece_span(piece: caret::Piece) -> (bool, usize, String) {
     }
 }
 
-/// One block's number in the gutter, drawn by every one of the five slots
-/// so the numbering has no gaps — a compiled fallback block counts as a
-/// line exactly like a CSS one. It rides *inside* its slot, so the click
-/// that already activates the block covers its number too, and it is taken
-/// out of flow by `.line-number` in `assets/theme.css` (positioned against
-/// the slot, right-aligned to the slot's own left edge) so it can touch
-/// neither the shared block box nor `.mk-item`'s hanging indent
+/// One physical line's number in the gutter: the first child of each
+/// `.source-line` the three source-drawing slots emit, so a block holding
+/// several lines numbers every one of them on its own row; a compiled
+/// fallback has no source lines and wears one number, its first line's.
+/// It rides *inside* its slot, so the click that already activates the
+/// block covers its number too, and it is taken out of flow by
+/// `.line-number` in `assets/theme.css` (positioned against the slot,
+/// right-aligned short of the slot's own left edge, sitting on the row it
+/// was emitted in) so it can touch neither the shared block box nor
+/// `.mk-item`'s hanging indent
 /// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
 fn line_number(index: usize, caret_line: usize) -> Element {
     let label = blocks::line_label(index, caret_line);
@@ -9947,8 +9968,8 @@ mod tests {
         assert!(
             html.contains(concat!(
                 r#"<div class="block-active mk-h1">"#,
-                r#"<span class="line-number line-number-caret">3</span>"#,
                 r#"<div class="source-line">"#,
+                r#"<span class="line-number line-number-caret">5</span>"#,
                 r#"<span class="mk-marker" data-start="0">= </span>"#,
                 r#"<span class="mk-text" data-start="2">2026-07-23</span>"#,
                 r#"<span class="caret-box" data-start="12">"#,
@@ -11965,10 +11986,11 @@ mod tests {
     /// absolute one and every other line its distance from it — vim's
     /// `set number relativenumber`
     /// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md). The
-    /// fixture day note is five blocks: preamble, blank, heading, blank,
-    /// the `#let` line the compiled fallback draws — so the run also
-    /// proves the fallback slots number like the CSS ones and leave no
-    /// gap.
+    /// fixture day note is seven physical lines in five blocks: the
+    /// three-line preamble the compiled fallback draws, a blank, the
+    /// heading, the link, the empty last line — so the run also proves the
+    /// fallback slot wears its first line's number and the lines it hides
+    /// still count.
     #[test]
     fn the_gutter_numbers_every_line_from_the_caret() {
         let vault = temp_vault();
@@ -11980,9 +12002,9 @@ mod tests {
         assert_eq!(
             gutter_numbers(&html),
             vec![
-                ("2".to_string(), false),
+                ("4".to_string(), false),
                 ("1".to_string(), false),
-                ("3".to_string(), true),
+                ("5".to_string(), true),
                 ("1".to_string(), false),
                 ("2".to_string(), false),
             ],
@@ -11992,7 +12014,7 @@ mod tests {
         // it is stated once on the container and never moves (AIR LAY-1)
         assert!(
             html.contains(r#"class="note-blocks" style="--line-digits: 2""#),
-            "five lines reserve the two-digit minimum: {html}"
+            "seven lines reserve the two-digit minimum: {html}"
         );
     }
 
@@ -12016,13 +12038,80 @@ mod tests {
         assert_eq!(
             gutter_numbers(&html),
             vec![
-                ("3".to_string(), false),
+                ("5".to_string(), false),
                 ("2".to_string(), false),
                 ("1".to_string(), false),
-                ("4".to_string(), true),
+                ("6".to_string(), true),
                 ("1".to_string(), false),
             ],
             "the absolute number moved down one line with the caret: {html}"
+        );
+    }
+
+    /// A block holding several physical lines — a list item with its
+    /// nested items, one parse-tree node — numbers every one of them on
+    /// its own source line, and the caret's line is the caret's, not the
+    /// block's first (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+    #[test]
+    fn every_physical_line_of_a_nested_list_wears_its_own_number() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            format!(
+                "{}- parent\n  - child one\n  - child two\nprose\n",
+                linking(time_note("2026-07-23", "daily"), "2026-07-22")
+            ),
+        )
+        .expect("the day note gains a nested list");
+        let (mut dom, _clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = woken_targets();
+        // G to the empty last line, k twice onto "child two": line 8 of
+        // eleven, inside the item block that starts on line 6
+        press(
+            &mut dom,
+            sink,
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            sink,
+            Key::Character("k".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(
+            gutter_numbers(&html),
+            vec![
+                ("8".to_string(), false),
+                ("5".to_string(), false),
+                ("4".to_string(), false),
+                ("3".to_string(), false),
+                ("2".to_string(), false),
+                ("1".to_string(), false),
+                ("9".to_string(), true),
+                ("1".to_string(), false),
+                ("2".to_string(), false),
+            ],
+            "one number per physical line, the caret's own absolute: {html}"
+        );
+        // each number is the first child of its own source line, so it
+        // sits on that line's row whatever the block around it holds
+        assert!(
+            html.contains(concat!(
+                r#"<div class="source-line">"#,
+                r#"<span class="line-number line-number-caret">9</span>"#,
+                r#"<span class="caret-box" data-start="23">"#,
+            )),
+            "the caret line's number opens the caret's own source line: {html}"
         );
     }
 
@@ -18356,14 +18445,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_ctrl_wheel_with_travel_zooms_at_all() {
+    fn a_bare_wheel_zooms_and_a_notch_with_no_travel_does_nothing() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, _, wheels) = table_wheel_targets(&mut dom, &clicks);
         let before = dioxus_ssr::render(&dom);
 
-        // a bare wheel is the pane's to ignore, on the void and on a card
+        // a notch that reports no travel names no direction
+        wheel_at(&mut dom, wheels[0], (400.0, 200.0), 0.0, Modifiers::empty());
+        wheel_at(&mut dom, wheels[1], (8.0, 8.0), 0.0, Modifiers::empty());
+        assert_eq!(dioxus_ssr::render(&dom), before);
+
+        // a bare wheel is a notch: no modifier is asked of the hand
+        let held = crate::table::rezoom(
+            (0.0, 0.0),
+            1.0,
+            crate::table::ZOOM_STEP,
+            (400.0, 200.0),
+        );
         wheel_at(
             &mut dom,
             wheels[0],
@@ -18371,11 +18471,11 @@ mod tests {
             -100.0,
             Modifiers::empty(),
         );
-        wheel_at(&mut dom, wheels[1], (8.0, 8.0), -100.0, Modifiers::empty());
-        // and a notch that reports no travel names no direction
-        wheel_at(&mut dom, wheels[0], (400.0, 200.0), 0.0, Modifiers::CONTROL);
-        wheel_at(&mut dom, wheels[1], (8.0, 8.0), 0.0, Modifiers::CONTROL);
-        assert_eq!(dioxus_ssr::render(&dom), before);
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&transform(crate::table::ZOOM_STEP, held)),
+            "one notch in around the pointer, no Ctrl held"
+        );
     }
 
     #[test]
@@ -21030,6 +21130,16 @@ mod tests {
             .skip(1)
             .filter_map(|rest| rest.split("</div>").next())
             .map(|line| {
+                // the gutter's number opens every source line and is not
+                // buffer content either
+                // (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md)
+                let line =
+                    match line.starts_with(r#"<span class="line-number"#) {
+                        true => line
+                            .split_once("</span>")
+                            .map_or("", |(_, rest)| rest),
+                        false => line,
+                    };
                 // the composition preview is drawn but not buffer content —
                 // a prefix, since the span now also carries its markup role
                 let line: String = line
