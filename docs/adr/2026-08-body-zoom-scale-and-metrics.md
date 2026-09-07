@@ -31,3 +31,7 @@ are notches (`2026-09-the-table-zooms-continuously.md`) and "zoom to
 titles" is the one jump.
 The transform order, the canvas-unit pan and the sheet forcing scale 1
 stand.
+
+The transform order this ADR fixed is amended by
+`2026-09-the-canvas-zooms-with-css-zoom.md`: the scale is now CSS `zoom`,
+the transform only translates.

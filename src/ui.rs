@@ -437,6 +437,10 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     // cards keep their canvas coordinates
     let mut pan = use_signal(|| (0.0f64, 0.0f64));
     let mut grab = use_signal(|| None::<Grab>);
+    // where a drag in flight has pushed the neighbours to, drawn over the
+    // store until the drop writes it or the release proves a click
+    // (adr/2026-09-neighbours-yield-while-the-card-is-in-flight.md)
+    let mut pushed = use_signal(Vec::<(String, (f64, f64))>::new);
     // the picked cards, in the order the marquee found them or the
     // Shift+clicks arrived: session state like the pan, and it dies with
     // the table view (adr/2026-09-shift-drag-selects-cards.md)
@@ -1250,16 +1254,20 @@ fn Shell(root: PathBuf, today: Today) -> Element {
 
     // Every landing on the table runs through here: the cards that just
     // landed keep the place the user gave them, and every card they cover
-    // slides clear along its shallower axis, all in one store write
-    // (adr/2026-09-cards-yield-on-drop.md). A group drop hands its whole
+    // slides clear along the line between their centres, all in one store
+    // write (adr/2026-09-cards-yield-on-drop.md). A group drop hands its whole
     // set, which the resolver treats as one rigid body — members never
     // push each other apart (adr/2026-09-shift-drag-selects-cards.md).
     // Answers each pushed card's prior coordinates, so the arrange can
     // fold them into its own before-image — the drag and the creation,
     // neither of them undoable, drop the answer.
-    let settle_cards = use_callback({
+    // the resolution itself, read off the store as it stands: what a drop
+    // writes, and what a drag in flight previews on every move — the same
+    // answer either way, so the drop lands exactly what the hand was shown
+    // (adr/2026-09-neighbours-yield-while-the-card-is-in-flight.md)
+    let resolve_landing = use_callback({
         let fallback = fallback.clone();
-        move |anchors: Vec<String>| {
+        move |anchors: Vec<String>| -> table::Settled {
             let placed = table::cards(
                 &table_notes.peek(),
                 &positions.peek(),
@@ -1269,7 +1277,13 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                 today.now(),
             );
             let held: Vec<&str> = anchors.iter().map(String::as_str).collect();
-            let settled = table::resolve_group(&held, &placed);
+            table::resolve_group(&held, &placed)
+        }
+    });
+    let settle_cards = use_callback({
+        move |anchors: Vec<String>| {
+            pushed.set(Vec::new());
+            let settled = resolve_landing.call(anchors);
             // taken before the write: a pushed card that had no entry
             // reverses by unpinning, the arrange's own idiom
             let prior: Vec<(String, Option<(f64, f64)>)> = settled
@@ -3240,13 +3254,16 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     // reading the signals here is what repaints the table on a drag write,
     // a watcher batch and a filter change alike — and why an auto-placed
     // card follows its links live until a drag pins it
-    let placed = table::cards(
-        &table_notes.read(),
-        &positions.read(),
-        &mut fallback.borrow_mut(),
-        &edges.read(),
-        filter.read().as_ref(),
-        today.now(),
+    let placed = table::previewed(
+        table::cards(
+            &table_notes.read(),
+            &positions.read(),
+            &mut fallback.borrow_mut(),
+            &edges.read(),
+            filter.read().as_ref(),
+            today.now(),
+        ),
+        &pushed.read(),
     );
     let day_ids: HashSet<&str> =
         note_list.iter().map(|(note, _)| note.as_str()).collect();
@@ -5061,6 +5078,13 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                     store.set(member, *x, *y);
                                 }
                             });
+                            // the neighbours yield as the hand moves: the
+                            // drop's own resolution, drawn and never
+                            // written until the drop
+                            // (adr/2026-09-neighbours-yield-while-the-card-is-in-flight.md)
+                            let members =
+                                set.iter().map(|(member, _)| member.clone()).collect();
+                            pushed.set(resolve_landing.call(members).moved);
                             grab.set(Some(Grab::Card { id, set, last: now, down }));
                         }
                         Some(Grab::Marquee { origin, from, .. }) => {
@@ -5085,6 +5109,10 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                 onmouseup: move |event: MouseEvent| {
                     let held = grab.peek().clone();
                     grab.set(None);
+                    // a click's preview — a sub-slop wobble over a
+                    // neighbour — draws nothing more; a drop's is written
+                    // for real by `settle_cards` below
+                    pushed.set(Vec::new());
                     // read out first: the zoom's peek guard must drop
                     // before an arm's own callback reads that signal
                     let up = point(&event, *zoom.peek());
@@ -5121,10 +5149,13 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                 },
                 div {
                     class: "canvas",
-                    // scale outermost: the pan stays in canvas units, and
-                    // point() divides once
-                    // (adr/2026-08-body-zoom-scale-and-metrics.md)
-                    style: "transform: scale({zoom()}) translate({pan().0}px, {pan().1}px)",
+                    // CSS zoom, not a transform: the canvas is laid out at
+                    // the scale, so text is rasterised at the size it
+                    // shows and never stretched from a scale-1 bitmap; the
+                    // translate is zoomed with it, so the pan stays in
+                    // canvas units and point() still divides once
+                    // (adr/2026-09-the-canvas-zooms-with-css-zoom.md)
+                    style: "zoom: {zoom()}; transform: translate({pan().0}px, {pan().1}px)",
                     // the constellation: first child, so DOM order paints
                     // every edge under every card; inside the translated
                     // canvas, so pan and drags carry it for free
@@ -5182,13 +5213,17 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                     // pane-local and zoom a second time
                                     event.stop_propagation();
                                     if let Some(closer) = wheel_notch(&event) {
+                                        // under CSS zoom a card's offsets
+                                        // arrive in screen pixels, unlike
+                                        // its corner, which is canvas units
+                                        // (adr/2026-09-the-canvas-zooms-with-css-zoom.md)
                                         let at = event.element_coordinates();
                                         let scale = *zoom.peek();
                                         let (px, py) = *pan.peek();
                                         zoom_notch.call((
                                             (
-                                                scale * (corner.0 + at.x + px),
-                                                scale * (corner.1 + at.y + py),
+                                                scale * (corner.0 + px) + at.x,
+                                                scale * (corner.1 + py) + at.y,
                                             ),
                                             closer,
                                         ));
@@ -7643,6 +7678,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn neighbours_yield_while_the_card_is_in_flight_and_return_if_it_does() {
+        // the same drop as above, watched before the release: the pushed
+        // neighbours already stand clear while the hand still holds
+        // alpha, nothing of theirs has reached the store, and a hand that
+        // retreats gets them back where they were
+        // (adr/2026-09-neighbours-yield-while-the-card-is-in-flight.md)
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards) = table_targets(&mut dom, &clicks);
+
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (150.0, 90.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 82px; top: 22px"), "{html}");
+        assert!(
+            html.contains("left: 266px; top: 34.9577"),
+            "capture-idea slid before the release: {html}"
+        );
+        assert!(
+            html.contains("left: 450px; top: 31.3295"),
+            "and so did digest: {html}"
+        );
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the dragged card's own debounced write");
+        assert_eq!(saved.trim(), "alpha 82 22", "a preview is not a write");
+
+        // back over its own slot: the neighbours return with it
+        mouse(&mut dom, "mousemove", pane, (100.0, 100.0));
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("left: 224px; top: 32px"), "{html}");
+        assert!(html.contains("left: 416px; top: 32px"), "{html}");
+
+        // and a drop a row down lands clear, writing nothing of theirs
+        mouse(&mut dom, "mousemove", pane, (100.0, 200.0));
+        mouse(&mut dom, "mouseup", pane, (100.0, 200.0));
+        block_on(settle(&mut dom));
+        let saved =
+            std::fs::read_to_string(vault.path().join(".index/positions"))
+                .expect("the drop's write");
+        assert_eq!(saved.trim(), "alpha 32 132", "{saved}");
+    }
+
     /// A column of three at the origin, alpha and digest picked as a set:
     /// dragging the set straight down leaves capture-idea wedged between
     /// two anchors on the one line no push can leave. The drop (alpha) and
@@ -7720,7 +7801,7 @@ mod tests {
             "the band is drawn while the drag is in flight: {drawing}"
         );
         assert!(
-            drawing.contains("transform: scale(1) translate(0px, 0px)"),
+            drawing.contains("zoom: 1; transform: translate(0px, 0px)"),
             "a shift drag never pans: {drawing}"
         );
 
@@ -7987,7 +8068,7 @@ mod tests {
         mouse(&mut dom, "mousemove", pane, (10.0, 10.0));
         assert!(
             dioxus_ssr::render(&dom)
-                .contains("transform: scale(1) translate(0px, 0px)")
+                .contains("zoom: 1; transform: translate(0px, 0px)")
         );
 
         mouse(&mut dom, "mousedown", pane, (200.0, 200.0));
@@ -7995,7 +8076,7 @@ mod tests {
         mouse(&mut dom, "mouseup", pane, (180.0, 230.0));
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains("transform: scale(1) translate(-20px, 30px)"),
+            html.contains("zoom: 1; transform: translate(-20px, 30px)"),
             "the void panned: {html}"
         );
         assert!(
@@ -8978,7 +9059,7 @@ mod tests {
         mouse(&mut dom, "mouseup", pane, (520.0, 320.0));
         assert!(
             dioxus_ssr::render(&dom)
-                .contains("transform: scale(1) translate(0px, 0px)"),
+                .contains("zoom: 1; transform: translate(0px, 0px)"),
             "{}",
             dioxus_ssr::render(&dom)
         );
@@ -18089,13 +18170,13 @@ mod tests {
 
         step_in(&mut dom, keys, 3);
         let html = dioxus_ssr::render(&dom);
-        assert!(!html.contains("scale(1)"), "{html}");
+        assert!(!html.contains("zoom: 1;"), "{html}");
         assert!(html.contains(">alpha</div>"), "still a title: {html}");
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "zoom to titles");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("scale(1)"), "{html}");
+        assert!(html.contains("zoom: 1;"), "{html}");
         assert!(html.contains(">alpha</div>"), "{html}");
     }
 
@@ -18143,7 +18224,7 @@ mod tests {
         mouse(&mut dom, "mouseup", pane, (300.0, 300.0));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="sheet""#), "{html}");
-        assert!(html.contains("scale(1)"), "titles again: {html}");
+        assert!(html.contains("zoom: 1;"), "titles again: {html}");
     }
 
     #[test]
@@ -18198,7 +18279,7 @@ mod tests {
         type_into(&mut dom, input, "zoom");
         assert_eq!(palette_labels(&dom), vec!["zoom to titles"]);
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        assert!(dioxus_ssr::render(&dom).contains("scale(1)"));
+        assert!(dioxus_ssr::render(&dom).contains("zoom: 1;"));
     }
 
     // -- continuous zoom: the wheel and the bare +/- keys ---------------------
@@ -18207,7 +18288,7 @@ mod tests {
     /// what every zoom assertion below reads out of the rendered page.
     fn transform(scale: f64, pan: (f64, f64)) -> String {
         format!(
-            "transform: scale({scale}) translate({}px, {}px)",
+            "zoom: {scale}; transform: translate({}px, {}px)",
             pan.0, pan.1
         )
     }
@@ -18304,6 +18385,28 @@ mod tests {
             html.contains(&transform(crate::table::ZOOM_STEP, held)),
             "the card's own point held: {html}"
         );
+
+        // zoomed, the same eight pixels into the card are still eight
+        // screen pixels — CSS zoom reports a card's offsets in screen
+        // units — past the card's zoomed corner
+        let step = crate::table::ZOOM_STEP;
+        let corner =
+            (step * (32.0 + held.0) + 8.0, step * (32.0 + held.1) + 8.0);
+        let again = crate::table::rezoom(
+            held,
+            step,
+            crate::table::stepped(step, true),
+            corner,
+        );
+        wheel_at(&mut dom, wheels[1], (8.0, 8.0), -100.0, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(&transform(
+                crate::table::stepped(step, true),
+                again
+            )),
+            "and held again from the zoomed corner: {html}"
+        );
     }
 
     #[test]
@@ -18369,7 +18472,7 @@ mod tests {
         // "+" is the same key with Shift held, and Shift is not a chord
         press(&mut dom, keys, Key::Character("+".into()), Modifiers::SHIFT);
         let twice = crate::table::stepped(crate::table::ZOOM_STEP, true);
-        assert!(dioxus_ssr::render(&dom).contains(&format!("scale({twice})")));
+        assert!(dioxus_ssr::render(&dom).contains(&format!("zoom: {twice};")));
 
         // and back out, twice, to where the table opened
         press(
@@ -18410,7 +18513,7 @@ mod tests {
         }
         assert!(
             dioxus_ssr::render(&dom)
-                .contains(&format!("scale({})", crate::table::MIN_SCALE)),
+                .contains(&format!("zoom: {};", crate::table::MIN_SCALE)),
             "the far end holds"
         );
         for _ in 0..30 {
@@ -18423,7 +18526,7 @@ mod tests {
         }
         assert!(
             dioxus_ssr::render(&dom)
-                .contains(&format!("scale({})", crate::table::MAX_SCALE)),
+                .contains(&format!("zoom: {};", crate::table::MAX_SCALE)),
             "the near end holds"
         );
     }

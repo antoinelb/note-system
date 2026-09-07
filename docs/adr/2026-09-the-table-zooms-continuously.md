@@ -42,3 +42,10 @@ The scale stays continuous, but nothing is derived from it any more: `Zoom`
 and `BODIES_AT` are gone, a card is its title at every scale, culling uses
 the one title height, and "zoom to titles" is the only jump — hidden while
 the table stands at 1.0.
+
+## Amended by `2026-09-the-canvas-zooms-with-css-zoom.md` (2026-09-07)
+
+The scale is applied as CSS `zoom` rather than `transform: scale`, for
+crisp text under a composited session; the geometry, the pan's units and
+`point()` are unchanged, and a card's wheel now reads its offsets in
+screen pixels.

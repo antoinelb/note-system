@@ -1457,9 +1457,11 @@ body {
     radial-gradient(circle 1px at 25% 55%, var(--star-bright), transparent);
 }
 
-/* the panned layer; its transform is set inline from the zoom and pan
-   signals — origin at the corner, or the scale would orbit the centre
-   (adr/2026-08-body-zoom-scale-and-metrics.md) */
+/* the panned layer; its zoom and translate are set inline from the zoom
+   and pan signals. CSS zoom rather than a scale transform: the layer is
+   laid out at the scale, so its text is rasterised at the size it shows
+   instead of stretched from a scale-1 bitmap by the compositor
+   (adr/2026-09-the-canvas-zooms-with-css-zoom.md) */
 /* the canvas paints but never takes a press: its transform would make a
    press's own offset coordinates canvas-local at one zoom and pane-local
    at another, and the marquee needs one answer. Every void press lands on
@@ -1469,7 +1471,6 @@ body {
 .canvas {
   position: absolute;
   inset: 0;
-  transform-origin: 0 0;
   pointer-events: none;
 }
 

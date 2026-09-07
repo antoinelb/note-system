@@ -77,3 +77,12 @@ free cards the one further from the dropped set yields, the higher id only
 on a tie.
 The gap, the box, the cap and the notice stand; the "halving" rejection
 below is why the pushes stay sequential and exact.
+
+## Amended by `2026-09-neighbours-yield-while-the-card-is-in-flight.md` (2026-09-07)
+
+The resolution is still written on the drop and nowhere else, but a drag
+in flight now previews it on every move: the neighbours are drawn where
+the drop would push them and return if the hand retreats, and nothing of
+theirs reaches the store before the release.
+The "live physics" rejection above stands against accumulated or written
+pushes; a drawn preview of the drop's own answer is what replaced it.

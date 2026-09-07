@@ -665,6 +665,28 @@ fn yield_step(mover: (f64, f64), held: (f64, f64)) -> Option<(f64, f64)> {
     }
 }
 
+/// The cards as a drag in flight shows them: every card a pending
+/// resolution has pushed stands at its pushed coordinates, the rest where
+/// the store has them. Pure, and empty pushes return the cards untouched
+/// (adr/2026-09-neighbours-yield-while-the-card-is-in-flight.md).
+pub fn previewed(
+    cards: Vec<Card>,
+    pushed: &[(String, (f64, f64))],
+) -> Vec<Card> {
+    cards
+        .into_iter()
+        .map(|mut card| {
+            if let Some((_, (x, y))) =
+                pushed.iter().find(|(id, _)| id == &card.id)
+            {
+                card.x = *x;
+                card.y = *y;
+            }
+            card
+        })
+        .collect()
+}
+
 /// One drawn edge in canvas coordinates, endpoints already clipped to the
 /// card borders — where the line runs and where its node dots sit
 /// (adr/2026-08-edges-svg-under-cards.md).
@@ -1672,6 +1694,21 @@ mod tests {
             ]
         );
         assert!(all_clear(&settled.moved));
+    }
+
+    #[test]
+    fn a_preview_moves_the_pushed_cards_and_no_other() {
+        let cards =
+            vec![placed_card("a", 0.0, 0.0), placed_card("b", 0.0, 16.0)];
+        let shown =
+            previewed(cards.clone(), &[("b".to_string(), (0.0, 64.0))]);
+        assert_eq!((shown[0].x, shown[0].y), (0.0, 0.0));
+        assert_eq!((shown[1].x, shown[1].y), (0.0, 64.0));
+        assert_eq!(
+            previewed(cards.clone(), &[]),
+            cards,
+            "no pushes, no change"
+        );
     }
 
     #[test]
