@@ -41,10 +41,11 @@ pub enum Role {
 
 /// One byte-range slice of a block's markup, block-relative like every
 /// other range in `caret::Piece`. `delimiter` only carries meaning on
-/// `Strong`/`Emph`/`Raw`/`Link`: the run's own `*`/`_`/backtick/`[[` bytes keep the
-/// run's role (so the run's rendered weight — bold, italic, mono — never
-/// breaks at the delimiter) but are flagged so a decoration pass can still
-/// dim them relative to the run's content.
+/// `Strong`/`Emph`/`Raw`/`Link`: the run's own `*`/`_`/backtick/`[[` bytes,
+/// and a `#link(dest)[`…`]`'s two edges, keep the run's role (so the run's
+/// rendered weight — bold, italic, mono — never breaks at the delimiter)
+/// but are flagged so a decoration pass can still dim them relative to the
+/// run's content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub range: Range<usize>,
@@ -364,9 +365,9 @@ fn children_role(kind: SyntaxKind, inherited: Role) -> Role {
 /// Pushes one container node's children onto the walk's stack, with three
 /// exceptions handled inline because they change what gets pushed rather
 /// than just a leaf's role: a `Hash` immediately followed by a recognised
-/// `FuncCall` (`#link(...)`, `#meta(...)`, `#quote(...)`) becomes one whole
-/// span over both and its children are never pushed — the call's own
-/// arguments are not rendered as separate spans; a `[[id]]` run of text
+/// `FuncCall` (`#link(...)`, `#meta(...)`, `#quote(...)`) is handed to
+/// `push_call`, which decides how much of the invocation is one span and
+/// how much of it the walk still descends into; a `[[id]]` run of text
 /// leaves (`parse::wiki_links`) becomes three `Link` spans, the bracket
 /// pairs flagged as delimiters so an inactive block hides them
 /// (adr/2026-09-wiki-links-replace-the-l-call.md); and a bullet `ListItem`
@@ -381,12 +382,7 @@ fn push_children<'a>(
     checkbox_hits: &mut Vec<(Range<usize>, bool)>,
     stack: &mut Vec<(usize, &'a SyntaxNode, Role)>,
 ) {
-    let mut child_data: Vec<(usize, &SyntaxNode)> = Vec::new();
-    let mut running = offset;
-    for child in node.children() {
-        child_data.push((running, child));
-        running += child.len();
-    }
+    let child_data = child_offsets(node, offset);
 
     if node.kind() == SyntaxKind::ListItem
         && let Some(&(body_offset, _)) = child_data.last()
@@ -426,17 +422,119 @@ fn push_children<'a>(
             && let Some(call) = next.cast::<ast::FuncCall>()
             && let Some(call_role) = recognized_role(call)
         {
-            spans.push(Span {
-                range: child_offset..child_offset + child.len() + next.len(),
-                role: call_role,
-                delimiter: false,
-            });
+            push_call(
+                child_offset..child_offset + child.len() + next.len(),
+                next,
+                call_role,
+                spans,
+                stack,
+            );
             skip_until = i + 2;
             continue;
         }
         frames.push((child_offset, child, role));
     }
     stack.extend(frames.into_iter().rev());
+}
+
+/// Nodes paired with their own block-relative starts: what the walk carries
+/// around, since the tree stores each node's length and never its position.
+type Located<'a> = Vec<(usize, &'a SyntaxNode)>;
+
+/// Every child of `node` paired with its own start, `offset` being
+/// `node`'s.
+fn child_offsets(node: &SyntaxNode, offset: usize) -> Located<'_> {
+    let mut out = Vec::new();
+    let mut running = offset;
+    for child in node.children() {
+        out.push((running, child));
+        running += child.len();
+    }
+    out
+}
+
+/// Emits the spans one recognised `#call(…)` renders with, `range` covering
+/// the `#` and the call together. A `#meta`/`#quote` is one opaque span: its
+/// arguments are the compiler's business, not something CSS draws.
+/// A `#link(dest)[body]` is the one recognised call with a visible half —
+/// Typst draws the body and nothing else — so its `#link(dest)[` prefix and
+/// its closing `]` become delimiter spans the inactive block's CSS already
+/// hides, and the body's own children go on the walk so nested markup keeps
+/// its roles (adr/2026-09-a-link-call-draws-its-body.md). A call with no
+/// body to show, `#link(dest)` or a `[` still missing its `]`, falls back to
+/// the one opaque span: hiding a prefix with nothing behind it would erase
+/// the line.
+fn push_call<'a>(
+    range: Range<usize>,
+    call: &'a SyntaxNode,
+    role: Role,
+    spans: &mut Vec<Span>,
+    stack: &mut Vec<(usize, &'a SyntaxNode, Role)>,
+) {
+    let body = match role {
+        Role::Link => link_body(call, range.end),
+        _ => None,
+    };
+    let Some((inner, frames)) = body else {
+        spans.push(Span {
+            range,
+            role,
+            delimiter: false,
+        });
+        return;
+    };
+    for edge in [range.start..inner.start, inner.end..range.end] {
+        spans.push(Span {
+            range: edge,
+            role,
+            delimiter: true,
+        });
+    }
+    stack.extend(
+        frames
+            .into_iter()
+            .rev()
+            .map(|(offset, node)| (offset, node, role)),
+    );
+}
+
+/// The `[body]` of a `#link(dest)[body]`: the byte range between the
+/// content block's own brackets, and the frames the walk needs to draw what
+/// sits inside them. `end` is the call's own end, which the content block
+/// shares by being the last child of the last child. `None` when the call
+/// ends in no *closed* content block: `#link(dest)` has no body at all, and
+/// a `#link(dest)[x` still being typed opens with an `Error` leaf where its
+/// `[` belongs — the same forgiving posture the `Error` exception takes
+/// everywhere else in this module.
+fn link_body(
+    call: &SyntaxNode,
+    end: usize,
+) -> Option<(Range<usize>, Located<'_>)> {
+    let block = call
+        .children()
+        .last()
+        .and_then(|args| args.children().last())
+        .filter(|node| node.kind() == SyntaxKind::ContentBlock)?;
+    let children = child_offsets(block, end - block.len());
+    let (open, close) = bracket(children.first(), SyntaxKind::LeftBracket)
+        .zip(bracket(children.last(), SyntaxKind::RightBracket))?;
+    let inner = open.end..close.start;
+    let frames = children
+        .into_iter()
+        .filter(|(offset, _)| *offset >= inner.start && *offset < inner.end)
+        .collect();
+    Some((inner, frames))
+}
+
+/// The range one edge of a content block covers, when that edge really is
+/// the bracket it is supposed to be.
+fn bracket(
+    entry: Option<&(usize, &SyntaxNode)>,
+    kind: SyntaxKind,
+) -> Option<Range<usize>> {
+    entry
+        .filter(|edge| edge.1.kind() == kind)
+        .map(|&(offset, node)| offset..offset + node.len())
 }
 
 /// Whether `source` at `offset` opens with a checklist box, and its state.
@@ -808,21 +906,86 @@ mod tests {
         assert!(markup.spans.iter().all(|s| s.role == Role::Text));
     }
 
+    /// Every `Role::Link` span of `source`, as (text, delimiter) pairs.
+    fn link_spans(source: &str, markup: &Markup) -> Vec<(String, bool)> {
+        markup
+            .spans
+            .iter()
+            .filter(|s| s.role == Role::Link)
+            .map(|s| (source[s.range.clone()].to_string(), s.delimiter))
+            .collect()
+    }
+
     #[test]
-    fn a_typst_link_to_a_resource_is_css_and_wears_the_link_role() {
+    fn a_typst_link_draws_its_body_between_two_delimiters() {
         let source = "the #link(\"/assets/a.pdf\")[slides] here";
         let markup = css(source);
         assert_tiles(&markup.spans, source.len());
-        let hash = source.find('#').expect("a hash");
-        let link_span = markup
+        assert_eq!(
+            link_spans(source, &markup),
+            vec![
+                ("#link(\"/assets/a.pdf\")[".to_string(), true),
+                ("slides".to_string(), false),
+                ("]".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_link_body_keeps_the_roles_of_the_markup_inside_it() {
+        let source = "#link(\"/a.pdf\")[*bold* and [[an_id]]]";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
+        let roles: Vec<(&str, Role, bool)> = markup
             .spans
             .iter()
-            .find(|s| s.range.start == hash)
-            .expect("a span starting at the hash");
-        assert_eq!(link_span.role, Role::Link);
+            .map(|s| (&source[s.range.clone()], s.role, s.delimiter))
+            .collect();
+        assert!(roles.contains(&("bold", Role::Strong, false)), "{roles:?}");
+        // the wiki link inside the body keeps its own bracket delimiters,
+        // and the body's plain prose takes the link's colour
+        assert!(roles.contains(&("an_id", Role::Link, false)), "{roles:?}");
+        assert!(roles.contains(&("[[", Role::Link, true)), "{roles:?}");
+        assert!(roles.contains(&("and", Role::Link, false)), "{roles:?}");
+    }
+
+    #[test]
+    fn a_link_with_no_body_keeps_its_whole_source_on_screen() {
+        // nothing to draw in the body's place, so hiding the call would
+        // erase it from the line outright
+        let source = "#link(\"https://example.org\")";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
         assert_eq!(
-            &source[link_span.range.clone()],
-            "#link(\"/assets/a.pdf\")[slides]"
+            link_spans(source, &markup),
+            vec![(source.to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn a_link_whose_bracket_is_still_open_keeps_its_whole_source() {
+        // typst parses the unclosed `[` as an Error leaf inside the content
+        // block, so there is no closed body to draw yet
+        let source = "#link(\"/a.pdf\")[slid";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
+        assert_eq!(
+            link_spans(source, &markup),
+            vec![(source.to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn an_empty_link_body_is_two_delimiters_and_nothing_between() {
+        let source = "#link(\"/a.pdf\")[]";
+        let markup = css(source);
+        assert_tiles(&markup.spans, source.len());
+        assert_eq!(
+            link_spans(source, &markup),
+            vec![
+                ("#link(\"/a.pdf\")[".to_string(), true),
+                ("]".to_string(), true),
+            ]
         );
     }
 

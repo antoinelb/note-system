@@ -25,4 +25,6 @@ The active block and the selected block keep every symbol: the line under the ca
 
 - Entering a line now moves its text right by the width of its prefix, and a long line may wrap differently active than inactive; the caret's own move is the only trigger, and the block box itself never changes height on its own.
 - `#l(…)`, `#meta(…)` and every other call still show their source on inactive lines: a link's rendered text is the compiler's to decide, not a span CSS can hide.
+  **Amended by `2026-09-a-link-call-draws-its-body.md`**: a `#link(dest)[body]` draws only its body, the call around it flagged as the delimiter it is — its body is a `ContentBlock` in the tree, so CSS can hide the rest after all.
+  `#meta` and `#quote` stay as this line describes.
 - `adr/2026-08-css-draws-the-markup.md`'s "all blocks draw the same spans" still holds — what differs is only what the CSS paints of them.
