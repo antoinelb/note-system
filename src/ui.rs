@@ -12150,10 +12150,11 @@ mod tests {
         );
         assert!(
             number.contains(
-                "line-height: calc(var(--prose-size) * var(--prose-leading));"
+                "line-height: calc(var(--row-size) * var(--prose-leading));"
             ),
-            "one prose line tall, so a wrapped block keeps its number on \
-             the first row: {number}"
+            "one row tall — the row's own size, a heading's included, so a \
+             wrapped block keeps its number on the first row and the \
+             digits sit centred in it: {number}"
         );
         // text-indent inherits, and .mk-item's is the negative hang: left
         // to inherit, a list line's digits were drawn that far left of
@@ -12179,6 +12180,20 @@ mod tests {
             "the quote rule paints without moving the slot's padding box: \
              {quote}"
         );
+        // every heading level hands its size to the row token the number
+        // reads, or a heading's number would sit at the top of its taller row
+        for level in ["1", "2", "3", "4"] {
+            let heading = sheet
+                .split(&format!("\n.mk-h{level} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .expect("the stylesheet sizes the heading");
+            assert!(
+                heading.contains("--row-size: calc(")
+                    && heading.contains("font-size: var(--row-size);"),
+                "heading {level} sets the row size it is drawn at: {heading}"
+            );
+        }
         // the compiled fallback's scroll box is the widget, not the slot,
         // or it would clip its own number away
         assert!(

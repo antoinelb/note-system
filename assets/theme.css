@@ -451,6 +451,10 @@ body {
    (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md). */
 .note-blocks {
   --line-number-size: 12px;
+  /* the size the row's own text is set in — the prose size, until a
+     heading below overrides it — so a number can take its row's height
+     and sit centred in it (line-height's half-leading does the centring) */
+  --row-size: var(--prose-size);
   padding-left: calc(
     var(--line-digits, 2) * 0.602 * var(--line-number-size) + 8px
   );
@@ -501,7 +505,7 @@ body {
      physical lines numbers each on its own row — the one row a `top: 0`
      against the slot could not tell apart */
   font: var(--line-number-size) "DejaVu Sans Mono", monospace;
-  line-height: calc(var(--prose-size) * var(--prose-leading));
+  line-height: calc(var(--row-size) * var(--prose-leading));
   color: var(--line-number);
   /* text-indent is inherited, and .mk-item hangs its first row by a
      negative one: left to inherit, the number's box collapsed and its
@@ -854,19 +858,23 @@ body {
    value `.mk-h5`/`.mk-h6` set explicitly here, so an unlisted deep level
    still lands on the right size without a rule of its own. */
 .mk-h1 {
-  font-size: calc(var(--prose-size) * 24 / 13.5);
+  --row-size: calc(var(--prose-size) * 24 / 13.5);
+  font-size: var(--row-size);
 }
 
 .mk-h2 {
-  font-size: calc(var(--prose-size) * 20 / 13.5);
+  --row-size: calc(var(--prose-size) * 20 / 13.5);
+  font-size: var(--row-size);
 }
 
 .mk-h3 {
-  font-size: calc(var(--prose-size) * 17 / 13.5);
+  --row-size: calc(var(--prose-size) * 17 / 13.5);
+  font-size: var(--row-size);
 }
 
 .mk-h4 {
-  font-size: calc(var(--prose-size) * 15 / 13.5);
+  --row-size: calc(var(--prose-size) * 15 / 13.5);
+  font-size: var(--row-size);
 }
 
 .mk-h5,
