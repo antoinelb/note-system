@@ -249,15 +249,17 @@ pub const COMMANDS: [Command; 33] = [
         label: "undo",
         chord: None,
     },
+    // chordless since the chords became steps: the two named scales are
+    // reached by name (adr/2026-09-the-table-zooms-continuously.md)
     Command {
         id: CommandId::ZoomToBodies,
         label: "zoom to bodies",
-        chord: Some("ctrl+="),
+        chord: None,
     },
     Command {
         id: CommandId::ZoomToTitles,
         label: "zoom to titles",
-        chord: Some("ctrl+-"),
+        chord: None,
     },
 ];
 
@@ -811,8 +813,6 @@ mod tests {
                 "ctrl+q",
                 "ctrl+shift+f",
                 "ctrl+,",
-                "ctrl+=",
-                "ctrl+-",
             ]
         );
         let chordless: Vec<&str> = COMMANDS
@@ -840,7 +840,9 @@ mod tests {
                 "open weekly",
                 "take disk",
                 "toggle theme",
-                "undo"
+                "undo",
+                "zoom to bodies",
+                "zoom to titles"
             ]
         );
         let mut names: Vec<&str> =

@@ -17,7 +17,7 @@ The `Zoom` enum was the source of truth, so "which scale" and "how a card is dra
 - **Ctrl+wheel zooms around the pointer; bare `+`/`=` and `-` zoom around the pane's centre.**
   A bare wheel still does what it did before, which is nothing.
   `table::rezoom` generalises to "keep this pane point still across a scale change": `pan' = pan + p·(1/s' − 1/s)`, the wheel passing the pointer and the keys the centre — the old viewport-centre rule is now the special case.
-- **The two chords stay, as jumps** to exactly 1.0 and 3.0 (`Zoom::scale()`), with their palette rows unchanged: the semantic stops survive as named places on a continuous axis.
+- **Ctrl+= and Ctrl+- are notches too**, the same walk as the bare keys. They first stayed as jumps to exactly 1.0 and 3.0, and the first day of use said a jump from 1 to 3 on one keystroke is far too much; the two named scales survive as the palette's "zoom to bodies" and "zoom to titles", now chordless — named places on a continuous axis, reached by name.
 - **Zoom is refused while a sheet is open**, and opening one still lands the table at 1.0.
   The sheet, its tether and the raised card are viewport constructs whose math never sees a scale ≠ 1; making that a rule from both ends is cheaper than teaching three more constructs about the scale, and the note owns the keyboard there anyway.
 - **A card answers its own wheel** and stops it there, the way it takes its own presses back: the pane reads `offsetX/offsetY` as pane-local, which they are only when the pane is the target, so a card computes the pane point from where it itself stands (`scale · (card + offset + pan)`).

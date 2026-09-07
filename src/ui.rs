@@ -3810,21 +3810,23 @@ fn Shell(root: PathBuf, today: Today) -> Element {
             Key::Enter if event.modifiers().ctrl() => {
                 follow_at.call(());
             }
-            // the two semantic stops, still one chord each: a jump, where
-            // the bare keys below walk
+            // one notch, around the pane's centre: the chords walk like
+            // the bare keys below — a jump from 1 to 3 on one keystroke
+            // was too much of a leap, and the two named scales stay
+            // reachable from the palette
             // (adr/2026-09-the-table-zooms-continuously.md)
             Key::Character(ref character)
                 if character == "=" && event.modifiers().ctrl() =>
             {
                 // the webview owns Ctrl+= as page zoom
                 event.prevent_default();
-                zoom_to.call(table::Zoom::Bodies);
+                zoom_step.call(true);
             }
             Key::Character(ref character)
                 if character == "-" && event.modifiers().ctrl() =>
             {
                 event.prevent_default();
-                zoom_to.call(table::Zoom::Titles);
+                zoom_step.call(false);
             }
             // one notch, around the pane's centre. Bare keys reach here
             // only over the bare map: an overlay takes every one of them
@@ -15066,7 +15068,7 @@ mod tests {
 
         let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        jump_to_bodies(&mut dom, keys);
         let pending = dioxus_ssr::render(&dom);
         assert!(pending.contains("body-pending"), "{pending}");
         assert!(!pending.contains(RENDERED_NOTE), "{pending}");
@@ -18047,15 +18049,51 @@ mod tests {
         mouse(dom, "mouseup", pane, (520.0, 340.0));
     }
 
+    /// Runs the palette's "zoom to bodies": the one jump to exactly 3.0,
+    /// where every key is a notch.
+    fn jump_to_bodies(dom: &mut VirtualDom, keys: ElementId) {
+        let (input, palette_keys) = open_palette(dom, keys);
+        type_into(dom, input, "zoom to bodies");
+        press(dom, palette_keys, Key::Enter, Modifiers::empty());
+    }
+
     #[test]
-    fn ctrl_equals_zooms_to_bodies_and_ctrl_minus_back() {
+    fn ctrl_equals_steps_in_and_ctrl_minus_steps_back() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // one notch around the pane's centre, exactly the bare key's walk
+        let held = crate::table::rezoom(
+            (0.0, 0.0),
+            1.0,
+            crate::table::ZOOM_STEP,
+            (640.0, 400.0),
+        );
+        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&transform(crate::table::ZOOM_STEP, held)),
+            "the chord is one notch in, not a jump"
+        );
+        press(&mut dom, keys, ctrl_minus(), Modifiers::CONTROL);
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&transform(crate::table::TITLES_SCALE, (0.0, 0.0))),
+            "and one notch back out"
+        );
+    }
+
+    #[test]
+    fn the_palette_zooms_to_bodies_and_back_to_titles() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
 
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        jump_to_bodies(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("scale(3)"), "{html}");
         assert!(html.contains("card-body"), "bodies render: {html}");
@@ -18064,11 +18102,9 @@ mod tests {
             !html.contains(">digest</div>"),
             "the card the zoom pushed out is culled: {html}"
         );
-        // the same chord again changes nothing — the level already stands
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
-        assert_eq!(dioxus_ssr::render(&dom), html);
-
-        press(&mut dom, keys, ctrl_minus(), Modifiers::CONTROL);
+        let (input, palette_keys) = open_palette(&mut dom, keys);
+        type_into(&mut dom, input, "zoom to titles");
+        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("scale(1)"), "{html}");
         assert!(!html.contains("card-body"), "titles again: {html}");
@@ -18086,7 +18122,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        jump_to_bodies(&mut dom, keys);
 
         // 24 client pixels are 8 canvas units at scale 3
         mouse(&mut dom, "mousedown", cards[0], (300.0, 300.0));
@@ -18110,7 +18146,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        jump_to_bodies(&mut dom, keys);
 
         // a click at body zoom zooms out and opens — one legible gesture
         mouse(&mut dom, "mousedown", cards[0], (300.0, 300.0));
@@ -18162,7 +18198,7 @@ mod tests {
             watched_app(Some(vault.path().to_path_buf()));
         let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
-        press(&mut dom, keys, ctrl_equals(), Modifiers::CONTROL);
+        jump_to_bodies(&mut dom, keys);
         let before = dioxus_ssr::render(&dom);
         assert!(before.contains("card-body"), "{before}");
         assert!(!before.contains("render-error"), "{before}");
