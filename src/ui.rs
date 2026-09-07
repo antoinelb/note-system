@@ -425,10 +425,12 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // re-derives from `placed` every render, which is what keeps the tether
     // on it through drags (adr/2026-08-sheet-stacking-dom-order.md)
     let mut sheet = use_signal(|| None::<String>);
-    // the semantic zoom level and the observed pane size — session state
-    // like the pan (adr/2026-08-body-zoom-scale-and-metrics.md,
+    // the canvas scale and the observed pane size — session state like the
+    // pan. The scale is the one source of truth: the semantic level a card
+    // is drawn at is read off it, never stored beside it
+    // (adr/2026-09-the-table-zooms-continuously.md,
     // adr/2026-08-viewport-culling-onresize.md)
-    let mut zoom = use_signal(|| table::Zoom::Titles);
+    let mut zoom = use_signal(|| table::TITLES_SCALE);
     let mut viewport = use_signal(|| table::DEFAULT_VIEWPORT);
     // the unplaced notes' session slots: a memo store like the fragment
     // cache, not UI state — nothing re-renders when a slot is remembered
@@ -961,18 +963,43 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         }
     });
 
-    // the zoom change, one seam for chord and palette: the canvas point
-    // under the viewport centre stays put
-    // (adr/2026-08-body-zoom-scale-and-metrics.md)
-    let zoom_to = use_callback(move |target: table::Zoom| {
+    // the one zoom seam — wheel, keys, chords, palette and the sheet all
+    // arrive here: a target scale and the pane point it must keep still.
+    // A target the table already stands at writes nothing, so a repeated
+    // chord and a wheel notch at a bound both re-render nothing
+    // (adr/2026-09-the-table-zooms-continuously.md)
+    let zoom_at = use_callback(move |(target, at): (f64, (f64, f64))| {
         let current = *zoom.peek();
         if current == target {
             return;
         }
-        let landed =
-            table::rezoom(*pan.peek(), current, target, *viewport.peek());
+        let landed = table::rezoom(*pan.peek(), current, target, at);
         pan.set(landed);
         zoom.set(target);
+    });
+    // the pane's centre, the anchor every zoom that is not the pointer's
+    // holds still
+    let zoom_to = use_callback(move |target: table::Zoom| {
+        let pane = *viewport.peek();
+        zoom_at.call((target.scale(), (pane.0 / 2.0, pane.1 / 2.0)));
+    });
+    // one notch in or out, holding the pane point it is handed: the
+    // pointer for the wheel, the pane's centre for the keys. Refused while
+    // a sheet is open — the sheet, its tether and the raised card are
+    // scale-1 constructs, and the note owns the keyboard there
+    // (adr/2026-09-the-table-zooms-continuously.md)
+    let zoom_notch = use_callback(move |(at, closer): ((f64, f64), bool)| {
+        if sheet.peek().is_some() {
+            return;
+        }
+        // read out first: the peek guard must drop before `zoom_at` writes
+        // the same signal back
+        let target = table::stepped(*zoom.peek(), closer);
+        zoom_at.call((target, at));
+    });
+    let zoom_step = use_callback(move |closer: bool| {
+        let pane = *viewport.peek();
+        zoom_notch.call(((pane.0 / 2.0, pane.1 / 2.0), closer));
     });
 
     // a card becomes its sheet: the note loads into the one editor
@@ -1300,7 +1327,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     let viewport = window_size
                         .as_ref()
                         .map_or(table::DEFAULT_VIEWPORT, |size| (size.0)());
-                    let (x, y) = table::spawn_position(viewport, *pan.peek());
+                    let (x, y) = table::spawn_position(
+                        viewport,
+                        *pan.peek(),
+                        *zoom.peek(),
+                    );
                     // a session birth slot, never a store write: the card
                     // drifts to its links as they arrive, and only a drag
                     // pins it (adr/2026-08-auto-place-strongest-link-ring.md)
@@ -1981,7 +2012,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             note_open: editor.peek().note().is_some(),
             on_table: *screen.peek() == Screen::Table,
             sheet_open: sheet.peek().is_some(),
-            at_bodies: *zoom.peek() == table::Zoom::Bodies,
+            at_bodies: table::Zoom::of(*zoom.peek()) == table::Zoom::Bodies,
             conflict: status.peek().has(Source::Conflict),
             undoable: undo_register.peek().label().is_some(),
         }));
@@ -3225,7 +3256,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 });
                 return;
             }
-            let at = point(&event, zoom.peek().scale());
+            let at = point(&event, *zoom.peek());
             // a picked card drags the whole set, each member keeping its
             // offset; an unpicked one moves alone and the set stands
             let set = drag_set.call((id.clone(), (x, y)));
@@ -3702,8 +3733,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             Key::Enter if event.modifiers().ctrl() => {
                 follow_at.call(());
             }
-            // the semantic zoom pair, table-only
-            // (adr/2026-08-body-zoom-scale-and-metrics.md)
+            // the two semantic stops, still one chord each: a jump, where
+            // the bare keys below walk
+            // (adr/2026-09-the-table-zooms-continuously.md)
             Key::Character(ref character)
                 if character == "=" && event.modifiers().ctrl() =>
             {
@@ -3716,6 +3748,21 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             {
                 event.prevent_default();
                 zoom_to.call(table::Zoom::Titles);
+            }
+            // one notch, around the pane's centre. Bare keys reach here
+            // only over the bare map: an overlay takes every one of them
+            // before the screen does, and `zoom_notch` refuses under an
+            // open sheet (adr/2026-09-the-table-zooms-continuously.md)
+            Key::Character(ref character)
+                if (character == "+" || character == "=")
+                    && !chorded(event.modifiers()) =>
+            {
+                zoom_step.call(true);
+            }
+            Key::Character(ref character)
+                if character == "-" && !chorded(event.modifiers()) =>
+            {
+                zoom_step.call(false);
             }
             // the card filter, table-only, guarded like every overlay
             // chord (adr/2026-08-filter-overlay-ctrl-f.md)
@@ -4908,11 +4955,23 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         viewport.set((size.width, size.height));
                     }
                 },
+                // Ctrl+wheel zooms around the pointer; a bare wheel is left
+                // to whatever the pane does with it, which is nothing
+                // (adr/2026-09-the-table-zooms-continuously.md). The pane
+                // is this event's own target — the canvas declines every
+                // one and the cards answer their own below — so its offset
+                // coordinates are pane-local at every scale
+                onwheel: move |event: Event<WheelData>| {
+                    if let Some(closer) = wheel_notch(&event) {
+                        let at = event.element_coordinates();
+                        zoom_notch.call(((at.x, at.y), closer));
+                    }
+                },
                 // a mousedown that no card stopped is the void: bare, it
                 // pans; with Shift it draws the marquee
                 // (adr/2026-09-shift-drag-selects-cards.md)
                 onmousedown: move |event: MouseEvent| {
-                    let scale = zoom.peek().scale();
+                    let scale = *zoom.peek();
                     let at = point(&event, scale);
                     // the pane is the press's own target — the canvas
                     // declines every one — so its origin is measurable
@@ -4938,13 +4997,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     match held {
                         None => {}
                         Some(Grab::Void { last, down }) => {
-                            let now = point(&event, zoom.peek().scale());
+                            let now = point(&event, *zoom.peek());
                             let (x, y) = *pan.peek();
                             pan.set((x + now.0 - last.0, y + now.1 - last.1));
                             grab.set(Some(Grab::Void { last: now, down }));
                         }
                         Some(Grab::Card { id, set, last, down }) => {
-                            let now = point(&event, zoom.peek().scale());
+                            let now = point(&event, *zoom.peek());
                             let delta = (now.0 - last.0, now.1 - last.1);
                             // rigid: one delta on every member, so a group
                             // drag preserves the arrangement it started with
@@ -4962,7 +5021,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                             let to = canvas_point(
                                 &event,
                                 origin,
-                                zoom.peek().scale(),
+                                *zoom.peek(),
                                 *pan.peek(),
                             );
                             grab.set(Some(Grab::Marquee {
@@ -4982,7 +5041,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     grab.set(None);
                     // read out first: the zoom's peek guard must drop
                     // before an arm's own callback reads that signal
-                    let up = point(&event, zoom.peek().scale());
+                    let up = point(&event, *zoom.peek());
                     match held {
                         None => {}
                         Some(Grab::Card { id, set, down, .. }) => {
@@ -5019,7 +5078,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     // scale outermost: the pan stays in canvas units, and
                     // point() divides once
                     // (adr/2026-08-body-zoom-scale-and-metrics.md)
-                    style: "transform: scale({zoom().scale()}) translate({pan().0}px, {pan().1}px)",
+                    style: "transform: scale({zoom()}) translate({pan().0}px, {pan().1}px)",
                     // the constellation: first child, so DOM order paints
                     // every edge under every card; inside the translated
                     // canvas, so pan and drags carry it for free
@@ -5051,7 +5110,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                         div {
                             key: "{card.id}",
                             class: "card card-{card.kind.as_dir()} {card.bar}",
-                            class: if zoom() == table::Zoom::Bodies { "bodies" },
+                            class: if table::Zoom::of(zoom()) == table::Zoom::Bodies { "bodies" },
                             class: if card.dimmed { "dimmed" },
                             // hue on the border and weight in the fill, both
                             // from tokens the theme already carries — a
@@ -5065,12 +5124,38 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     seed_grab(event, seed.0.clone(), seed.1, seed.2);
                                 }
                             },
+                            // a card takes its own wheel back, the way it
+                            // takes its own presses: its offsets are
+                            // card-local, so the pane point comes from where
+                            // the card itself stands
+                            // (adr/2026-09-the-table-zooms-continuously.md)
+                            onwheel: {
+                                let corner = (card.x, card.y);
+                                move |event: Event<WheelData>| {
+                                    // the card answered it: the pane's own
+                                    // handler would read these offsets as
+                                    // pane-local and zoom a second time
+                                    event.stop_propagation();
+                                    if let Some(closer) = wheel_notch(&event) {
+                                        let at = event.element_coordinates();
+                                        let scale = *zoom.peek();
+                                        let (px, py) = *pan.peek();
+                                        zoom_notch.call((
+                                            (
+                                                scale * (corner.0 + at.x + px),
+                                                scale * (corner.1 + at.y + py),
+                                            ),
+                                            closer,
+                                        ));
+                                    }
+                                }
+                            },
                             div { class: "card-label", "{card.label}" }
                             div { class: "card-title", "{card.title}" }
                             // the note's own rendered body, clipped — the
                             // template's typography, never restyled
                             // (adr/2026-08-body-cache-per-note-svg.md)
-                            if zoom() == table::Zoom::Bodies {
+                            if table::Zoom::of(zoom()) == table::Zoom::Bodies {
                                 div { class: "card-body",
                                     {
                                         match card_body(&bodies, &feed, &root, &card.path, theme) {
@@ -5490,6 +5575,29 @@ enum Grab {
         from: (f64, f64),
         to: (f64, f64),
     },
+}
+
+/// Which way a wheel notch zooms, or `None` when the notch is not the
+/// zoom's: only Ctrl+wheel zooms, and a wheel that reports no vertical
+/// travel names no direction. Away from the hand — a negative delta —
+/// zooms closer, which is what every map and every document already does
+/// (adr/2026-09-the-table-zooms-continuously.md).
+fn wheel_notch(event: &Event<WheelData>) -> Option<bool> {
+    if !event.modifiers().ctrl() {
+        return None;
+    }
+    let delta = event.delta().strip_units().y;
+    match delta == 0.0 {
+        true => None,
+        false => Some(delta < 0.0),
+    }
+}
+
+/// Whether a modifier that makes the key a chord is down. Shift is not one
+/// of them: `+` is typed with it on most layouts, and a bare key with Shift
+/// held is still a bare key.
+fn chorded(modifiers: Modifiers) -> bool {
+    modifiers.intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
 }
 
 /// Canvas-unit coordinates: client divided by the zoom's scale — the
@@ -17857,6 +17965,283 @@ mod tests {
         assert!(dioxus_ssr::render(&dom).contains("scale(1)"));
     }
 
+    // -- continuous zoom: the wheel and the bare +/- keys ---------------------
+
+    /// The transform the canvas is written with at this scale and pan —
+    /// what every zoom assertion below reads out of the rendered page.
+    fn transform(scale: f64, pan: (f64, f64)) -> String {
+        format!(
+            "transform: scale({scale}) translate({}px, {}px)",
+            pan.0, pan.1
+        )
+    }
+
+    /// Switches to the table and hands back its wheel targets — the pane
+    /// itself, then each card's, in the order the canvas mounts them —
+    /// alongside the mousedown targets `table_targets` names.
+    fn table_wheel_targets(
+        dom: &mut VirtualDom,
+        clicks: &[ElementId],
+    ) -> (ElementId, Vec<ElementId>, Vec<ElementId>) {
+        let mutations = click_for_mutations(dom, clicks[CHROME_TABLE]);
+        let downs = listeners(&mutations, "mousedown");
+        (
+            downs[0],
+            downs[1..].to_vec(),
+            listeners(&mutations, "wheel"),
+        )
+    }
+
+    #[test]
+    fn a_ctrl_wheel_zooms_one_notch_around_the_pointer() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, wheels) = table_wheel_targets(&mut dom, &clicks);
+
+        // the pane's own corner is the one anchor a zoom never pans for
+        wheel_at(&mut dom, wheels[0], (0.0, 0.0), -100.0, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(&transform(crate::table::ZOOM_STEP, (0.0, 0.0))),
+            "one notch in, no pan: {html}"
+        );
+
+        // and a notch aimed at a real point holds that point still: the
+        // pointer's pane offset is what the pan is computed from
+        let held = crate::table::rezoom(
+            (0.0, 0.0),
+            crate::table::ZOOM_STEP,
+            crate::table::stepped(crate::table::ZOOM_STEP, true),
+            (400.0, 200.0),
+        );
+        wheel_at(
+            &mut dom,
+            wheels[0],
+            (400.0, 200.0),
+            -100.0,
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(&transform(
+                crate::table::stepped(crate::table::ZOOM_STEP, true),
+                held
+            )),
+            "the pointer held: {html}"
+        );
+
+        // rolling the other way steps back out
+        wheel_at(
+            &mut dom,
+            wheels[0],
+            (400.0, 200.0),
+            100.0,
+            Modifiers::CONTROL,
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(&transform(crate::table::ZOOM_STEP, (0.0, 0.0))),
+            "the round trip landed where it started: {html}"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_a_card_zooms_around_the_card_point_under_it() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, wheels) = table_wheel_targets(&mut dom, &clicks);
+
+        // alpha stands at the fallback grid's first slot, (32, 32); eight
+        // units into it is the canvas point (40, 40), which at scale 1
+        // over an unpanned canvas is the pane point (40, 40)
+        let held = crate::table::rezoom(
+            (0.0, 0.0),
+            1.0,
+            crate::table::ZOOM_STEP,
+            (40.0, 40.0),
+        );
+        wheel_at(&mut dom, wheels[1], (8.0, 8.0), -100.0, Modifiers::CONTROL);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(&transform(crate::table::ZOOM_STEP, held)),
+            "the card's own point held: {html}"
+        );
+    }
+
+    #[test]
+    fn only_a_ctrl_wheel_with_travel_zooms_at_all() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, wheels) = table_wheel_targets(&mut dom, &clicks);
+        let before = dioxus_ssr::render(&dom);
+
+        // a bare wheel is the pane's to ignore, on the void and on a card
+        wheel_at(
+            &mut dom,
+            wheels[0],
+            (400.0, 200.0),
+            -100.0,
+            Modifiers::empty(),
+        );
+        wheel_at(&mut dom, wheels[1], (8.0, 8.0), -100.0, Modifiers::empty());
+        // and a notch that reports no travel names no direction
+        wheel_at(&mut dom, wheels[0], (400.0, 200.0), 0.0, Modifiers::CONTROL);
+        wheel_at(&mut dom, wheels[1], (8.0, 8.0), 0.0, Modifiers::CONTROL);
+        assert_eq!(dioxus_ssr::render(&dom), before);
+    }
+
+    #[test]
+    fn the_bare_plus_and_minus_keys_step_around_the_pane_centre() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // the default pane is 1280 × 800, so its centre is (640, 400)
+        let held = crate::table::rezoom(
+            (0.0, 0.0),
+            1.0,
+            crate::table::ZOOM_STEP,
+            (640.0, 400.0),
+        );
+        press(
+            &mut dom,
+            keys,
+            Key::Character("=".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&transform(crate::table::ZOOM_STEP, held)),
+            "one notch in around the centre"
+        );
+
+        // "+" is the same key with Shift held, and Shift is not a chord
+        press(&mut dom, keys, Key::Character("+".into()), Modifiers::SHIFT);
+        let twice = crate::table::stepped(crate::table::ZOOM_STEP, true);
+        assert!(dioxus_ssr::render(&dom).contains(&format!("scale({twice})")));
+
+        // and back out, twice, to where the table opened
+        press(
+            &mut dom,
+            keys,
+            Key::Character("-".into()),
+            Modifiers::empty(),
+        );
+        press(
+            &mut dom,
+            keys,
+            Key::Character("-".into()),
+            Modifiers::empty(),
+        );
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&transform(crate::table::TITLES_SCALE, (0.0, 0.0))),
+            "the round trip landed back at the opening scale"
+        );
+    }
+
+    #[test]
+    fn the_scale_stops_at_each_end_of_its_range() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+
+        // 1.1^30 clears the whole range from either end, so both walks run
+        // well past their bound and stop there rather than overshooting
+        for _ in 0..30 {
+            press(
+                &mut dom,
+                keys,
+                Key::Character("-".into()),
+                Modifiers::empty(),
+            );
+        }
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&format!("scale({})", crate::table::MIN_SCALE)),
+            "the far end holds"
+        );
+        for _ in 0..30 {
+            press(
+                &mut dom,
+                keys,
+                Key::Character("+".into()),
+                Modifiers::SHIFT,
+            );
+        }
+        assert!(
+            dioxus_ssr::render(&dom)
+                .contains(&format!("scale({})", crate::table::MAX_SCALE)),
+            "the near end holds"
+        );
+    }
+
+    #[test]
+    fn the_cards_start_drawing_bodies_past_the_threshold() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
+        centre_alpha(&mut dom, pane);
+
+        // seven notches stop just under the threshold: still titles
+        for _ in 0..7 {
+            press(
+                &mut dom,
+                keys,
+                Key::Character("=".into()),
+                Modifiers::empty(),
+            );
+        }
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">alpha</div>"), "{html}");
+        assert!(!html.contains("card-body"), "still titles: {html}");
+
+        // the eighth crosses it, and the card draws its own note
+        press(
+            &mut dom,
+            keys,
+            Key::Character("=".into()),
+            Modifiers::empty(),
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("card-body"), "bodies now: {html}");
+        assert!(html.contains(RENDERED_NOTE), "the note's own svg: {html}");
+    }
+
+    #[test]
+    fn an_open_sheet_refuses_every_notch() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (pane, cards, wheels) = table_wheel_targets(&mut dom, &clicks);
+        let keys = sink_target();
+        open_sheet_on(&mut dom, pane, cards[0]);
+        let before = dioxus_ssr::render(&dom);
+        assert!(before.contains(r#"class="sheet""#), "{before}");
+
+        // the sheet, its tether and the raised card are scale-1 constructs
+        wheel_at(
+            &mut dom,
+            wheels[0],
+            (400.0, 200.0),
+            -100.0,
+            Modifiers::CONTROL,
+        );
+        press(
+            &mut dom,
+            keys,
+            Key::Character("=".into()),
+            Modifiers::empty(),
+        );
+        assert_eq!(dioxus_ssr::render(&dom), before);
+    }
+
     // -- constellations: link edges under the cards --------------------------
 
     #[test]
@@ -20723,6 +21108,53 @@ mod tests {
             let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
                 SerializedWheelData {
                     mouse: SerializedPointInteraction::default(),
+                    delta_mode: 0, // pixels
+                    delta_x: 0.0,
+                    delta_y,
+                    delta_z: 0.0,
+                },
+            )));
+            dom.runtime().handle_event(
+                "wheel",
+                Event::new(data, true),
+                target,
+            );
+            dom.process_events();
+            dom.render_immediate_to_vec();
+        });
+    }
+
+    /// The same wheel, aimed: the pointer stands `offset` inside the
+    /// target's own padding box, `modifiers` are held, and the delta is
+    /// pixels like every real notch. The client point carries the chrome's
+    /// height, as a browser's would.
+    fn wheel_at(
+        dom: &mut VirtualDom,
+        target: ElementId,
+        offset: (f64, f64),
+        delta_y: f64,
+        modifiers: Modifiers,
+    ) {
+        with_reactor(|| {
+            let data: Rc<dyn Any> = Rc::new(PlatformEventData::new(Box::new(
+                SerializedWheelData {
+                    mouse: SerializedPointInteraction::new(
+                        Some(input_data::MouseButton::Primary),
+                        input_data::MouseButton::Primary.into(),
+                        {
+                            use dioxus::html::geometry::*;
+                            Coordinates::new(
+                                ScreenPoint::zero(),
+                                ClientPoint::new(
+                                    offset.0,
+                                    offset.1 + PANE_TOP,
+                                ),
+                                ElementPoint::new(offset.0, offset.1),
+                                PagePoint::zero(),
+                            )
+                        },
+                        modifiers,
+                    ),
                     delta_mode: 0, // pixels
                     delta_x: 0.0,
                     delta_y,

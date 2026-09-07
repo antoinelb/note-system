@@ -269,9 +269,30 @@ pub const CLICK_SLOP: f64 = 4.0;
 /// (adr/2026-08-new-card-lands-at-viewport-centre.md).
 pub const DEFAULT_VIEWPORT: (f64, f64) = (1280.0, 800.0);
 
-/// The two semantic zoom levels: titles, and rendered
-/// bodies at three times the size
-/// (adr/2026-08-body-zoom-scale-and-metrics.md).
+/// The scale the table opens at, and the one the two chords still jump
+/// between — the semantic levels survive as named stops on a continuous
+/// axis (adr/2026-09-the-table-zooms-continuously.md).
+pub const TITLES_SCALE: f64 = 1.0;
+pub const BODIES_SCALE: f64 = 3.0;
+
+/// How far the canvas may be scaled either way. A quarter still reads as a
+/// constellation; four is the closest a 176-wide card is worth drawing.
+pub const MIN_SCALE: f64 = 0.25;
+pub const MAX_SCALE: f64 = 4.0;
+
+/// One notch of the wheel or the `+`/`-` keys. Multiplicative, so a step
+/// out undoes a step in and every notch covers the same proportion of the
+/// range however far in the table already stands.
+pub const ZOOM_STEP: f64 = 1.1;
+
+/// Where a card stops being a title and starts being a body. Halfway
+/// between the two stops in log terms is nearer 1.7; 2.0 is the round
+/// number and keeps a card legible before its body appears.
+pub const BODIES_AT: f64 = 2.0;
+
+/// The two treatments a card is drawn with — derived from the scale on
+/// every read, never stored beside it, so there is one source of truth
+/// (adr/2026-09-the-table-zooms-continuously.md).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Zoom {
     Titles,
@@ -279,14 +300,34 @@ pub enum Zoom {
 }
 
 impl Zoom {
-    /// The canvas's scale factor — applied outside the translate, so the
-    /// pan stays in canvas units and `point()` divides once.
+    /// The scale this level's chord jumps to — applied outside the
+    /// translate, so the pan stays in canvas units and `point()` divides
+    /// once.
     pub fn scale(self) -> f64 {
         match self {
-            Zoom::Titles => 1.0,
-            Zoom::Bodies => 3.0,
+            Zoom::Titles => TITLES_SCALE,
+            Zoom::Bodies => BODIES_SCALE,
         }
     }
+
+    /// How a card is drawn at this scale.
+    pub fn of(scale: f64) -> Self {
+        match scale >= BODIES_AT {
+            true => Zoom::Bodies,
+            false => Zoom::Titles,
+        }
+    }
+}
+
+/// One notch closer or further, held inside the range. A scale already at
+/// a bound steps to that bound again, which the caller reads as "nothing
+/// moved" — never an error.
+pub fn stepped(scale: f64, closer: bool) -> f64 {
+    let target = match closer {
+        true => scale * ZOOM_STEP,
+        false => scale / ZOOM_STEP,
+    };
+    target.clamp(MIN_SCALE, MAX_SCALE)
 }
 
 /// The clipped body area below label and title, and the card's full height
@@ -299,17 +340,17 @@ pub const BODY_CARD_HEIGHT: f64 = 296.0;
 pub const TITLE_CARD_HEIGHT: f64 = 96.0;
 
 /// Whether the card's rectangle intersects the viewport under
-/// `scale(zoom) translate(pan)`: screen = s·(canvas + pan). Exact edge
-/// contact does not count — a card ending at the boundary shows nothing
-/// (adr/2026-08-viewport-culling-onresize.md).
+/// `scale(scale) translate(pan)`: screen = s·(canvas + pan). The height is
+/// the one the card actually draws at this scale, so culling and rendering
+/// never disagree. Exact edge contact does not count — a card ending at the
+/// boundary shows nothing (adr/2026-08-viewport-culling-onresize.md).
 pub fn in_view(
     card: &Card,
-    zoom: Zoom,
+    scale: f64,
     pan: (f64, f64),
     viewport: (f64, f64),
 ) -> bool {
-    let scale = zoom.scale();
-    let height = match zoom {
+    let height = match Zoom::of(scale) {
         Zoom::Titles => TITLE_CARD_HEIGHT,
         Zoom::Bodies => BODY_CARD_HEIGHT,
     };
@@ -321,31 +362,37 @@ pub fn in_view(
         && top + scale * height > 0.0
 }
 
-/// The pan that keeps the canvas point under the viewport centre fixed
-/// across a zoom change: p = centre/s − pan, so
-/// pan' = pan + centre·(1/s' − 1/s)
-/// (adr/2026-08-body-zoom-scale-and-metrics.md).
+/// The pan that keeps the canvas point under a given pane point fixed
+/// across a scale change: the point p answers to canvas p/s − pan, so
+/// pan' = pan + p·(1/s' − 1/s). The wheel passes the pointer, the keys the
+/// pane's centre — one rule, two anchors
+/// (adr/2026-09-the-table-zooms-continuously.md). Both scales are inside
+/// `MIN_SCALE ..= MAX_SCALE`, which every caller clamps to, so neither
+/// division can meet a zero.
 pub fn rezoom(
     pan: (f64, f64),
-    from: Zoom,
-    to: Zoom,
-    viewport: (f64, f64),
+    from: f64,
+    to: f64,
+    at: (f64, f64),
 ) -> (f64, f64) {
-    let shift = 1.0 / to.scale() - 1.0 / from.scale();
-    (
-        pan.0 + viewport.0 / 2.0 * shift,
-        pan.1 + viewport.1 / 2.0 * shift,
-    )
+    let shift = 1.0 / to - 1.0 / from;
+    (pan.0 + at.0 * shift, pan.1 + at.1 * shift)
 }
 
 /// Canvas coordinates that centre a new card in the viewport under `pan`:
 /// where the user is looking is where the note appears
 /// (adr/2026-08-new-card-lands-at-viewport-centre.md). The card's nominal
 /// mid-height is the tether's drop, the one height the layout declares.
-pub fn spawn_position(viewport: (f64, f64), pan: (f64, f64)) -> (f64, f64) {
+/// The centre is a pane point, so it divides by the scale like every other
+/// screen coordinate the canvas answers.
+pub fn spawn_position(
+    viewport: (f64, f64),
+    pan: (f64, f64),
+    scale: f64,
+) -> (f64, f64) {
     (
-        viewport.0 / 2.0 - CARD_WIDTH / 2.0 - pan.0,
-        viewport.1 / 2.0 - TETHER_DROP - pan.1,
+        viewport.0 / (2.0 * scale) - CARD_WIDTH / 2.0 - pan.0,
+        viewport.1 / (2.0 * scale) - TETHER_DROP - pan.1,
     )
 }
 
@@ -1037,13 +1084,19 @@ mod tests {
         // an unpanned 1280×800 viewport: the card's left edge sits half a
         // card left of centre, its mid-height (the tether drop) at mid-height
         assert_eq!(
-            spawn_position(DEFAULT_VIEWPORT, (0.0, 0.0)),
+            spawn_position(DEFAULT_VIEWPORT, (0.0, 0.0), TITLES_SCALE),
             (640.0 - CARD_WIDTH / 2.0, 400.0 - TETHER_DROP)
         );
         // a panned canvas compensates: the card still lands mid-viewport
         assert_eq!(
-            spawn_position(DEFAULT_VIEWPORT, (100.0, -60.0)),
+            spawn_position(DEFAULT_VIEWPORT, (100.0, -60.0), TITLES_SCALE),
             (640.0 - CARD_WIDTH / 2.0 - 100.0, 400.0 - TETHER_DROP + 60.0)
+        );
+        // zoomed in, the same pane centre stands over a canvas point that
+        // much nearer the origin
+        assert_eq!(
+            spawn_position(DEFAULT_VIEWPORT, (0.0, 0.0), 2.0),
+            (320.0 - CARD_WIDTH / 2.0, 200.0 - TETHER_DROP)
         );
     }
 
@@ -1299,50 +1352,92 @@ mod tests {
     }
 
     #[test]
+    fn the_level_is_read_off_the_scale_at_the_threshold() {
+        assert_eq!(Zoom::of(MIN_SCALE), Zoom::Titles);
+        assert_eq!(Zoom::of(TITLES_SCALE), Zoom::Titles);
+        // the threshold itself already draws bodies
+        assert_eq!(Zoom::of(BODIES_AT - 0.001), Zoom::Titles);
+        assert_eq!(Zoom::of(BODIES_AT), Zoom::Bodies);
+        assert_eq!(Zoom::of(BODIES_SCALE), Zoom::Bodies);
+        assert_eq!(Zoom::of(MAX_SCALE), Zoom::Bodies);
+    }
+
+    #[test]
+    fn a_step_is_multiplicative_and_stops_at_the_range() {
+        assert!((stepped(1.0, true) - ZOOM_STEP).abs() < 1e-9);
+        assert!((stepped(1.0, false) - 1.0 / ZOOM_STEP).abs() < 1e-9);
+        // a step out then in comes back to where it started
+        assert!((stepped(stepped(2.0, false), true) - 2.0).abs() < 1e-9);
+        // and neither direction leaves the range
+        assert_eq!(stepped(MAX_SCALE, true), MAX_SCALE);
+        assert_eq!(stepped(MIN_SCALE, false), MIN_SCALE);
+    }
+
+    #[test]
     fn a_card_leaves_view_exactly_at_each_boundary() {
         let card = placed_card("a", 100.0, 100.0);
         let vp = (1280.0, 800.0);
-        assert!(in_view(&card, Zoom::Titles, (0.0, 0.0), vp));
+        let one = TITLES_SCALE;
+        assert!(in_view(&card, one, (0.0, 0.0), vp));
         // exact edge contact counts as out, one pixel back in as in
-        assert!(!in_view(&card, Zoom::Titles, (1180.0, 0.0), vp), "left");
-        assert!(in_view(&card, Zoom::Titles, (1179.0, 0.0), vp));
-        assert!(!in_view(&card, Zoom::Titles, (-276.0, 0.0), vp), "right");
-        assert!(in_view(&card, Zoom::Titles, (-275.0, 0.0), vp));
-        assert!(!in_view(&card, Zoom::Titles, (0.0, 700.0), vp), "top");
-        assert!(in_view(&card, Zoom::Titles, (0.0, 699.0), vp));
-        assert!(!in_view(&card, Zoom::Titles, (0.0, -196.0), vp), "bottom");
-        assert!(in_view(&card, Zoom::Titles, (0.0, -195.0), vp));
+        assert!(!in_view(&card, one, (1180.0, 0.0), vp), "left");
+        assert!(in_view(&card, one, (1179.0, 0.0), vp));
+        assert!(!in_view(&card, one, (-276.0, 0.0), vp), "right");
+        assert!(in_view(&card, one, (-275.0, 0.0), vp));
+        assert!(!in_view(&card, one, (0.0, 700.0), vp), "top");
+        assert!(in_view(&card, one, (0.0, 699.0), vp));
+        assert!(!in_view(&card, one, (0.0, -196.0), vp), "bottom");
+        assert!(in_view(&card, one, (0.0, -195.0), vp));
     }
 
     #[test]
     fn culling_respects_the_pan_and_the_scale() {
         let vp = (1280.0, 800.0);
+        let (one, three) = (TITLES_SCALE, BODIES_SCALE);
         // the same pan puts a body-zoomed card thrice as far out
         let far = placed_card("a", 500.0, 0.0);
-        assert!(in_view(&far, Zoom::Titles, (0.0, 0.0), vp));
-        assert!(!in_view(&far, Zoom::Bodies, (0.0, 0.0), vp));
-        // the taller body card survives higher above the fold
+        assert!(in_view(&far, one, (0.0, 0.0), vp));
+        assert!(!in_view(&far, three, (0.0, 0.0), vp));
+        // the taller body card survives higher above the fold — the height
+        // follows the treatment the scale actually draws
         let high = placed_card("b", 0.0, -290.0);
-        assert!(!in_view(&high, Zoom::Titles, (0.0, 0.0), vp));
-        assert!(in_view(&high, Zoom::Bodies, (0.0, 0.0), vp));
+        assert!(!in_view(&high, one, (0.0, 0.0), vp));
+        assert!(in_view(&high, three, (0.0, 0.0), vp));
+        // just under the threshold the title height is back, so the same
+        // card at the same scale is culled
+        assert!(!in_view(&high, BODIES_AT - 0.001, (0.0, 0.0), vp));
+        assert!(in_view(&high, BODIES_AT, (0.0, 0.0), vp));
         // and panning brings the far card back
-        assert!(in_view(&far, Zoom::Bodies, (-200.0, 0.0), vp));
+        assert!(in_view(&far, three, (-200.0, 0.0), vp));
     }
 
     #[test]
-    fn rezoom_keeps_the_viewport_centre_on_the_same_canvas_point() {
-        let vp = (1280.0, 800.0);
+    fn rezoom_keeps_the_anchor_on_the_same_canvas_point() {
+        let centre = (640.0, 400.0);
         let pan = (-40.0, 40.0);
-        let zoomed = rezoom(pan, Zoom::Titles, Zoom::Bodies, vp);
-        // the canvas point under the centre: p = centre/s − pan
+        let zoomed = rezoom(pan, TITLES_SCALE, BODIES_SCALE, centre);
+        // the canvas point under the anchor: p = anchor/s − pan
         let before = (640.0 - pan.0, 400.0 - pan.1);
         let after = (640.0 / 3.0 - zoomed.0, 400.0 / 3.0 - zoomed.1);
         assert!((before.0 - after.0).abs() < 1e-9, "{before:?} {after:?}");
         assert!((before.1 - after.1).abs() < 1e-9, "{before:?} {after:?}");
         // and back out is the identity round trip
-        let back = rezoom(zoomed, Zoom::Bodies, Zoom::Titles, vp);
+        let back = rezoom(zoomed, BODIES_SCALE, TITLES_SCALE, centre);
         assert!((back.0 - pan.0).abs() < 1e-9);
         assert!((back.1 - pan.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rezoom_holds_whatever_point_it_is_handed() {
+        // an off-centre anchor — the pointer, where the wheel zooms
+        let pointer = (200.0, 120.0);
+        let held = rezoom((10.0, -10.0), 1.0, 1.6, pointer);
+        let before = (200.0 / 1.0 - 10.0, 120.0 / 1.0 + 10.0);
+        let after = (200.0 / 1.6 - held.0, 120.0 / 1.6 - held.1);
+        assert!((before.0 - after.0).abs() < 1e-9, "{before:?} {after:?}");
+        assert!((before.1 - after.1).abs() < 1e-9, "{before:?} {after:?}");
+        // the origin is the one anchor a zoom never moves the pan for
+        assert_eq!(rezoom((10.0, -10.0), 1.0, 4.0, (0.0, 0.0)), (10.0, -10.0));
     }
 
     #[test]
