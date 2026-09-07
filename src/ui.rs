@@ -2475,9 +2475,23 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 !feed.inline,
                 visual_linewise,
             )?;
+            // the gutter's two numbers: which line the caret is on, and
+            // how wide the widest number can get. `block_panes` emits
+            // exactly one pane per block, in order, so a pane's own index
+            // *is* its line — no pane needs to carry a number of its own,
+            // and the width is the note's, fixed while it is open
+            // (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+            // `block_panes` already returned `None` for an editor with no
+            // active block, so the clamp is the same one it made.
+            let caret_line = editor
+                .read()
+                .active()
+                .unwrap_or(0)
+                .min(panes.len().saturating_sub(1));
+            let digits = blocks::gutter_width(panes.len());
             Some(rsx! {
-                div { class: "note-blocks",
-                    for pane in panes {
+                div { class: "note-blocks", style: "--line-digits: {digits}",
+                    for (line_index, pane) in panes.into_iter().enumerate() {
                         {
                             match pane {
                                 Pane::Source { start, text } => {
@@ -2657,6 +2671,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                 let dragging = dragging.clone();
                                                 move |_| dragging.set(false)
                                             },
+                                            {line_number(line_index, caret_line)}
                                             for (row, line) in rendered_lines.into_iter().enumerate() {
                                                 div { key: "{row}", class: "source-line",
                                                     for (tag, piece) in line {
@@ -2821,6 +2836,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                 fragments.borrow_mut().sweep();
                                             }
                                         },
+                                        {line_number(line_index, caret_line)}
                                         div { class: "selected-source",
                                             for (row, line) in rendered_lines.into_iter().enumerate() {
                                                 div { key: "{row}", class: "source-line",
@@ -2878,6 +2894,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     fragments.borrow_mut().sweep();
                                                 }
                                             },
+                                            {line_number(line_index, caret_line)}
                                             div { class: "block-source",
                                                 for (row, line) in lines.into_iter().enumerate() {
                                                     div { key: "{row}", class: "source-line",
@@ -2914,6 +2931,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                 fragments.borrow_mut().sweep();
                                             }
                                         },
+                                        {line_number(line_index, caret_line)}
                                         {
                                             match rendered {
                                                 Ok(svg) => rsx! {
@@ -2954,6 +2972,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                                     fragments.borrow_mut().sweep();
                                                 }
                                             },
+                                            {line_number(line_index, caret_line)}
                                             {
                                                 match shelved {
                                                     Some(svg) => rsx! {
@@ -5988,6 +6007,25 @@ fn piece_span(piece: caret::Piece) -> (bool, usize, String) {
         caret::Piece::Caret => (false, 0, String::new()),
         caret::Piece::CaretBox { start, cluster } => (false, start, cluster),
         caret::Piece::Preview { start, text } => (false, start, text),
+    }
+}
+
+/// One block's number in the gutter, drawn by every one of the five slots
+/// so the numbering has no gaps — a compiled fallback block counts as a
+/// line exactly like a CSS one. It rides *inside* its slot, so the click
+/// that already activates the block covers its number too, and it is taken
+/// out of flow by `.line-number` in `assets/theme.css` (positioned against
+/// the slot, right-aligned to the slot's own left edge) so it can touch
+/// neither the shared block box nor `.mk-item`'s hanging indent
+/// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+fn line_number(index: usize, caret_line: usize) -> Element {
+    let label = blocks::line_label(index, caret_line);
+    rsx! {
+        span {
+            class: "line-number",
+            class: if index == caret_line { "line-number-caret" },
+            "{label}"
+        }
     }
 }
 
@@ -11550,6 +11588,132 @@ mod tests {
                 r#"class="block block-css mk-item " style="--mk-indent: 1">"#
             ),
             "the standalone deep item steps its indent out: {html}"
+        );
+    }
+
+    /// Every number the gutter draws, in document order, each paired with
+    /// whether it is the caret's own line
+    /// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+    fn gutter_numbers(html: &str) -> Vec<(String, bool)> {
+        note_blocks_subtree(html)
+            .split(r#"<span class="line-number"#)
+            .skip(1)
+            .filter_map(|rest| {
+                let caret = rest.starts_with(" line-number-caret");
+                let text = rest.split('>').nth(1)?.split('<').next()?;
+                Some((text.to_string(), caret))
+            })
+            .collect()
+    }
+
+    /// Every block carries a number, the caret's own line states its
+    /// absolute one and every other line its distance from it — vim's
+    /// `set number relativenumber`
+    /// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md). The
+    /// fixture day note is five blocks: preamble, blank, heading, blank,
+    /// the `#let` line the compiled fallback draws — so the run also
+    /// proves the fallback slots number like the CSS ones and leave no
+    /// gap.
+    #[test]
+    fn the_gutter_numbers_every_line_from_the_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        activate_heading(&mut dom, &clicks);
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(
+            gutter_numbers(&html),
+            vec![
+                ("2".to_string(), false),
+                ("1".to_string(), false),
+                ("3".to_string(), true),
+                ("1".to_string(), false),
+                ("2".to_string(), false),
+            ],
+            "the caret's line is absolute, the rest are distances: {html}"
+        );
+        // the width the gutter reserves is the note's, not the caret's, so
+        // it is stated once on the container and never moves (AIR LAY-1)
+        assert!(
+            html.contains(r#"class="note-blocks" style="--line-digits: 2""#),
+            "five lines reserve the two-digit minimum: {html}"
+        );
+    }
+
+    /// `j` moves the caret one line down, and the whole column renumbers
+    /// around where it landed
+    /// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+    #[test]
+    fn the_gutter_renumbers_when_j_moves_the_caret() {
+        let vault = temp_vault();
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let (_, sink) = activate_heading(&mut dom, &clicks);
+        press(
+            &mut dom,
+            sink,
+            Key::Character("j".into()),
+            Modifiers::empty(),
+        );
+        block_on(settle(&mut dom));
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(
+            gutter_numbers(&html),
+            vec![
+                ("3".to_string(), false),
+                ("2".to_string(), false),
+                ("1".to_string(), false),
+                ("4".to_string(), true),
+                ("1".to_string(), false),
+            ],
+            "the absolute number moved down one line with the caret: {html}"
+        );
+    }
+
+    /// The gutter's own geometry lives entirely in the stylesheet, so SSR
+    /// has nothing to assert on: what makes it safe is that the number is
+    /// out of flow and the column it sits in is reserved from the note's
+    /// line count rather than measured per line. Read from the file the
+    /// way the item's hang already is
+    /// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+    #[test]
+    fn the_gutter_reserves_its_column_and_takes_no_room_in_the_line() {
+        let sheet = include_str!("../assets/theme.css");
+        let column = sheet
+            .split("\n.note-blocks {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet reserves the gutter column");
+        assert!(
+            column.contains("var(--line-digits, 2)"),
+            "the reservation is the note's digit count, written inline by \
+             blocks_view, and a note that states none still reserves two: \
+             {column}"
+        );
+        let number = sheet
+            .split("\n.line-number {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet draws the number");
+        assert!(
+            number.contains("position: absolute;")
+                && number.contains("right: 100%;"),
+            "out of flow, right-aligned on the slot's own left edge, so it \
+             touches neither the shared block box nor .mk-item's hanging \
+             indent: {number}"
+        );
+        assert!(
+            number.contains(
+                "line-height: calc(var(--prose-size) * var(--prose-leading));"
+            ),
+            "one prose line tall, so a wrapped block keeps its number on \
+             the first row: {number}"
+        );
+        // the compiled fallback's scroll box is the widget, not the slot,
+        // or it would clip its own number away
+        assert!(
+            sheet.contains(".block-svg .note,\n.block-svg .render-error {"),
+            "the compiled widget scrolls, not the slot around it: {sheet}"
         );
     }
 
