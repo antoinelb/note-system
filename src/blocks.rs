@@ -164,6 +164,51 @@ pub fn block_at(blocks: &[Block], offset: usize) -> usize {
     blocks.len().saturating_sub(1)
 }
 
+/// How many indent guides each line draws: one per two-space level of its
+/// own leading spaces, and — indent-blankline's rule — for a
+/// whitespace-only line the smaller of its two nearest non-blank
+/// neighbours' depths, so a blank line inside a nested run leaves the
+/// run's rules unbroken while one at either end of the note, or beside a
+/// top-level line, draws none. Odd leading spaces round down and a tab is
+/// never an indent: the editor only ever writes `caret::INDENT`, two
+/// spaces (adr/2026-08-tab-indents-in-every-mode.md). A multi-line block
+/// (a raw fence, the preamble) counts as the one line it is drawn as and
+/// takes its first line's depth.
+pub fn guide_depths(lines: &[&str]) -> Vec<usize> {
+    let own: Vec<Option<usize>> =
+        lines.iter().map(|line| leading_depth(line)).collect();
+    // the last non-blank depth strictly before each line, and the first
+    // strictly after it — 0 where the note runs out, so a leading or a
+    // trailing blank line takes the note's edge as a top-level neighbour
+    let mut before = Vec::with_capacity(own.len());
+    let mut carried = 0;
+    for depth in &own {
+        before.push(carried);
+        carried = depth.unwrap_or(carried);
+    }
+    let mut after = Vec::with_capacity(own.len());
+    let mut carried = 0;
+    for depth in own.iter().rev() {
+        after.push(carried);
+        carried = depth.unwrap_or(carried);
+    }
+    after.reverse();
+    own.iter()
+        .zip(before)
+        .zip(after)
+        .map(|((own, before), after)| own.unwrap_or(before.min(after)))
+        .collect()
+}
+
+/// One line's own indent depth, or `None` for a whitespace-only line —
+/// which has no indent to speak of and takes its neighbours' instead.
+fn leading_depth(line: &str) -> Option<usize> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    Some(line.chars().take_while(|&ch| ch == ' ').count() / 2)
+}
+
 /// After the active block's content is replaced by `new_len` bytes, its
 /// separator and every later block shift by the same delta. An out-of-range
 /// `active` is a stale caller and shifts nothing.
@@ -527,6 +572,42 @@ mod tests {
         };
         let source = block_source(text, &stale);
         assert_eq!(source, FRAGMENT_PREAMBLE, "{source}");
+    }
+
+    // -- guide_depths -----------------------------------------------------
+
+    #[test]
+    fn a_nested_run_draws_one_guide_per_two_space_level() {
+        let lines = ["- a", "  - b", "    - c", "  - d", "e"];
+        assert_eq!(guide_depths(&lines), vec![0, 1, 2, 1, 0]);
+    }
+
+    #[test]
+    fn a_blank_line_takes_the_shallower_of_its_two_neighbours() {
+        // inside a nested run the rules carry through; before a dedent the
+        // shallower side wins, and a top-level neighbour ends them
+        let lines = ["    a", "", "    b", "", "  c", "", "d"];
+        assert_eq!(guide_depths(&lines), vec![2, 2, 2, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn a_blank_line_at_either_end_of_the_note_draws_nothing() {
+        let lines = ["", "  a", "    b", "   ", ""];
+        assert_eq!(guide_depths(&lines), vec![0, 1, 2, 0, 0]);
+    }
+
+    #[test]
+    fn a_tab_is_never_an_indent_and_an_odd_space_rounds_down() {
+        // the editor only ever writes two-space levels
+        // (adr/2026-08-tab-indents-in-every-mode.md), so a tabbed line is
+        // read as top level rather than guessing a width for it
+        let lines = ["\t\ta", "   b", "     c"];
+        assert_eq!(guide_depths(&lines), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_note_with_no_lines_draws_no_guides() {
+        assert_eq!(guide_depths(&[]), Vec::<usize>::new());
     }
 
     #[test]
