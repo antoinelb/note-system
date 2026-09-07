@@ -17,7 +17,7 @@ static:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 test:
-	cargo +nightly llvm-cov \
+	flock target/.test.lock cargo +nightly llvm-cov \
 	  --ignore-filename-regex '(lib\.rs|/mod\.rs)$$' \
 	  --fail-under-regions 100 \
 	  --fail-under-lines 100 \
