@@ -12035,7 +12035,8 @@ mod tests {
             .and_then(|rest| rest.split('}').next())
             .expect("the stylesheet reserves the gutter column");
         assert!(
-            column.contains("var(--line-digits, 2)"),
+            column.contains("var(--line-digits, 2)")
+                && column.contains("+ 8px"),
             "the reservation is the note's digit count, written inline by \
              blocks_view, and a note that states none still reserves two: \
              {column}"
@@ -12047,10 +12048,10 @@ mod tests {
             .expect("the stylesheet draws the number");
         assert!(
             number.contains("position: absolute;")
-                && number.contains("right: 100%;"),
-            "out of flow, right-aligned on the slot's own left edge, so it \
-             touches neither the shared block box nor .mk-item's hanging \
-             indent: {number}"
+                && number.contains("right: calc(100% + 4px);"),
+            "out of flow, right-aligned 4px short of the slot's own left \
+             edge where a quote's rule paints, so it touches neither the \
+             shared block box nor .mk-item's hanging indent: {number}"
         );
         assert!(
             number.contains(

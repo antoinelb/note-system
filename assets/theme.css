@@ -452,7 +452,7 @@ body {
 .note-blocks {
   --line-number-size: 12px;
   padding-left: calc(
-    var(--line-digits, 2) * 0.602 * var(--line-number-size) + 4px
+    var(--line-digits, 2) * 0.602 * var(--line-number-size) + 8px
   );
 }
 
@@ -483,17 +483,18 @@ body {
 
    Out of flow, so it can touch neither the shared block box below nor
    .mk-item's hanging indent: the slot is the containing block (all five
-   carry `position: relative`) and `right: 100%` puts the number's right
-   edge on the slot's own left edge, whatever the number's width — which is
-   what right-aligns the column for free, with no width to state. The 8px
-   between the digits and the prose is the block box's own horizontal
-   gutter, not a second one.
+   carry `position: relative`) and `right: calc(100% + 4px)` puts the
+   number's right edge 4px short of the slot's own left edge, whatever the
+   number's width — which is what right-aligns the column for free, with
+   no width to state. The 4px is air between the digits and a quote's
+   rule, which paints on that very edge; the 8px between the digits and
+   the prose is the block box's own horizontal gutter, not a second one.
 
    The line box is one prose line tall, so the number sits on the block's
    first row and a wrapped block keeps it there. */
 .line-number {
   position: absolute;
-  right: 100%;
+  right: calc(100% + 4px);
   top: 0;
   font: var(--line-number-size) "DejaVu Sans Mono", monospace;
   line-height: calc(var(--prose-size) * var(--prose-leading));

@@ -17,7 +17,8 @@ No toggle and no setting: the settings overlay holds the two knobs that move the
 **Every one of the five slots draws it**, the compiled fallback's two included (`Pane::Fragment`, `Pane::Pending`), or the numbering would skip exactly the lines an equation or a `#table` sits on and read as a miscount rather than as a rendering detail.
 The number rides *inside* its slot, so the click that already activates a block covers its number too — no second handler, and no way for the two to disagree about which line was clicked.
 
-**Nothing about the block box changes.** `.line-number` is `position: absolute` against the slot, with `right: 100%` putting its right edge on the slot's own left edge — which right-aligns the column for free, at any digit count, with no width to state.
+**Nothing about the block box changes.** `.line-number` is `position: absolute` against the slot, with `right: calc(100% + 4px)` putting its right edge 4px short of the slot's own left edge — which right-aligns the column for free, at any digit count, with no width to state.
+The 4px is air between the digits and a quote's rule, which paints on that very edge: flush, the two read as one glyph (the first day of use showed it), and the reservation on `.note-blocks` carries the same 4px so the prose moves by nothing.
 The 8px between the digits and the prose is the block box's own horizontal gutter, not a second one, so the shared box (`adr/2026-09-every-line-shares-the-quote-rhythm.md`) and `.mk-item`'s hanging indent (`adr/2026-09-wrapped-items-hang-under-their-text.md`) are untouched by construction: an out-of-flow element cannot move them.
 `line-height` is one prose line box, so a wrapped block keeps its number on its first row.
 
