@@ -2480,7 +2480,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     for pane in panes {
                         {
                             match pane {
-                                Pane::Source { start, text } => {
+                                Pane::Source { start, text, guides } => {
                                     // the app draws the caret the webview
                                     // never could: the source cut into
                                     // pieces around selection and caret
@@ -2583,12 +2583,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         }
                                         markup::Draw::Typst => None,
                                     };
+                                    let style = block_style(item_style, guides);
                                     rsx! {
                                         div {
                                             key: "{start}",
                                             class: "block-active",
                                             class: if let Some(bc) = &block_class { "{bc}" },
-                                            style: if let Some(s) = &item_style { "{s}" },
+                                            style: if let Some(s) = &style { "{s}" },
                                             // a press asks the hit probe which character it
                                             // landed on; Ctrl makes it a follow, like
                                             // Ctrl+Enter (adr/2026-08-ctrl-enter-opens-time-links.md)
@@ -2753,7 +2754,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 // textarea socket — only the active block
                                 // is ever the widget
                                 // (adr/2026-08-visual-selection-drawn-across-lines.md)
-                                Pane::Selected { start, lines, text } => {
+                                Pane::Selected { start, lines, text, guides } => {
                                     // same verdict, same tint: a covered
                                     // block draws its markup roles too, not
                                     // just its highlight
@@ -2806,12 +2807,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                             })
                                             .collect(),
                                     };
+                                    let style = block_style(item_style, guides);
                                     rsx! {
                                     div {
                                         key: "{start}",
                                         class: "block-selected",
                                         class: if let Some(bc) = &block_class { "{bc}" },
-                                        style: if let Some(s) = &item_style { "{s}" },
+                                        style: if let Some(s) = &style { "{s}" },
                                         onclick: {
                                             let fragments = fragments.clone();
                                             let goal = goal.clone();
@@ -2851,7 +2853,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                 // structural role and spans laid out as
                                 // styled DOM text rather than a compiled
                                 // SVG (adr/2026-08-css-draws-the-markup.md)
-                                Pane::Css { start, block, spans, text } => {
+                                Pane::Css { start, block, spans, text, guides } => {
                                     let class = markup::block_class(block);
                                     // a blank block carries the same
                                     // shape class an active blank line
@@ -2862,13 +2864,14 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                     // a nested list item's indent
                                     // (adr/2026-08-css-draws-the-markup.md)
                                     let item_style = markup::item_indent_style(block);
+                                    let style = block_style(item_style, guides);
                                     let lines = markup_lines(&text, &spans);
                                     rsx! {
                                         div {
                                             key: "{start}",
                                             class: "block block-css {class}",
                                             class: if blank { "block-blank" },
-                                            style: if let Some(s) = &item_style { "{s}" },
+                                            style: if let Some(s) = &style { "{s}" },
                                             onclick: {
                                                 let fragments = fragments.clone();
                                                 let goal = goal.clone();
@@ -2901,10 +2904,11 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         }
                                     }
                                 }
-                                Pane::Fragment { start, rendered } => rsx! {
+                                Pane::Fragment { start, rendered, guides } => rsx! {
                                     div {
                                         key: "{start}",
                                         class: "block block-svg",
+                                        style: if let Some(s) = &block_style(None, guides) { "{s}" },
                                         onclick: {
                                             let fragments = fragments.clone();
                                             let goal = goal.clone();
@@ -2926,7 +2930,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         }
                                     }
                                 },
-                                Pane::Pending { start, text, job, shelved } => {
+                                Pane::Pending { start, text, job, shelved, guides } => {
                                     // the compile rides the tier (at most
                                     // once — the probe dedups) while the
                                     // slot shows what it last showed: the
@@ -2940,11 +2944,13 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                                         (feed.submit)(Job::Fragment(job));
                                     }
                                     let stale = shelved.is_some();
+                                    let style = block_style(None, guides);
                                     rsx! {
                                         div {
                                             key: "{start}",
                                             class: "block block-svg block-pending",
                                             class: if stale { "block-stale" },
+                                            style: if let Some(s) = &style { "{s}" },
                                             onclick: {
                                                 let fragments = fragments.clone();
                                                 let goal = goal.clone();
@@ -5797,11 +5803,16 @@ fn sheet_backlinks(root: &Path, own: &str) -> Result<usize, String> {
 /// own block's `start` byte so a click activates the block actually
 /// clicked rather than a fixed boundary neighbour
 /// (adr/2026-08-css-draws-the-markup.md, superseding the cursor split's
-/// merged-region compromise).
+/// merged-region compromise). Every variant also carries `guides`, the
+/// number of indent rules its line draws — on every branch, so a caret
+/// move, which only ever swaps one block's variant for another, can never
+/// make a guide appear or vanish
+/// (adr/2026-09-indent-guides-are-a-block-background.md).
 enum Pane {
     Source {
         start: usize,
         text: String,
+        guides: usize,
     },
     /// A block the note-global visual selection reaches into, drawn as
     /// highlighted raw source rather than through the markup model — the
@@ -5815,6 +5826,7 @@ enum Pane {
         /// does — `lines` alone carries no source text to derive a
         /// verdict from (adr/2026-08-css-draws-the-markup.md).
         text: String,
+        guides: usize,
     },
     /// A block CSS can draw: its structural role and the spans tiling its
     /// content, laid out as styled `<span>`s rather than a compiled SVG
@@ -5824,10 +5836,12 @@ enum Pane {
         block: markup::BlockRole,
         spans: Vec<markup::Span>,
         text: String,
+        guides: usize,
     },
     Fragment {
         start: usize,
         rendered: Result<String, String>,
+        guides: usize,
     },
     Pending {
         start: usize,
@@ -5836,6 +5850,7 @@ enum Pane {
         /// The slot's last SVG, standing in while the new compile is out
         /// (adr/2026-09-fragments-shelve-their-last-svg-per-block.md).
         shelved: Option<String>,
+        guides: usize,
     },
 }
 
@@ -5870,6 +5885,14 @@ fn block_panes(
     // no region of its own to leave uncovered)
     let active_index = editor.active()?.min(blocks.len().saturating_sub(1));
     let active = &blocks[active_index];
+    // one pass over the whole note, because a blank line's own depth is its
+    // neighbours' and no single block can answer for it
+    // (adr/2026-09-indent-guides-are-a-block-background.md)
+    let contents: Vec<&str> = blocks
+        .iter()
+        .map(|block| text.get(block.content()).unwrap_or(""))
+        .collect();
+    let guides = blocks::guide_depths(&contents);
     // widened to whole lines under `V`, the same rule `visual_span` cuts an
     // operator's span with (vim.rs) — otherwise the covered boundary block
     // would draw only the raw anchor..head intersection, a ragged partial
@@ -5903,10 +5926,14 @@ fn block_panes(
 
     let mut panes = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
+        // in bounds by construction: one depth per block, walked together
+        let guides = guides[index];
+        let content = contents[index];
         if index == active_index {
             panes.push(Pane::Source {
                 start: active.range.start,
-                text: text.get(active.content()).unwrap_or("").to_string(),
+                text: content.to_string(),
+                guides,
             });
             continue;
         }
@@ -5915,10 +5942,9 @@ fn block_panes(
             || below_boundary
                 .is_some_and(|b| index > active_index && index <= b);
         if selected {
-            panes.push(selected_pane(text, block, &sel));
+            panes.push(selected_pane(text, block, &sel, guides));
             continue;
         }
-        let content = text.get(block.content()).unwrap_or("");
         let drawn = match markup::model(content) {
             markup::Draw::Css(markup) => Some(markup),
             markup::Draw::Typst if template => Some(markup::plain(content)),
@@ -5930,9 +5956,10 @@ fn block_panes(
                 block: markup.block,
                 spans: markup.spans,
                 text: content.to_string(),
+                guides,
             },
             None => block_pane(
-                text, block, index, file, root, theme, cache, queued,
+                text, block, index, file, root, theme, cache, queued, guides,
             ),
         });
     }
@@ -5952,6 +5979,7 @@ fn selected_pane(
     text: &str,
     block: &blocks::Block,
     selection: &Range<usize>,
+    guides: usize,
 ) -> Pane {
     let content = block.content();
     let start = content.start.max(selection.start).min(content.end);
@@ -5971,6 +5999,7 @@ fn selected_pane(
         start: content.start,
         lines,
         text: source.to_string(),
+        guides,
     }
 }
 
@@ -6029,6 +6058,23 @@ fn css_piece_span(piece: caret::Piece) -> (usize, String) {
     }
 }
 
+/// The block box's own inline custom properties, in the one `style`
+/// attribute a slot can carry: a nested item's `--mk-indent` when it has
+/// one, and `--guides`, how many indent rules the line draws
+/// (`assets/theme.css` reads both). Zero guides writes nothing — the
+/// stylesheet's own `var(--guides, 0)` fallback already paints none — so a
+/// note with no indentation carries exactly the DOM it carried before
+/// (adr/2026-09-indent-guides-are-a-block-background.md).
+fn block_style(indent: Option<String>, guides: usize) -> Option<String> {
+    match (indent, guides) {
+        (indent, 0) => indent,
+        (None, guides) => Some(format!("--guides: {guides}")),
+        (Some(indent), guides) => {
+            Some(format!("{indent}; --guides: {guides}"))
+        }
+    }
+}
+
 /// One block's compiled-fallback pane: the block's own byte offset is what
 /// a click on it activates, so a click on a fallback block always lands on
 /// the block that was actually clicked
@@ -6044,6 +6090,7 @@ fn block_pane(
     theme: RenderTheme,
     cache: &mut FragmentCache,
     queued: bool,
+    guides: usize,
 ) -> Pane {
     let source = blocks::block_source(text, block);
     let start = block.range.start;
@@ -6054,20 +6101,24 @@ fn block_pane(
         // changed block's last image is shelved under
         // (adr/2026-09-fragments-shelve-their-last-svg-per-block.md)
         match cache.probe(root, file, slot, &source, theme) {
-            FragmentView::Ready(rendered) => {
-                Pane::Fragment { start, rendered }
-            }
+            FragmentView::Ready(rendered) => Pane::Fragment {
+                start,
+                rendered,
+                guides,
+            },
             FragmentView::Pending { job, shelved } => Pane::Pending {
                 start,
                 text: text.get(block.content()).unwrap_or("").to_string(),
                 job,
                 shelved,
+                guides,
             },
         }
     } else {
         Pane::Fragment {
             start,
             rendered: cache.render(root, file, &source, theme),
+            guides,
         }
     }
 }
@@ -9771,7 +9822,7 @@ mod tests {
         // blocks[0] is "= heading", covered end to end
         let selection = 0..text.len();
         let Pane::Selected { start, lines, .. } =
-            selected_pane(text, &blocks[0], &selection)
+            selected_pane(text, &blocks[0], &selection, 0)
         else {
             panic!("selected_pane always answers Selected");
         };
@@ -9797,7 +9848,7 @@ mod tests {
         // the end of the note
         let selection = 3..text.len();
         let Pane::Selected { lines, .. } =
-            selected_pane(text, &blocks[0], &selection)
+            selected_pane(text, &blocks[0], &selection, 0)
         else {
             panic!("selected_pane always answers Selected");
         };
@@ -9830,7 +9881,7 @@ mod tests {
         let after_start = blocks[2].range.start;
         let selection = after_start..text.len();
         let Pane::Selected { start, lines, .. } =
-            selected_pane(text, &blocks[1], &selection)
+            selected_pane(text, &blocks[1], &selection, 0)
         else {
             panic!("selected_pane always answers Selected");
         };
@@ -11547,10 +11598,121 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(
-                r#"class="block block-css mk-item " style="--mk-indent: 1">"#
+                r#"class="block block-css mk-item " style="--mk-indent: 1; --guides: 1">"#
             ),
             "the standalone deep item steps its indent out: {html}"
         );
+    }
+
+    // -- indent guides ----------------------------------------------------
+
+    /// The one `style` attribute a slot carries holds both custom
+    /// properties, and a line with no indent writes neither — the
+    /// stylesheet's `var(--guides, 0)` already draws none, so an
+    /// unindented note keeps exactly the DOM it had
+    /// (adr/2026-09-indent-guides-are-a-block-background.md).
+    #[test]
+    fn a_blocks_inline_style_carries_its_indent_and_its_guides() {
+        assert_eq!(block_style(None, 0), None);
+        assert_eq!(
+            block_style(Some("--mk-indent: 2".to_string()), 0),
+            Some("--mk-indent: 2".to_string())
+        );
+        assert_eq!(block_style(None, 3), Some("--guides: 3".to_string()));
+        assert_eq!(
+            block_style(Some("--mk-indent: 2".to_string()), 3),
+            Some("--mk-indent: 2; --guides: 3".to_string())
+        );
+    }
+
+    /// The guides are the same on the line under the caret as on the line
+    /// beside it: the active branch writes `--guides` too, so entering a
+    /// nested line cannot make its rules appear or vanish.
+    #[test]
+    fn the_active_line_draws_the_same_guides_as_an_inactive_one() {
+        let vault = temp_vault();
+        std::fs::write(
+            vault.path().join("time/2026-07-23.typ"),
+            format!(
+                "{}top\n\n    deep",
+                linking(time_note("2026-07-23", "daily"), "2026-07-22")
+            ),
+        )
+        .expect("the day note is overwritten with a deep trailing line");
+        // born editing its last block, which is the indented line itself
+        let (mut dom, clicks, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        let active = dioxus_ssr::render(&dom);
+        assert!(
+            active.contains(
+                r#"class="block-active mk-line" style="--guides: 2">"#
+            ),
+            "the active deep line draws its two guides: {active}"
+        );
+
+        // and the same line, inactive, draws the same two
+        activate_heading(&mut dom, &clicks);
+        let inactive = dioxus_ssr::render(&dom);
+        assert!(
+            inactive.contains(
+                r#"class="block block-css mk-line " style="--guides: 2">"#
+            ),
+            "the inactive deep line draws the same two: {inactive}"
+        );
+    }
+
+    /// The guides live entirely in the stylesheet — one background per
+    /// block box, no DOM element per level — so this reads the rule the
+    /// way the item hang's own test reads its pair
+    /// (adr/2026-08-theme-css-inlined.md): the four branches a slot can
+    /// draw, the gutter offset that keeps `.mk-item`'s padding out of it,
+    /// the two-space step, and both themes' ink.
+    #[test]
+    fn indent_guides_paint_every_branch_of_the_slot() {
+        let sheet = include_str!("../assets/theme.css");
+        let selector =
+            "\n.block-active,\n.block-selected,\n.block-css,\n.block-svg {";
+        let rule = sheet
+            .split(selector)
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet carries the guide rule");
+        assert!(
+            rule.contains("--indent-w: calc(var(--prose-size) * 0.468);"),
+            "one level is two spaces of the prose face: {rule}"
+        );
+        assert!(
+            rule.contains(
+                "background-size: calc(var(--guides, 0) * var(--indent-w)) \
+                 100%;"
+            ),
+            "N guides is N steps of that width, none by default: {rule}"
+        );
+        assert!(
+            rule.contains("background-origin: border-box;")
+                && rule.contains("background-position: 8px 0;"),
+            "the guides ride the shared gutter, not .mk-item's padding: \
+             {rule}"
+        );
+        // the shorthand `background: transparent` on .block-active also
+        // sets background-image, and the two selectors tie on specificity
+        let box_rule = sheet.find("\n.block-active {").unwrap_or(0);
+        let guides = sheet.find(selector).unwrap_or(0);
+        assert!(
+            box_rule < guides,
+            "the guide rule follows the block box it paints"
+        );
+        for theme in ["\n.app {", "\n.app[data-theme=\"light\"] {"] {
+            let tokens = sheet
+                .split(theme)
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_default();
+            assert!(
+                tokens.contains("--guide-ink:"),
+                "{theme} fills the guide's ink in: {tokens}"
+            );
+        }
     }
 
     /// A wrapped list or checklist item hangs its continuation rows under

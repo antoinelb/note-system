@@ -96,6 +96,10 @@
   --markup-checkbox: var(--ink-faint);
   --markup-checkbox-done: #87d37c;
   --markup-quote-rule: var(--ink-muted);
+  /* the indent guide: structure the eye skips, never ink it reads, so it
+     takes the strong hairline — the divider role, a step under the
+     quote's own rule (adr/2026-09-indent-guides-are-a-block-background.md) */
+  --guide-ink: var(--hairline-strong);
   /* multiplies var(--bg), which already swaps per theme */
   --dim-opacity: 0.4;
 }
@@ -160,6 +164,10 @@
   --markup-checkbox: var(--ink-faint);
   --markup-checkbox-done: #4c9452;
   --markup-quote-rule: var(--ink-muted);
+  /* the light sibling takes one step more than the hairline for the same
+     reason --sheet-glow keeps its own alpha: a pale rule vanishes on a
+     white ground, and this theme's hairlines are pale by design */
+  --guide-ink: var(--ink-faintest);
   --dim-opacity: 0.4;
 }
 
@@ -525,6 +533,54 @@ body {
   line-height: var(--prose-leading);
   white-space: pre-wrap;
   overflow-wrap: break-word;
+}
+
+/* The indent guides: one 1px rule per two-space level of the line's own
+   indent, indent-blankline's picture drawn as the block box's background
+   rather than a DOM element per level
+   (adr/2026-09-indent-guides-are-a-block-background.md). src/ui.rs writes
+   `--guides: N` inline per block (`block_style`), and `blocks::guide_depths`
+   is what counts N — including for a blank line, which takes the shallower
+   of its two non-blank neighbours so a run of nesting keeps its rules
+   unbroken across the gap.
+
+   Four selectors, one per branch a slot can draw — active, selected,
+   CSS-drawn, and the compiled widget (.block-svg, which .block-pending
+   always accompanies) — because a caret move only ever swaps one block's
+   branch for another, and a guide that appeared or vanished on that move
+   would be the interface moving on its own. They must stay *after*
+   .block-active, whose `background: transparent` shorthand also sets
+   background-image and ties with these on specificity.
+
+   The positioning area is the *border* box, offset by the 8px gutter the
+   shared block box carries, and deliberately not the content box: .mk-item
+   overrides `padding-left` with its nesting step and its hanging indent
+   (adr/2026-09-wrapped-items-hang-under-their-text.md), and guides that
+   rode that padding would sit at a different column on an item than on the
+   prose line above it. .block-svg carries no gutter of its own, so the
+   same 8px puts its guides in the same column as its neighbours'.
+
+   --indent-w is the advance of two spaces — `caret::INDENT`, one level
+   (adr/2026-08-tab-indents-in-every-mode.md) — in the prose face, twice
+   the --mk-space read off CormorantGaramond-Regular.ttf for the item hang
+   below. It multiplies --prose-size rather than being written in `em`, so
+   it holds on .block-pending's outer div (which carries no font of its
+   own) and still follows the settings overlay's size knob. A face change
+   is the one thing that invalidates it, exactly as for the hang. */
+.block-active,
+.block-selected,
+.block-css,
+.block-svg {
+  --indent-w: calc(var(--prose-size) * 0.468);
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--guide-ink) 0 1px,
+    transparent 1px var(--indent-w)
+  );
+  background-origin: border-box;
+  background-position: 8px 0;
+  background-size: calc(var(--guides, 0) * var(--indent-w)) 100%;
+  background-repeat: no-repeat;
 }
 
 /* The box above belongs on the *same* element that carries the block-role
