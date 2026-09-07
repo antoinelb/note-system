@@ -5665,6 +5665,10 @@ fn wheel_notch(event: &Event<WheelData>) -> Option<bool> {
     if !event.modifiers().ctrl() {
         return None;
     }
+    // the webview owns Ctrl+wheel as page zoom, the way it owns Ctrl+=:
+    // left uncancelled it scales the whole window under a composited
+    // session, chrome and all, and the table's own zoom vanishes inside it
+    event.prevent_default();
     let delta = event.delta().strip_units().y;
     match delta == 0.0 {
         true => None,
