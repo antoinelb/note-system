@@ -23,11 +23,13 @@ e2e_start
 # names it by its source (loops.rs: the id on the line is the note that
 # owes the link, not the missing target), so Enter on that row (rank 2,
 # after missing-meta and missing-type) lands on atomic-notes' own sheet.
-# The sheet opens with the caret on its empty last line
-# (adr/2026-08-cursor-always-in-the-note.md); k climbs to "Compare with
-# [[evergreen-notes]]." and f-bracketleft lands on the link's opening
+# The sheet opens on its title heading the first time and wherever the
+# caret was left the next (adr/2026-09-a-note-reopens-where-it-was-left.md),
+# so G first: the note's empty last line, from which k climbs to "Compare
+# with [[evergreen-notes]]." and f-bracketleft lands on the link's opening
 # bracket. Each motion crosses the sheet's own focus grab, so each is paced.
 e2e_caret_onto_the_link() {
+    e2e_key_paced G
     e2e_key_paced k
     e2e_key_paced f
     e2e_key_paced bracketleft

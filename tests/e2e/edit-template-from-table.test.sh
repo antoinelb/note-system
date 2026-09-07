@@ -26,9 +26,10 @@ e2e_key_paced Return
 e2e_type_paced "concept"
 e2e_key_paced Return
 
-# the pick landed on the logs with the template in the centre pane, its
-# own trailing empty line awake (adr/2026-08-cursor-always-in-the-note.md),
-# so i writes there and disturbs nothing already in the file
+# the pick landed on the logs with the template in the centre pane, the
+# caret past its "= {{title}}" line as on any first open
+# (adr/2026-09-a-note-reopens-where-it-was-left.md), so i appends there
+# and disturbs nothing already in the file
 e2e_key_paced i
 e2e_type "edited from the table"
 e2e_key Escape
