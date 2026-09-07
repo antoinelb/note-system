@@ -710,6 +710,22 @@ impl Editor {
         self.place_at(self.caret.head);
     }
 
+    /// The caret memory's landing, run on a note the instant it opened:
+    /// the block owning `offset` wakes and the caret collapses onto it,
+    /// replacing `open`'s "last block, caret at the end" default
+    /// (adr/2026-09-a-note-reopens-where-it-was-left.md). Deliberately not
+    /// `place_at`: that one flushes on its way through `activate`, and a
+    /// buffer read from disk this instant has nothing to save — a write
+    /// here would bump the mtime of every note the user merely opens and
+    /// wake the watcher for it.
+    pub fn land_at_open(&mut self, offset: usize) {
+        let Some((_, text)) = self.note() else { return };
+        let offset = floor_boundary(text, offset);
+        self.active = (!self.blocks.is_empty())
+            .then(|| blocks::block_at(&self.blocks, offset));
+        self.place(offset);
+    }
+
     /// Ctrl+Q and deactivation: save and surface the outcome. Returns
     /// whether the note reached disk, so a failed flush can cancel a quit
     /// instead of losing the buffer
@@ -772,6 +788,14 @@ impl Editor {
     /// caret to draw or move.
     pub fn caret(&self) -> Option<Caret> {
         self.active.map(|_| self.caret)
+    }
+
+    /// Where the caret stands whether or not a block is awake — what the
+    /// caret memory records when the note is left, since a deactivated
+    /// note still has a caret `reactivate` would return to
+    /// (adr/2026-09-a-note-reopens-where-it-was-left.md).
+    pub fn head(&self) -> usize {
+        self.caret.head
     }
 
     /// The caret as the widget draws it: block-relative bytes, clamped into
@@ -1135,6 +1159,49 @@ mod tests {
             .expect("the note reopens for backdating")
             .set_modified(std::time::SystemTime::UNIX_EPOCH)
             .expect("the mtime is set");
+    }
+
+    /// The caret memory's landing wakes the block owning the offset it is
+    /// handed, and saves nothing on its way there
+    /// (adr/2026-09-a-note-reopens-where-it-was-left.md). A note that
+    /// would not open, and an empty one, have no block to wake.
+    #[test]
+    fn land_at_open_wakes_the_block_owning_the_place() {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let file = dir.path().join("note.typ");
+        std::fs::write(&file, "= a title\n\nune ligne\n")
+            .expect("the note is written");
+        let stamped = std::fs::metadata(&file)
+            .and_then(|meta| meta.modified())
+            .expect("the note has an mtime");
+
+        let mut editor = Editor::open(file.clone());
+        editor.land_at_open(12);
+        assert_eq!(editor.head(), 12);
+        assert_eq!(editor.active_source(), Some("une ligne"));
+        assert_eq!(editor.caret_in_block(), (1, 1));
+        assert_eq!(
+            std::fs::metadata(&file)
+                .and_then(|meta| meta.modified())
+                .ok(),
+            Some(stamped),
+            "landing writes nothing: place_at's flush is what this avoids"
+        );
+
+        // past the end of a note edited smaller behind the memory
+        editor.land_at_open(9_000);
+        assert_eq!(editor.head(), 21);
+
+        // an empty note is one empty block, and every place in it is 0
+        let blank = dir.path().join("empty.typ");
+        std::fs::write(&blank, "").expect("the empty note is written");
+        let mut empty = Editor::open(blank);
+        empty.land_at_open(4);
+        assert_eq!((empty.active(), empty.head()), (Some(0), 0));
+
+        let mut closed = Editor::closed();
+        closed.land_at_open(4);
+        assert_eq!(closed.head(), 0);
     }
 
     #[test]

@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::blocks;
 use crate::caret;
+use crate::carets::{self, Carets};
 use crate::compute::{self, ComputeFeed, Job, Outcome};
 use crate::domain::{NoteCategory, NoteType};
 use crate::editor::{Deletion, Editor};
@@ -376,13 +377,26 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     let feed = use_hook(|| {
         try_consume_context::<ComputeFeed>().unwrap_or_else(compute::inline)
     });
+    // where each note was last left, the positions file's other sibling:
+    // user data with no upstream, read once here and written whenever a
+    // note is left (adr/2026-09-a-note-reopens-where-it-was-left.md).
+    // Declared before the editor, which lands its first note through it.
+    let mut carets = use_signal({
+        let root = root.clone();
+        move || Carets::load(&root.join(".index/carets"))
+    });
     // the editor opens today's note by a stat, not the survey — the file
     // is the truth and the threaded launch has no survey yet
     // (adr/2026-08-startup-survey-async.md)
     let mut editor = use_signal({
         let root = root.clone();
         let id = time::day_id(today);
-        move || open_selected(&root, time_note_path(&root, &id).exists(), &id)
+        move || {
+            let exists = time_note_path(&root, &id).exists();
+            let mut opened = open_selected(&root, exists, &id);
+            land_caret(&root, &mut opened, &carets.peek());
+            opened
+        }
     });
     let mut notes = use_signal(Vec::new);
     // the open loops themselves; the ember shows how many there are and the
@@ -661,18 +675,25 @@ fn Shell(root: PathBuf, today: Date) -> Element {
     // the Ctrl+Q flush: reports whether the open note and the canvas
     // positions reached disk, so a failed save can hold the app open
     // instead of losing either
-    let quit_flush = use_callback(move |()| {
-        let note_saved = editor.write().flush();
-        let placed_saved = match positions.peek().save() {
-            Ok(()) => true,
-            Err(error) => {
-                status
-                    .write()
-                    .report(Notice::positions_failed(&error.to_string()));
-                false
-            }
-        };
-        note_saved && placed_saved
+    let quit_flush = use_callback({
+        let root = root.clone();
+        move |()| {
+            let note_saved = editor.write().flush();
+            // the last thing the window does: the note reaching disk without
+            // its place would reopen at its title tomorrow
+            // (adr/2026-09-a-note-reopens-where-it-was-left.md)
+            remember_caret(&root, &editor.peek(), carets, status);
+            let placed_saved = match positions.peek().save() {
+                Ok(()) => true,
+                Err(error) => {
+                    status
+                        .write()
+                        .report(Notice::positions_failed(&error.to_string()));
+                    false
+                }
+            };
+            note_saved && placed_saved
+        }
     });
     let register = use_context::<QuitFlush>();
     // once is enough: the Callback's identity is stable across re-renders,
@@ -862,31 +883,42 @@ fn Shell(root: PathBuf, today: Date) -> Element {
 
     // one idle timer drives the save (adr/2026-07-debounced-autosave.md);
     // block boundaries still recompute only at the deactivation points
-    let _autosave = use_resource(move || {
-        // reading the editor is what subscribes this resource to every edit
-        let _ = editor.read();
-        async move {
-            tokio::time::sleep(QUIET).await;
-            match editor.peek().save() {
-                // gated like every status write from a ticking resource:
-                // the same failure re-reported would repaint for nothing.
-                // A refused disk and a refused clobber both surface here —
-                // the conflict's notice summons the palette pair
-                // (adr/2026-08-external-edit-conflict-commands.md)
-                Some(trouble) => {
-                    let notice = Notice::from_trouble(trouble);
-                    if !status.peek().showing(&notice) {
-                        status.write().report(notice);
+    let _autosave = use_resource({
+        let root = root.clone();
+        move || {
+            // reading the editor is what subscribes this resource to
+            // every edit
+            let _ = editor.read();
+            let root = root.clone();
+            async move {
+                tokio::time::sleep(QUIET).await;
+                match editor.peek().save() {
+                    // gated like every status write from a ticking
+                    // resource: the same failure re-reported would repaint
+                    // for nothing. A refused disk and a refused clobber
+                    // both surface here — the conflict's notice summons
+                    // the palette pair
+                    // (adr/2026-08-external-edit-conflict-commands.md)
+                    Some(trouble) => {
+                        let notice = Notice::from_trouble(trouble);
+                        if !status.peek().showing(&notice) {
+                            status.write().report(notice);
+                        }
+                    }
+                    // the save that lands resolves its own failure — no
+                    // gesture, the condition simply ceased
+                    // (adr/2026-08-status-surface-owns-notices.md)
+                    None => {
+                        if status.peek().has(Source::Save) {
+                            status.write().resolve(Source::Save);
+                        }
                     }
                 }
-                // the save that lands resolves its own failure — no
-                // gesture, the condition simply ceased
-                // (adr/2026-08-status-surface-owns-notices.md)
-                None => {
-                    if status.peek().has(Source::Save) {
-                        status.write().resolve(Source::Save);
-                    }
-                }
+                // the caret memory rides the note's own debounce: a
+                // session that ends without ever leaving the note still
+                // reopens where it stopped, and no keystroke pays for a
+                // write (adr/2026-09-a-note-reopens-where-it-was-left.md)
+                remember_caret(&root, &editor.peek(), carets, status);
             }
         }
     });
@@ -916,6 +948,21 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                     }
                 }
             }
+        }
+    });
+
+    // The one seam that replaces the open note: the note being left says
+    // where its caret stood before the next one takes the editor, and the
+    // arriving one lands on its own remembered place — so every switch,
+    // the rail and Ctrl+D, a sheet opening or closing, a template, a
+    // conflict reopened, remembers through one line rather than six
+    // (adr/2026-09-a-note-reopens-where-it-was-left.md).
+    let swap_editor = use_callback({
+        let root = root.clone();
+        move |mut next: Editor| {
+            remember_caret(&root, &editor.peek(), carets, status);
+            land_caret(&root, &mut next, &carets.peek());
+            editor.set(next);
         }
     });
 
@@ -954,7 +1001,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 .peek()
                 .iter()
                 .any(|(existing, _)| existing == &target.1);
-            editor.set(open_selected(&root, exists, &target.1));
+            swap_editor.call(open_selected(&root, exists, &target.1));
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
             selected.set(target);
@@ -1003,7 +1050,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             // (adr/2026-08-body-zoom-scale-and-metrics.md)
             zoom_to.call(table::Zoom::Titles);
             picker.set(None);
-            editor.set(opened);
+            swap_editor.call(opened);
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
             screen.set(Screen::Table);
@@ -1104,7 +1151,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             let id = selected.peek().1.clone();
             let exists =
                 notes.peek().iter().any(|(existing, _)| existing == &id);
-            editor.set(open_selected(&root, exists, &id));
+            swap_editor.call(open_selected(&root, exists, &id));
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
         }
@@ -1146,6 +1193,9 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             });
             let relative =
                 file.as_ref().map(|file| vault_relative(&root, file));
+            // taken while the buffer still holds the note: the key its
+            // caret memory is filed under, dropped below
+            let remembered = file.as_ref().map(|file| caret_key(&root, file));
             if let Some(file) = file
                 && let Err(error) = std::fs::remove_file(&file)
             {
@@ -1169,7 +1219,15 @@ fn Shell(root: PathBuf, today: Date) -> Element {
             let id = selected.peek().1.clone();
             let exists =
                 notes.peek().iter().any(|(existing, _)| existing == &id);
-            editor.set(open_selected(&root, exists, &id));
+            swap_editor.call(open_selected(&root, exists, &id));
+            // after the swap, which remembers the outgoing note's caret
+            // like any other: positions' drop-on-delete, mirrored — a
+            // deleted note keeps no place
+            // (adr/2026-09-a-note-reopens-where-it-was-left.md)
+            if let Some(key) = remembered {
+                carets.write().remove(&key);
+                save_carets(carets, status);
+            }
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
         }
@@ -1417,7 +1475,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
                 sheet.set(None);
             }
             close_templates.call(());
-            editor.set(Editor::open(
+            swap_editor.call(Editor::open(
                 root.join("templates").join(format!("{name}.typ")),
             ));
             vim.write().note_opened();
@@ -2001,7 +2059,7 @@ fn Shell(root: PathBuf, today: Date) -> Element {
         move |()| {
             let file =
                 editor.peek().note().map(|(path, _)| path.to_path_buf());
-            editor.set(file.map_or_else(Editor::closed, Editor::open));
+            swap_editor.call(file.map_or_else(Editor::closed, Editor::open));
             vim.write().note_opened();
             fragments.borrow_mut().sweep();
             status.write().resolve(Source::Conflict);
@@ -5614,6 +5672,67 @@ fn open_selected(root: &Path, exists: bool, id: &str) -> Editor {
     }
 }
 
+/// The landing every note open shares: the caret goes where this note was
+/// left, clamped into the text it has now, or to the end of its title
+/// heading the first time anyone opens it
+/// (adr/2026-09-a-note-reopens-where-it-was-left.md). A note that would
+/// not open has no caret to place.
+fn land_caret(root: &Path, opened: &mut Editor, carets: &Carets) {
+    let at = {
+        let Some((path, text)) = opened.note() else {
+            return;
+        };
+        carets::landing(text, carets.get(&caret_key(root, path)))
+    };
+    opened.land_at_open(at);
+}
+
+/// The key a note is remembered under: its vault-relative path, and not
+/// its id — a note whose `#meta` is missing or broken has no id, and it
+/// deserves to reopen where it was left like any other
+/// (adr/2026-09-a-note-reopens-where-it-was-left.md).
+fn caret_key(root: &Path, path: &Path) -> String {
+    vault_relative(root, path).to_string_lossy().into_owned()
+}
+
+/// The note is being left: where its caret stands goes to the store and
+/// the store to disk. Called at every seam that replaces the one editor,
+/// and on each autosave tick, so a session that ends without leaving the
+/// note loses at most the last debounce
+/// (adr/2026-09-a-note-reopens-where-it-was-left.md).
+fn remember_caret(
+    root: &Path,
+    editor: &Editor,
+    mut carets: Signal<Carets>,
+    status: Signal<Status>,
+) {
+    let Some((path, text)) = editor.note() else {
+        return;
+    };
+    let (line, column) = carets::locate(text, editor.head());
+    carets.write().set(&caret_key(root, path), line, column);
+    save_carets(carets, status);
+}
+
+/// The store's write, gated like every other status write from a path
+/// that can repeat: the same refusal re-reported would repaint for
+/// nothing, and a save that lands resolves its own failure.
+fn save_carets(carets: Signal<Carets>, mut status: Signal<Status>) {
+    match carets.peek().save() {
+        Err(error) => {
+            let notice = Notice::carets_failed(&error.to_string());
+            if !status.peek().showing(&notice) {
+                status.write().report(notice);
+            }
+        }
+        Ok(()) => {
+            if status.peek().has(Source::Carets) {
+                status.write().resolve(Source::Carets);
+            }
+        }
+    }
+}
+
 /// Turns the native boundary's explicit result into the editor's optional
 /// text and keeps the status source aligned with the latest read outcome.
 fn clipboard_answer(
@@ -6429,13 +6548,16 @@ mod tests {
     const FOOTER_BACKLINK: usize = 44;
     const FOOTER_OUTGOING: usize = 45;
     /// The fixture day note's own preamble block — a click always wakes
-    /// exactly the block that was clicked now, so each block above the
-    /// active trailing line gets its own listener instead of one merged
-    /// region's (adr/2026-08-css-draws-the-markup.md).
+    /// exactly the block that was clicked now, so each inactive block
+    /// gets its own listener instead of one merged region's
+    /// (adr/2026-08-css-draws-the-markup.md). The note opens on its title
+    /// heading (adr/2026-09-a-note-reopens-where-it-was-left.md), and an
+    /// active block carries no click listener, so the heading is the one
+    /// block with no constant here: `woken_targets` reaches it directly,
+    /// and the trailing empty line takes the slot it leaves.
     const BLOCK_PREAMBLE: usize = 46;
     const BLOCK_BLANK: usize = 47;
-    const BLOCK_HEADING: usize = 48;
-    const BLOCK_LINK: usize = 49;
+    const BLOCK_LINK: usize = 48;
     const CRUMB_WEEK: usize = 50;
     const RAIL_SUMMER: usize = 52;
     const RAIL_W30: usize = 53;
@@ -6553,6 +6675,15 @@ mod tests {
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
 
+        // the note opens on its title heading now
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md), and this is
+        // about the caret's own line: G takes it to the trailing one
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
         press(
             &mut dom,
             keys[LOGS_KEYS],
@@ -6569,6 +6700,15 @@ mod tests {
         let (mut dom, _, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
 
+        // the note opens on its title heading now
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md), and this is
+        // about the caret's own line: G takes it to the trailing one
+        press(
+            &mut dom,
+            keys[LOGS_KEYS],
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
         press(
             &mut dom,
             keys[LOGS_KEYS],
@@ -6594,6 +6734,15 @@ mod tests {
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
         let (_, sink) = sheet_block_targets(&opened);
 
+        // the sheet opens on its title heading too
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md): G takes the
+        // caret to the line this toggles
+        press(
+            &mut dom,
+            sink,
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
         press(
             &mut dom,
             sink,
@@ -6678,9 +6827,9 @@ mod tests {
     #[test]
     fn ctrl_q_flushes_the_unsaved_buffer_then_closes() {
         let vault = temp_vault();
-        let (mut dom, clicks, keydown, closed) =
+        let (mut dom, _clicks, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         // typed but inside the quiet window: only the flush can save it
         retype(&mut dom, sink, "= presque perdu\n");
         press(
@@ -6700,9 +6849,9 @@ mod tests {
     #[test]
     fn a_failed_flush_cancels_the_quit_and_shows_the_error() {
         let vault = temp_vault();
-        let (mut dom, clicks, keydown, closed) =
+        let (mut dom, _clicks, keydown, closed) =
             quit_app(Some(vault.path().to_path_buf()));
-        let (input, _) = activate_heading(&mut dom, &clicks);
+        let (input, _) = woken_targets();
         type_into(&mut dom, input, "= pas encore sauvé\n");
 
         lock_dir(&vault.path().join("time"), true);
@@ -6729,9 +6878,9 @@ mod tests {
     #[test]
     fn typing_then_idling_saves_without_leaving_the_block() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         retype(&mut dom, sink, "= autosauvé\n");
         block_on(settle(&mut dom));
 
@@ -6749,9 +6898,9 @@ mod tests {
     #[test]
     fn a_failing_autosave_surfaces_its_error_once() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         lock_dir(&vault.path().join("time"), true);
         // the settle loop spans several autosave restarts, so the
@@ -6777,9 +6926,9 @@ mod tests {
     #[test]
     fn an_external_edit_refuses_the_autosave_and_summons_the_fork() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         let file = vault.path().join("time/2026-07-23.typ");
         edit_behind(&file, "= repris dehors\n");
@@ -6805,9 +6954,9 @@ mod tests {
     #[test]
     fn keep_mine_overwrites_the_disk_and_resolves_the_conflict() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         let file = vault.path().join("time/2026-07-23.typ");
         edit_behind(&file, "= repris dehors\n");
@@ -6830,9 +6979,9 @@ mod tests {
     #[test]
     fn a_keep_mine_the_disk_refuses_leaves_the_conflict_standing() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         let file = vault.path().join("time/2026-07-23.typ");
         edit_behind(&file, "= repris dehors\n");
@@ -6863,9 +7012,9 @@ mod tests {
     #[test]
     fn take_disk_reloads_the_buffer_and_resolves_the_conflict() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         let file = vault.path().join("time/2026-07-23.typ");
         edit_behind(&file, "= repris dehors\n");
@@ -8543,14 +8692,14 @@ mod tests {
         let (mut dom, clicks, sender) =
             watched_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
-        let opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let _opened = open_sheet_on(&mut dom, pane, cards[0]);
         assert!(
             dioxus_ssr::render(&dom).contains(r#"sheet-footer">← 1"#),
             "{}",
             dioxus_ssr::render(&dom)
         );
 
-        let (_, sink) = sheet_heading_targets(&mut dom, &opened);
+        let (_, sink) = woken_targets();
         retype(&mut dom, sink, "= alpha renommé");
         block_on(settle(&mut dom));
         let saved =
@@ -8601,8 +8750,8 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
         let (pane, cards) = table_targets(&mut dom, &clicks);
-        let opened = open_sheet_on(&mut dom, pane, cards[0]);
-        let (block, keys) = sheet_heading_targets(&mut dom, &opened);
+        let _opened = open_sheet_on(&mut dom, pane, cards[0]);
+        let (block, keys) = woken_targets();
 
         // put the caret at the end of "= alpha"
         place_caret(&mut dom, block, &hit, "= alpha".len());
@@ -9273,7 +9422,7 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
 
         // an unsaved edit the locked directory will refuse to flush
-        let (input, _) = activate_heading(&mut dom, &clicks);
+        let (input, _) = woken_targets();
         type_into(&mut dom, input, "= pas encore sauvé\n");
         lock_dir(&vault.path().join("time"), true);
 
@@ -9407,8 +9556,11 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        std::fs::remove_dir_all(vault.path().join(".index"))
-            .expect("the index directory exists");
+        // the database is replaced rather than the directory removed: a
+        // note being left writes the caret memory beside it, and that
+        // write creates `.index/` again
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md)
+        replace_database_with_a_directory(vault.path());
         // re-selecting today re-runs the captured query against the void
         click(&mut dom, clicks[RAIL_DAY_23]);
         let html = dioxus_ssr::render(&dom);
@@ -9553,20 +9705,26 @@ mod tests {
     // -- the hybrid editor: click to source, type, escape to rendered --------
 
     #[test]
-    fn a_note_opens_with_the_caret_on_its_last_line() {
+    fn a_note_opens_with_the_caret_at_the_end_of_its_title() {
         let vault = temp_vault();
         let (mut dom, mutations) =
             mounted_app(Some(vault.path().to_path_buf()), None);
-        // the heading block "= 2026-07-23\n[[2026-07-22]]\n" ends in a
-        // newline, so the caret's line is the empty last one: a source
-        // line holding nothing but the drawn caret
-        // (adr/2026-08-cursor-always-in-the-note.md)
+        // the caret is always in the note
+        // (adr/2026-08-cursor-always-in-the-note.md), and a note the
+        // store has never seen puts it past the last glyph of the title
+        // heading, ready to write the note's first sentence rather than
+        // inside its preamble
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md)
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains(
-                r#"<div class="source-line"><span class="caret-box""#
-            ),
-            "a box caret: a new file starts thinking: {html}"
+            html.contains(concat!(
+                r#"<div class="block-active mk-h1">"#,
+                r#"<div class="source-line">"#,
+                r#"<span class="mk-marker" data-start="0">= </span>"#,
+                r#"<span class="mk-text" data-start="2">2026-07-23</span>"#,
+                r#"<span class="caret-box" data-start="12">"#,
+            )),
+            "a box caret past the title: {html}"
         );
         // the renderer announces the caret's mount; the scroll-into-view
         // asks and the headless refusal is absorbed
@@ -9625,9 +9783,8 @@ mod tests {
     #[test]
     fn blocks_render_on_both_sides_of_the_caret_mid_note() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        activate_heading(&mut dom, &clicks);
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
             html.matches(r#"class="block-active"#).count(),
@@ -9667,7 +9824,18 @@ mod tests {
     #[test]
     fn no_block_renders_below_the_caret_on_the_last_line() {
         let vault = temp_vault();
-        let (dom, _, _, _) = rendered_app(Some(vault.path().to_path_buf()));
+        let (mut dom, _, _, _) =
+            rendered_app(Some(vault.path().to_path_buf()));
+        // the note opens on its title heading
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md), so G is what
+        // puts the caret on the last line this is about
+        let (_, sink) = woken_targets();
+        press(
+            &mut dom,
+            sink,
+            Key::Character("G".into()),
+            Modifiers::empty(),
+        );
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
             html.matches(r#"class="block-active"#).count(),
@@ -10133,9 +10301,9 @@ mod tests {
     #[test]
     fn typing_updates_the_buffer_and_escape_writes_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
 
         retype(&mut dom, keys, "= renamed\n\nencore\n");
         let file = vault.path().join("time/2026-07-23.typ");
@@ -10176,9 +10344,9 @@ mod tests {
     #[test]
     fn caret_keys_stay_in_the_source_while_ctrl_chords_escape_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
 
         // arrows move the caret, not the month grid below; a horizontal
         // move stays inside the one-line heading block
@@ -10246,7 +10414,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         retype(&mut dom, sink, "= renamed\n");
 
         // switching to a different block flushes the edit before the new
@@ -10264,8 +10432,9 @@ mod tests {
     #[test]
     fn boundary_arrows_slide_the_source_between_blocks() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = woken_targets();
 
         // caret on the heading's line: up slides onto the blank line-block
         // above it — a fresh widget, its own keydown sink — one more up
@@ -10310,9 +10479,9 @@ mod tests {
     #[test]
     fn escape_thinks_and_i_writes() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         // a new file starts thinking: a box caret, and unbound keys inert
@@ -10362,9 +10531,9 @@ mod tests {
         // the `>` quote form is read by the template's `show par:` rule,
         // not expanded by the editor: Enter is an ordinary newline here.
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         retype(&mut dom, sink, "> Une idée _importante_. _Simone Weil_\n");
 
@@ -10388,9 +10557,9 @@ mod tests {
     #[test]
     fn o_opens_a_line_below_through_the_widget() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // o from the heading's last line opens below and writes
         press(
@@ -10410,9 +10579,9 @@ mod tests {
     #[test]
     fn a_wake_leaves_the_sink_mounted_and_the_next_key_lands_on_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // o wakes a fresh block below the heading. The sink is a sibling
         // of the blocks, not the active one's child, so the wake mounts
@@ -10453,9 +10622,8 @@ mod tests {
     fn a_bare_key_at_the_logs_pane_over_an_awake_block_is_read_as_the_sink_would()
      {
         let vault = temp_vault();
-        let (mut dom, clicks, keys, _) =
+        let (mut dom, _clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        activate_heading(&mut dom, &clicks);
 
         // i then s reach the pane, not the sink: typed before the sink's
         // focus grab landed. The grammar hears both — insert mode, then
@@ -10488,9 +10656,9 @@ mod tests {
     #[test]
     fn gg_and_g_carry_the_caret_across_blocks() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // normal mode, then gg: the preamble block wakes with the caret
         // on its first line, still boxed
@@ -10582,11 +10750,12 @@ mod tests {
     #[test]
     fn dd_on_the_table_sheets_last_line_lands_on_the_heading_above() {
         // one vim grammar, one Editor shared by both mounts (src/ui.rs
-        // sheet/pane split): the sheet opens with the note's own trailing
-        // empty line active, and dd there must take the preceding newline
-        // and wake the heading above rather than leave a blank line
-        // behind, exactly as the main editor does
-        // (adr/2026-08-cursor-always-in-the-note.md)
+        // sheet/pane split): dd on the note's own trailing empty line must
+        // take the preceding newline and wake the heading above rather
+        // than leave a blank line behind, exactly as the main editor does
+        // (adr/2026-08-cursor-always-in-the-note.md). The sheet opens on
+        // the title heading (adr/2026-09-a-note-reopens-where-it-was-left.md),
+        // so G is what puts the caret on the line under test.
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -10594,18 +10763,14 @@ mod tests {
         let opened = open_sheet_on(&mut dom, pane, cards[0]);
         let (_, sink) = sheet_block_targets(&opened);
 
-        press(
-            &mut dom,
-            sink,
-            Key::Character("d".into()),
-            Modifiers::empty(),
-        );
-        press(
-            &mut dom,
-            sink,
-            Key::Character("d".into()),
-            Modifiers::empty(),
-        );
+        for key in ["G", "d", "d"] {
+            press(
+                &mut dom,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
 
         assert_eq!(
             source_of(&dom),
@@ -10617,9 +10782,9 @@ mod tests {
     #[test]
     fn r_overwrites_through_the_widget_and_the_caret_stays_a_box() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // the heading's own line opens with the caret at its end (its
         // block's own line-block now — adr/2026-08-per-line-block-segmentation.md);
@@ -10667,9 +10832,9 @@ mod tests {
     #[test]
     fn dg_crosses_blocks_and_paste_declines_without_a_readable_clip() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // gg to the preamble, then dG: the whole note goes in one splice
         // across every block (adr/2026-08-editor-splice-cross-block.md)
@@ -10711,9 +10876,9 @@ mod tests {
         assert_eq!(source_of(&dom), "", "nothing to paste, nothing pasted");
 
         // and with a seam whose read answers emptiness, the same
-        let (mut dom, clicks, _) =
+        let (mut dom, _clicks, _) =
             clipboard_app(Some(vault.path().to_path_buf()), Ok(String::new()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         press(
             &mut dom,
@@ -10728,14 +10893,14 @@ mod tests {
     #[test]
     fn a_successful_read_resolves_the_clipboard_warning() {
         let vault = temp_vault();
-        let (mut dom, clicks) = clipboard_script_app(
+        let (mut dom, _clicks) = clipboard_script_app(
             Some(vault.path().to_path_buf()),
             VecDeque::from([
                 Err("read denied".to_string()),
                 Ok("recovered".to_string()),
             ]),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         press(
             &mut dom,
@@ -10760,11 +10925,11 @@ mod tests {
     #[test]
     fn a_clipboard_read_failure_leaves_the_note_and_says_why() {
         let vault = temp_vault();
-        let (mut dom, clicks, _) = clipboard_app(
+        let (mut dom, _clicks, _) = clipboard_app(
             Some(vault.path().to_path_buf()),
             Err("read denied".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         press(
             &mut dom,
@@ -10784,9 +10949,9 @@ mod tests {
     #[test]
     fn v_e_d_reads_like_the_sentence_it_is() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // normal, to the line's start, then v e: the first word lights up
         press(
@@ -10857,9 +11022,9 @@ mod tests {
     #[test]
     fn u_undoes_one_intent_and_ctrl_r_returns_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // one insert session is one intent
         press(
@@ -10906,9 +11071,9 @@ mod tests {
     #[test]
     fn the_dot_repeats_through_the_widget() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // normal on the heading's first line, x then . . — three cuts
         press(
@@ -10951,9 +11116,9 @@ mod tests {
     #[test]
     fn slash_searches_and_lands_in_a_rendered_block() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // / opens the one-line prompt over the active heading
         press(
@@ -10986,9 +11151,9 @@ mod tests {
     #[test]
     fn escape_closes_the_search_prompt_untouched() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         press(
@@ -11055,9 +11220,9 @@ mod tests {
     #[test]
     fn a_composition_in_normal_mode_is_discarded() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         compose(&mut dom, sink, "compositionstart", "");
@@ -11073,8 +11238,9 @@ mod tests {
     #[test]
     fn the_mode_survives_a_boundary_slide() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, sink) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, sink) = woken_targets();
 
         place_caret(&mut dom, block, &hit, 0);
         press(&mut dom, sink, Key::ArrowUp, Modifiers::empty());
@@ -11097,9 +11263,9 @@ mod tests {
         // start/update, the commit keystroke flagged composing, an empty
         // compositionend, then the real one (adr/2026-08-hidden-ime-sink.md)
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         press(
@@ -11152,9 +11318,9 @@ mod tests {
         // (adr/2026-08-hidden-ime-sink.md).
         fn cut_with(flagged: bool, stray_between_ends: bool) -> String {
             let vault = temp_vault();
-            let (mut dom, clicks, hit) =
+            let (mut dom, _clicks, hit) =
                 hit_app(Some(vault.path().to_path_buf()));
-            let (block, sink) = activate_heading(&mut dom, &clicks);
+            let (block, sink) = woken_targets();
             place_caret(&mut dom, block, &hit, 4);
             press(
                 &mut dom,
@@ -11202,8 +11368,9 @@ mod tests {
         // mode used to discard whole
         // (adr/2026-08-normal-mode-compositions-reach-the-grammar.md)
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, sink) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, sink) = woken_targets();
         place_caret(&mut dom, block, &hit, 4);
         let before = source_of(&dom);
 
@@ -11258,9 +11425,9 @@ mod tests {
         // GTK's ordering is not trusted: whatever isComposing says, an
         // open preview means the IME owns the keys (the spike saw both)
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         press(
@@ -11285,9 +11452,9 @@ mod tests {
     #[test]
     fn shift_arrows_draw_a_selection_and_typing_replaces_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         press(
             &mut dom,
@@ -11359,9 +11526,8 @@ mod tests {
                 .replace("= 2026-07-23", "= Titre"),
         )
         .expect("the day note is overwritten with a plain heading");
-        let (mut dom, clicks, _, _) =
+        let (dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        activate_heading(&mut dom, &clicks);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(r#"class="block-active mk-h1""#),
@@ -11382,9 +11548,9 @@ mod tests {
     #[test]
     fn a_line_opened_under_a_heading_draws_as_prose() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // insert mode's Enter at the heading's end
         press(
@@ -11405,9 +11571,9 @@ mod tests {
         );
 
         // and normal mode's `o`, the other opener the user named
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -11439,12 +11605,11 @@ mod tests {
                 .replace("= 2026-07-23", "*gras*"),
         )
         .expect("the day note is overwritten with a strong run");
-        let (mut dom, clicks, _, _) =
+        let (dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         // clicking activates the block at its own end, past the closing
         // delimiter, so the caret never lands on a byte a markup boundary
         // also claims
-        activate_heading(&mut dom, &clicks);
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
             html.matches(r#"class="mk-strong mk-delim""#).count(),
@@ -11477,9 +11642,9 @@ mod tests {
             ),
         )
         .expect("the day note is overwritten with a checklist line");
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -11539,11 +11704,10 @@ mod tests {
             ),
         )
         .expect("the day note is overwritten with a standalone deep item");
-        let (mut dom, clicks, _, _) =
+        let (dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         // moves the active widget onto the heading, so the list line
         // renders inactive (Pane::Css), not the active or selected path
-        activate_heading(&mut dom, &clicks);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(
@@ -11625,7 +11789,11 @@ mod tests {
         .expect("the day note is overwritten with an equation heading");
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        activate_heading(&mut dom, &clicks);
+        // this note has no `= ` line, so it opens on the end of the first
+        // written one instead — its own `#import` preamble
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md) — which puts
+        // every other block's click one slot earlier: blank, equation.
+        activate_block(&mut dom, clicks[BLOCK_BLANK]);
         let html = dioxus_ssr::render(&dom);
         assert!(
             html.contains(r#"class="block-active ""#),
@@ -11734,9 +11902,9 @@ mod tests {
     fn capital_v_then_j_highlights_the_line_it_leaves_and_the_line_it_enters()
     {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         // 0: the anchor at the heading's own start, so V widens the whole
         // line rather than the degenerate empty span an end-of-line anchor
         // would leave in it
@@ -11806,9 +11974,9 @@ mod tests {
             ),
         )
         .expect("the day note is overwritten with an equation line");
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -11846,9 +12014,9 @@ mod tests {
     #[test]
     fn clicking_a_selected_pane_activates_its_block() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -11965,9 +12133,9 @@ mod tests {
     #[test]
     fn v_then_a_crossing_motion_highlights_both_lines_only_partly() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         // three columns in from the heading's own start, so the covered
         // slice is provably short of the whole line
         for key in "0lll".chars() {
@@ -12031,9 +12199,9 @@ mod tests {
     #[test]
     fn d_over_a_selection_crossing_blocks_deletes_the_whole_span() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -12081,9 +12249,9 @@ mod tests {
     #[test]
     fn leaving_visual_mode_clears_every_highlight() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -12130,9 +12298,9 @@ mod tests {
     fn a_count_on_plain_j_lands_where_two_separate_j_presses_do() {
         fn rendered_after(second: &str) -> String {
             let vault = temp_vault();
-            let (mut dom, clicks, _, _) =
+            let (mut dom, _clicks, _, _) =
                 rendered_app(Some(vault.path().to_path_buf()));
-            let (_, sink) = activate_heading(&mut dom, &clicks);
+            let (_, sink) = woken_targets();
             // gg: a fixed, deterministic starting line for both variants
             press(
                 &mut dom,
@@ -12210,9 +12378,9 @@ mod tests {
     #[test]
     fn a_scripted_line_probe_answer_places_the_caret_at_that_block_offset() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, _) =
+        let (mut dom, _clicks, drawn, _) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // the seam's own answer: block-relative byte 0, no UTF-16 offset
         // into it — the caret lands at the block's very start, which
@@ -12240,27 +12408,36 @@ mod tests {
     fn a_scripted_miss_and_no_probe_at_all_land_on_the_same_logical_line() {
         let vault = temp_vault();
 
-        let (mut dom_absent, clicks, _, _) =
+        let (mut dom_absent, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom_absent, &clicks);
-        press(
-            &mut dom_absent,
-            sink,
-            Key::Character("j".into()),
-            Modifiers::empty(),
-        );
+        let (_, sink) = woken_targets();
+        // the walk this compares has nowhere to go: the note opens on its
+        // title heading now
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md), so G puts the
+        // caret back on the last line, where a j is the degradation both
+        // sides must agree on
+        for key in ["G", "j"] {
+            press(
+                &mut dom_absent,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
         block_on(settle(&mut dom_absent));
 
-        let (mut dom_miss, clicks, drawn, _) =
+        let (mut dom_miss, _clicks, drawn, _) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom_miss, &clicks);
+        let (_, sink) = woken_targets();
         drawn.lock().expect("the line cell never poisons").clear();
-        press(
-            &mut dom_miss,
-            sink,
-            Key::Character("j".into()),
-            Modifiers::empty(),
-        );
+        for key in ["G", "j"] {
+            press(
+                &mut dom_miss,
+                sink,
+                Key::Character(key.into()),
+                Modifiers::empty(),
+            );
+        }
         block_on(settle(&mut dom_miss));
 
         assert_eq!(
@@ -12279,9 +12456,9 @@ mod tests {
     #[test]
     fn a_count_of_three_walks_three_drawn_lines_in_one_round_trip() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, asked) =
+        let (mut dom, _clicks, drawn, asked) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // three drawn lines below the caret, each a different block offset
         *drawn.lock().expect("the line cell never poisons") =
@@ -12319,9 +12496,9 @@ mod tests {
     #[test]
     fn a_count_past_the_drawn_extent_finishes_through_the_fallback() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, _) =
+        let (mut dom, _clicks, drawn, _) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // one drawn line above the caret, then nothing: 3k takes the one
         // step the seam has and walks the other two logically, out of the
@@ -12355,9 +12532,9 @@ mod tests {
     #[test]
     fn an_absurd_count_is_clamped_to_the_notes_drawn_extent() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, asked) =
+        let (mut dom, _clicks, drawn, asked) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         *drawn.lock().expect("the line cell never poisons") =
             vec![(0, 0, 9.0)];
@@ -12393,9 +12570,9 @@ mod tests {
     #[test]
     fn a_run_broken_by_a_swallowed_key_forgets_the_goal_x() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, asked) =
+        let (mut dom, _clicks, drawn, asked) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         *drawn.lock().expect("the line cell never poisons") =
             vec![(0, 0, 31.0)];
@@ -12444,9 +12621,9 @@ mod tests {
     #[test]
     fn a_walk_resolving_after_its_run_was_forgotten_moves_nothing() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, asked, release) =
+        let (mut dom, _clicks, drawn, asked, release) =
             latched_line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         retype(&mut dom, sink, "abcdefgh\nij\nklmnopqr");
         press(&mut dom, sink, Key::Escape, Modifiers::empty());
         block_on(settle(&mut dom));
@@ -12513,9 +12690,9 @@ mod tests {
     #[test]
     fn a_count_between_two_runs_keeps_the_goal_x() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, asked) =
+        let (mut dom, _clicks, drawn, asked) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         *drawn.lock().expect("the line cell never poisons") =
             vec![(0, 0, 42.0)];
@@ -12558,7 +12735,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, drawn, asked, hit) =
             line_and_hit_app(Some(vault.path().to_path_buf()));
-        let (block, sink) = activate_heading(&mut dom, &clicks);
+        let (block, sink) = woken_targets();
         *drawn.lock().expect("the line cell never poisons") =
             vec![(0, 0, 88.0)];
         *hit.lock().expect("the hit cell never poisons") = Some((0, 1));
@@ -12640,9 +12817,9 @@ mod tests {
     #[test]
     fn a_fallback_run_over_a_short_line_keeps_its_goal_column() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         // three lines, the middle one too short to hold the column the run
         // starts at — one block each, since a written newline ends the
         // block it lands in (adr/2026-09-a-new-line-is-its-own-block.md)
@@ -12692,9 +12869,9 @@ mod tests {
     #[test]
     fn a_run_broken_by_h_forgets_the_goal_x() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, asked) =
+        let (mut dom, _clicks, drawn, asked) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         *drawn.lock().expect("the line cell never poisons") =
             vec![(0, 0, 55.0)];
@@ -12736,9 +12913,9 @@ mod tests {
     #[test]
     fn visual_mode_line_probe_j_extends_instead_of_placing() {
         let vault = temp_vault();
-        let (mut dom, clicks, drawn, _) =
+        let (mut dom, _clicks, drawn, _) =
             line_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // v anchors where activate() left the caret — the block's end —
         // so a place (rather than an extend) would collapse the anchor
@@ -12772,11 +12949,11 @@ mod tests {
     #[test]
     fn the_clipboard_chords_round_trip_through_the_seams() {
         let vault = temp_vault();
-        let (mut dom, clicks, written) = clipboard_app(
+        let (mut dom, _clicks, written) = clipboard_app(
             Some(vault.path().to_path_buf()),
             Ok("collé".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // copy with nothing selected is a no-op, like the textarea's
         press(
@@ -12843,9 +13020,9 @@ mod tests {
     fn clipboard_chords_without_seams_quietly_decline() {
         // headless without fakes: the selection stays, nothing pastes
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         press(
@@ -12876,11 +13053,11 @@ mod tests {
         assert_eq!(source_of(&dom), before, "nothing moved without seams");
 
         // a paste whose read fails leaves the note alone and reports above
-        let (mut dom, clicks, _) = clipboard_app(
+        let (mut dom, _clicks, _) = clipboard_app(
             Some(vault.path().to_path_buf()),
             Err("read denied".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -12899,8 +13076,9 @@ mod tests {
     #[test]
     fn a_drag_extends_the_selection_one_probe_in_flight_at_a_time() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, _) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, _) = woken_targets();
 
         // the press anchors at the start…
         *hit.lock().expect("the hit cell never poisons") = Some((0, 0));
@@ -12971,9 +13149,9 @@ mod tests {
         // headless without a fake: the caret holds; with Ctrl the press
         // still follows whatever the caret already stands in
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (block, _) = activate_heading(&mut dom, &clicks);
+        let (block, _) = woken_targets();
 
         mouse(&mut dom, "mousedown", block, (0.0, 0.0));
         let html = dioxus_ssr::render(&dom);
@@ -13596,7 +13774,7 @@ mod tests {
         press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, picker_keys, Key::ArrowDown, Modifiers::empty());
         press(&mut dom, picker_keys, Key::ArrowUp, Modifiers::empty());
-        let opened = press_for_mutations(
+        let _opened = press_for_mutations(
             &mut dom,
             picker_keys,
             Key::Enter,
@@ -13615,14 +13793,10 @@ mod tests {
         assert!(!html.contains("links-footer"), "{html}");
         assert!(!html.contains("captured today"), "{html}");
         // the template's own source stands in the pane, placeholders and
-        // all — the note's own trailing empty line opens active
-        // (adr/2026-08-cursor-always-in-the-note.md); every block wakes on
-        // its own click now (adr/2026-08-css-draws-the-markup.md), and a
-        // template's preamble is a CSS pane where the note's was a
-        // compiled one (adr/2026-09-a-template-draws-as-source.md), so it
-        // mounts a fresh listener of its own: preamble, blank line,
-        // heading
-        activate_block(&mut dom, listeners(&opened, "click")[2]);
+        // all, with its title heading already awake — a template is a note
+        // like any other to the caret memory
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md,
+        // adr/2026-09-a-template-draws-as-source.md)
         assert!(source_of(&dom).contains("{{title}}"), "{}", source_of(&dom));
 
         // escape hands the pane back to the selected note
@@ -13715,21 +13889,12 @@ mod tests {
         let (input, picker_keys) =
             open_template_picker(&mut dom, keys[LOGS_KEYS]);
         type_into(&mut dom, input, "daily");
-        // the chosen template opens with its own trailing empty line
-        // awake (adr/2026-08-cursor-always-in-the-note.md); every block
-        // above it wakes on its own click now
-        // (adr/2026-08-css-draws-the-markup.md), and a template's
-        // preamble draws as a CSS pane where the note's was a compiled
-        // one (adr/2026-09-a-template-draws-as-source.md), so it mounts
-        // its own listener: preamble, blank line, heading
-        let woken = press_for_mutations(
-            &mut dom,
-            picker_keys,
-            Key::Enter,
-            Modifiers::empty(),
-        );
-        let (_, sink) =
-            activate_block(&mut dom, listeners(&woken, "click")[2]);
+        // the chosen template opens with its own title heading awake — a
+        // template is a note like any other to the caret memory
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md,
+        // adr/2026-09-a-template-draws-as-source.md)
+        press(&mut dom, picker_keys, Key::Enter, Modifiers::empty());
+        let (_, sink) = woken_targets();
         retype(&mut dom, sink, "= le modèle refait");
         block_on(settle(&mut dom));
         let text =
@@ -13745,9 +13910,9 @@ mod tests {
     #[test]
     fn a_buffer_that_will_not_flush_keeps_the_template_from_opening() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let file = vault.path().join("time/2026-07-23.typ");
         edit_behind(&file, "= repris dehors\n");
         retype(&mut dom, sink, "= à moi\n");
@@ -14157,10 +14322,12 @@ mod tests {
         // a pending region activates like any other: the region's own
         // adjacent block opens as source and the whole rest of the note
         // goes pending in its place (registration runs the grid first,
-        // then the one pending region above the active trailing line
+        // then the one pending region and the blocks beside it
         // (adr/2026-08-cursor-split-rendering.md) — the two crumb jumps
-        // and the rail's selected row)
-        click(&mut dom, clicks[clicks.len() - 4]);
+        // and the rail's selected row). The note opens on its heading, so
+        // the link line is one click earlier than it used to be
+        // (adr/2026-09-a-note-reopens-where-it-was-left.md)
+        click(&mut dom, clicks[clicks.len() - 5]);
         assert!(
             source_of(&dom).contains("2026-07-22"),
             "the link line is the active block now: {}",
@@ -14578,12 +14745,11 @@ mod tests {
         let before = std::fs::read_dir(&captures)
             .expect("the capture directory is there")
             .count();
-        let (mut dom, clicks, keys) = capture_app(
+        let (mut dom, _clicks, keys) = capture_app(
             Some(vault.path().to_path_buf()),
             Ok("pour la capture".to_string()),
             Some(CAPTURED_AT),
         );
-        activate_heading(&mut dom, &clicks);
         capture_chord(&mut dom, &keys);
         assert_eq!(
             std::fs::read_dir(&captures)
@@ -14654,9 +14820,9 @@ mod tests {
     #[test]
     fn the_picker_is_taken_out_of_the_reading_column_scroll_flow() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         open_picker(&mut dom, keys);
         let html = dioxus_ssr::render(&dom);
 
@@ -14697,8 +14863,9 @@ mod tests {
     #[test]
     fn a_row_click_accepts_the_completion_too() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = woken_targets();
         place_caret(&mut dom, block, &hit, 0);
 
         let mutations =
@@ -14761,9 +14928,9 @@ mod tests {
     #[test]
     fn the_arrows_move_the_highlight_and_stop_at_both_ends() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         let (input, picker_keys) = open_picker(&mut dom, keys);
 
         // two entries: the daily notes 22 and 23
@@ -14795,9 +14962,9 @@ mod tests {
     fn escape_closes_the_picker_and_a_query_that_matches_nothing_writes_nothing()
      {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         let (input, picker_keys) = open_picker(&mut dom, keys);
 
         type_into(&mut dom, input, "fantôme");
@@ -14836,8 +15003,9 @@ mod tests {
         // the caret is app state: the picker's input held the focus, but
         // nothing could move the caret — escape just closes the overlay
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = woken_targets();
         place_caret(&mut dom, block, &hit, 4);
         let (_, picker_keys) = open_picker(&mut dom, keys);
 
@@ -14859,9 +15027,9 @@ mod tests {
         // Ctrl+N, Ctrl+D) — the todo toggle must not silently rewrite the
         // line behind the picker
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         let (_, picker_keys) = open_picker(&mut dom, keys);
         let before = source_of(&dom);
 
@@ -14964,8 +15132,9 @@ mod tests {
     #[test]
     fn ctrl_enter_away_from_a_link_neither_jumps_nor_creates() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = woken_targets();
 
         // in the heading text, well before the link
         place_caret(&mut dom, block, &hit, 2);
@@ -14997,9 +15166,9 @@ mod tests {
     #[test]
     fn an_index_that_cannot_list_notes_becomes_the_notice() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         let saboteur =
             rusqlite::Connection::open(vault.path().join(".index/index.db"))
                 .expect("a second connection opens");
@@ -15016,9 +15185,9 @@ mod tests {
     #[test]
     fn a_picker_over_an_unopenable_index_says_so() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         replace_database_with_a_directory(vault.path());
 
         press(&mut dom, keys, ctrl_l(), Modifiers::CONTROL);
@@ -15239,9 +15408,9 @@ mod tests {
     #[test]
     fn over_an_active_block_all_but_the_stood_screen_are_listed() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, keys) = activate_heading(&mut dom, &clicks);
+        let (_, keys) = woken_targets();
         open_palette(&mut dom, keys);
         let labels = palette_labels(&dom);
         assert_eq!(labels.len(), 24, "{labels:?}");
@@ -15461,9 +15630,9 @@ mod tests {
     #[test]
     fn alt_h_and_alt_l_fold_the_panes_from_normal_mode_and_the_pane() {
         let vault = temp_vault();
-        let (mut dom, clicks, keys, _) =
+        let (mut dom, _clicks, keys, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let html = dioxus_ssr::render(&dom);
         assert!(!html.contains("rail folded"), "{html}");
 
@@ -15571,7 +15740,7 @@ mod tests {
 
         // a dirty note the disk refuses is not exported stale: the flush
         // comes first and its refusal is the notice
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -15721,7 +15890,7 @@ mod tests {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         retype(&mut dom, sink, "= presque perdu\n");
 
         lock_dir(&vault.path().join("time"), true);
@@ -16339,8 +16508,9 @@ mod tests {
     #[test]
     fn escape_over_a_block_leaves_the_caret_where_the_palette_found_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = woken_targets();
         place_caret(&mut dom, block, &hit, 4);
 
         let (_, palette_keys) = open_palette(&mut dom, keys);
@@ -16456,9 +16626,9 @@ mod tests {
         );
 
         // and over an open link picker, Ctrl+P is inert
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, block_keys) = activate_heading(&mut dom, &clicks);
+        let (_, block_keys) = woken_targets();
         open_picker(&mut dom, block_keys);
         press(&mut dom, block_keys, ctrl_p(), Modifiers::CONTROL);
         let html = dioxus_ssr::render(&dom);
@@ -17982,6 +18152,145 @@ mod tests {
         );
     }
 
+    // -- the caret memory ------------------------------------------------
+    // (adr/2026-09-a-note-reopens-where-it-was-left.md)
+
+    /// A note is filed under its vault-relative path, never its id: a note
+    /// whose `#meta` is missing has no id and still reopens where it was
+    /// left.
+    #[test]
+    fn caret_key_is_the_notes_vault_relative_path() {
+        assert_eq!(
+            caret_key(
+                Path::new("/vault"),
+                Path::new("/vault/permanent/luhmann.typ")
+            ),
+            "permanent/luhmann.typ"
+        );
+    }
+
+    const CARET_NOTE: &str = "#meta(\n)\n\n= Title\n\nune ligne\n";
+
+    /// A vault holding one note, the caret memory's fixture.
+    fn caret_vault() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        std::fs::create_dir_all(dir.path().join("permanent"))
+            .expect("the permanent dir is created");
+        let file = dir.path().join("permanent/a.typ");
+        std::fs::write(&file, CARET_NOTE).expect("the note is written");
+        (dir, file)
+    }
+
+    #[test]
+    fn land_caret_uses_the_memory_and_falls_back_to_the_title() {
+        let (dir, file) = caret_vault();
+        let mut carets = Carets::load(&dir.path().join(".index/carets"));
+
+        // never opened: the end of the title heading, past the preamble
+        let mut first = Editor::open(file.clone());
+        land_caret(dir.path(), &mut first, &carets);
+        assert_eq!(
+            first.head(),
+            CARET_NOTE.find("\n\nune").unwrap_or_default()
+        );
+
+        // remembered: the line and the column, clamped into the text the
+        // note has now
+        carets.set("permanent/a.typ", 5, 4);
+        let mut again = Editor::open(file);
+        land_caret(dir.path(), &mut again, &carets);
+        assert_eq!(again.head(), carets::place(CARET_NOTE, 5, 4));
+
+        // a note that would not open has no caret to place
+        let mut closed = Editor::closed();
+        land_caret(dir.path(), &mut closed, &carets);
+        assert!(closed.caret().is_none());
+    }
+
+    #[component]
+    fn RememberProbe(root: PathBuf, file: PathBuf) -> Element {
+        let carets = use_signal({
+            let root = root.clone();
+            move || Carets::load(&root.join(".index/carets"))
+        });
+        let status = use_signal(Status::default);
+        let mut opened = Editor::open(file);
+        opened.land_at_open(2);
+        remember_caret(&root, &opened, carets, status);
+        // a closed editor is not a note being left: nothing to remember
+        remember_caret(&root, &Editor::closed(), carets, status);
+        rsx! { "{status.read().has(Source::Carets)}" }
+    }
+
+    #[test]
+    fn remember_caret_writes_the_place_and_skips_a_closed_editor() {
+        let (dir, file) = caret_vault();
+        let mut dom = VirtualDom::new_with_props(
+            RememberProbe,
+            RememberProbeProps {
+                root: dir.path().to_path_buf(),
+                file,
+            },
+        );
+        dom.rebuild_to_vec();
+        assert_eq!(dioxus_ssr::render(&dom), "false", "the write landed");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".index/carets"))
+                .expect("the store reached disk"),
+            "permanent/a.typ 0 2\n",
+            "one entry, and only the open note's"
+        );
+    }
+
+    #[component]
+    fn RefusedProbe(refused: PathBuf, writable: PathBuf) -> Element {
+        let refused = use_signal(move || Carets::load(&refused));
+        let writable = use_signal(move || Carets::load(&writable));
+        let status = use_signal(Status::default);
+        save_carets(refused, status);
+        let reported = status.read().has(Source::Carets);
+        // the same refusal again: gated, so the line never repaints for a
+        // condition that has not changed
+        save_carets(refused, status);
+        let once = status.read().history().len();
+        // and a save that lands resolves it, with no gesture
+        save_carets(writable, status);
+        let resolved = !status.read().has(Source::Carets);
+        rsx! { "{reported} {once} {resolved}" }
+    }
+
+    #[test]
+    fn a_refused_carets_write_reports_once_and_a_good_one_resolves_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is available");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir_all(&locked).expect("the locked dir is created");
+        caret_lock(&locked, true);
+
+        let mut dom = VirtualDom::new_with_props(
+            RefusedProbe,
+            RefusedProbeProps {
+                refused: locked.join("no-such-dir/carets"),
+                writable: dir.path().join("open/carets"),
+            },
+        );
+        dom.rebuild_to_vec();
+        let rendered = dioxus_ssr::render(&dom);
+        caret_lock(&locked, false);
+        assert_eq!(rendered, "true 1 true");
+    }
+
+    /// The positions store's twin: a save is refused by locking the
+    /// directory whose child the store would have to create. The caller
+    /// unlocks before the tempdir drops.
+    fn caret_lock(dir: &Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(dir)
+            .expect("the dir exists")
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(dir, permissions)
+            .expect("the dir permissions are set");
+    }
+
     #[test]
     fn dir_category_reads_the_leading_directory() {
         assert_eq!(
@@ -18131,8 +18440,9 @@ mod tests {
     #[test]
     fn escape_over_a_block_leaves_the_caret_where_ctrl_n_found_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, hit) = hit_app(Some(vault.path().to_path_buf()));
-        let (block, keys) = activate_heading(&mut dom, &clicks);
+        let (mut dom, _clicks, hit) =
+            hit_app(Some(vault.path().to_path_buf()));
+        let (block, keys) = woken_targets();
         place_caret(&mut dom, block, &hit, 4);
 
         let (_, creator_keys) = open_creator(&mut dom, keys);
@@ -19257,12 +19567,12 @@ mod tests {
         let vault = temp_vault();
         std::fs::create_dir_all(vault.path().join("assets"))
             .expect("the assets dir");
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Ok(String::new()),
             Ok(Some(PNG_SIGNATURE.to_vec())),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -19288,12 +19598,12 @@ mod tests {
         let vault = temp_vault();
         std::fs::create_dir_all(vault.path().join("assets"))
             .expect("the assets dir");
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Ok(String::new()),
             Ok(Some(PNG_SIGNATURE.to_vec())),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -19314,12 +19624,12 @@ mod tests {
         );
         // text on the clipboard still wins over an image
         let vault = temp_vault();
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Ok("texte".to_string()),
             Ok(Some(PNG_SIGNATURE.to_vec())),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -19338,12 +19648,12 @@ mod tests {
         let vault = temp_vault();
         std::fs::create_dir_all(vault.path().join("assets"))
             .expect("the assets dir");
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Err("no text target".to_string()),
             Ok(Some(PNG_SIGNATURE.to_vec())),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -19355,12 +19665,12 @@ mod tests {
         assert!(!dioxus_ssr::render(&dom).contains("clipboard: "));
 
         // and with no image behind the refusal, the refusal is the notice
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Err("no text target".to_string()),
             Ok(None),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -19380,12 +19690,12 @@ mod tests {
      {
         let vault = temp_vault();
         // nothing on the clipboard at all
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Ok(String::new()),
             Ok(None),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         press(
             &mut dom,
@@ -19398,12 +19708,12 @@ mod tests {
         assert!(!dioxus_ssr::render(&dom).contains("notice-warning"));
 
         // the image read refused
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Ok(String::new()),
             Err("no image target".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -19415,12 +19725,12 @@ mod tests {
         assert!(html.contains("clipboard: no image target"), "{html}");
 
         // the assets directory is not there to write into
-        let (mut dom, clicks) = image_app(
+        let (mut dom, _clicks) = image_app(
             Some(vault.path().to_path_buf()),
             Ok(String::new()),
             Ok(Some(PNG_SIGNATURE.to_vec())),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         press(
             &mut dom,
@@ -19517,12 +19827,29 @@ mod tests {
             const { std::cell::Cell::new(None) };
     }
 
-    /// Remembers the sink these mutations mounted, if they mounted one.
-    /// Its class is static, so no mutation names it; its composition
-    /// listeners are its alone, so `compositionstart` is its signature.
+    thread_local! {
+        /// The awake block's own element, recorded by every helper that
+        /// renders: the note opens on its title heading now
+        /// (adr/2026-09-a-note-reopens-where-it-was-left.md), so the block
+        /// a click used to wake is already awake and carries no click
+        /// listener to reach it by.
+        static WOKEN: std::cell::Cell<Option<ElementId>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Remembers the sink these mutations mounted, if they mounted one,
+    /// and the block they woke. The sink's class is static, so no mutation
+    /// names it; its composition listeners are its alone, so
+    /// `compositionstart` is its signature. The awake block is the one
+    /// element inside a note carrying a `mousemove` — the caret drag's own
+    /// half — and it renders after the table's canvas, which carries the
+    /// only other one, so the last is always the note's.
     fn note_sink(mutations: &Mutations) {
         if let Some(id) = listeners(mutations, "compositionstart").first() {
             SINK.with(|sink| sink.set(Some(*id)));
+        }
+        if let Some(id) = listeners(mutations, "mousemove").last() {
+            WOKEN.with(|block| block.set(Some(*id)));
         }
     }
 
@@ -19530,6 +19857,18 @@ mod tests {
     fn sink_target() -> ElementId {
         SINK.with(std::cell::Cell::get)
             .expect("a note is showing, so a sink was mounted and recorded")
+    }
+
+    /// The awake block's own element and the sink: where presses land and
+    /// where typing lands. The note opens on its title heading with the
+    /// caret at its end — exactly the state a click on that heading used
+    /// to produce (adr/2026-09-a-note-reopens-where-it-was-left.md) — so
+    /// there is nothing left to wake.
+    fn woken_targets() -> (ElementId, ElementId) {
+        let block = WOKEN
+            .with(std::cell::Cell::get)
+            .expect("a note is showing, so a block is awake and recorded");
+        (block, sink_target())
     }
 
     thread_local! {
@@ -20331,17 +20670,6 @@ mod tests {
         (downs[0], sink_target())
     }
 
-    /// The heading widget's targets: the fixture day note's own heading
-    /// block click, direct — every block above the active trailing line
-    /// wakes on its own click now, no merged region to navigate out of
-    /// (adr/2026-08-css-draws-the-markup.md).
-    fn activate_heading(
-        dom: &mut VirtualDom,
-        clicks: &[ElementId],
-    ) -> (ElementId, ElementId) {
-        activate_block(dom, clicks[BLOCK_HEADING])
-    }
-
     /// The link line's targets: the fixture day note's own link-block
     /// click, direct.
     fn activate_link(
@@ -20360,35 +20688,27 @@ mod tests {
         activate_block(dom, clicks[BLOCK_PREAMBLE])
     }
 
-    /// The sheet's active widget targets: the sheet opens with the note's
-    /// last block already awake, its listeners in the opening mutations —
-    /// the raised card's and aside's mousedowns register ahead of the
-    /// block's (adr/2026-08-cursor-always-in-the-note.md).
+    /// The sheet's active widget targets: the sheet opens with the block
+    /// holding its note's title heading already awake, its listeners in
+    /// the opening mutations — the raised card's and aside's mousedowns
+    /// register ahead of the block's
+    /// (adr/2026-09-a-note-reopens-where-it-was-left.md).
     fn sheet_block_targets(opened: &Mutations) -> (ElementId, ElementId) {
         (listeners(opened, "mousedown")[2], sink_target())
     }
 
-    /// Wakes the sheet's heading directly. Opening the sheet leaves the
-    /// note's own trailing empty line active
-    /// (adr/2026-08-cursor-always-in-the-note.md); every block above it
-    /// gets its own click listener, in document order — alpha's fixture is
-    /// preamble, blank, heading, so the heading is the third
-    /// (adr/2026-08-css-draws-the-markup.md).
-    fn sheet_heading_targets(
-        dom: &mut VirtualDom,
-        opened: &Mutations,
-    ) -> (ElementId, ElementId) {
-        activate_block(dom, listeners(opened, "click")[2])
-    }
-
-    /// Like `sheet_heading_targets`, but for a note whose heading is
-    /// followed by a link line: preamble, blank, heading, link — the link
-    /// is the fourth click.
+    /// Wakes the sheet's link line. A sheet opens on its note's title
+    /// heading (adr/2026-09-a-note-reopens-where-it-was-left.md), so the
+    /// heading itself is `woken_targets`; every other block gets its own
+    /// click listener in document order
+    /// (adr/2026-08-css-draws-the-markup.md), and a note whose heading is
+    /// followed by a link line reads preamble, blank, link — the link is
+    /// the third click.
     fn sheet_link_targets(
         dom: &mut VirtualDom,
         opened: &Mutations,
     ) -> (ElementId, ElementId) {
-        activate_block(dom, listeners(opened, "click")[3])
+        activate_block(dom, listeners(opened, "click")[2])
     }
 
     /// Fires a wheel event with the given vertical pixel delta.
@@ -21023,9 +21343,9 @@ mod tests {
     #[test]
     fn the_ex_prompt_substitutes_and_one_undo_takes_it_back() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         assert!(
             source_of(&dom).contains("2026-07-23"),
             "{}",
@@ -21079,9 +21399,9 @@ mod tests {
     #[test]
     fn escape_closes_the_ex_prompt_leaving_the_note_untouched() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
 
         press(
@@ -21126,9 +21446,9 @@ mod tests {
     #[test]
     fn an_unreadable_ex_line_reaches_the_status_surface() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         press(
             &mut dom,
@@ -21148,9 +21468,9 @@ mod tests {
     #[test]
     fn the_ex_line_writes_the_note_to_disk_on_demand() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // type into the buffer, then :w rather than waiting for the pause
         for key in ["A", "!"] {
@@ -21184,11 +21504,11 @@ mod tests {
     #[test]
     fn visual_p_replaces_the_selection_from_the_clipboard() {
         let vault = temp_vault();
-        let (mut dom, clicks, written) = clipboard_app(
+        let (mut dom, _clicks, written) = clipboard_app(
             Some(vault.path().to_path_buf()),
             Ok("collée".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         for key in ["v", "l", "l", "p"] {
             press(
                 &mut dom,
@@ -21212,9 +21532,9 @@ mod tests {
     #[test]
     fn each_scroll_anchor_remounts_the_caret_and_the_mount_consumes_it() {
         let vault = temp_vault();
-        let (mut dom, clicks, scrolls) =
+        let (mut dom, _clicks, scrolls) =
             scroll_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         for (anchor, wanted) in [("z", "center"), ("t", "start"), ("b", "end")]
         {
@@ -21275,9 +21595,9 @@ mod tests {
     #[test]
     fn a_caret_move_centres_its_line_and_a_refresh_moves_nothing() {
         let vault = temp_vault();
-        let (mut dom, clicks, asked) =
+        let (mut dom, _clicks, asked) =
             scroll_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
 
         // `l` walks one cluster along: a move, and no anchor armed
         let moved = press_for_mutations(
@@ -21339,9 +21659,9 @@ mod tests {
     #[test]
     fn a_refused_ex_write_says_so_instead_of_failing_quietly() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (input, sink) = activate_heading(&mut dom, &clicks);
+        let (input, sink) = woken_targets();
         type_into(&mut dom, input, "= pas encore sauvé\n");
 
         lock_dir(&vault.path().join("time"), true);
@@ -21369,9 +21689,9 @@ mod tests {
     #[test]
     fn an_ex_line_submitted_with_no_note_open_does_nothing() {
         let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         press(
             &mut dom,
             sink,
@@ -21403,9 +21723,9 @@ mod tests {
     fn visual_p_with_no_clipboard_seam_at_all_changes_nothing() {
         let vault = temp_vault();
         // rendered_app installs no Clipboard context
-        let (mut dom, clicks, _, _) =
+        let (mut dom, _clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         for key in ["v", "l", "p"] {
             press(
@@ -21422,11 +21742,11 @@ mod tests {
     #[test]
     fn visual_p_over_a_failed_or_empty_read_leaves_the_selection_standing() {
         let vault = temp_vault();
-        let (mut dom, clicks, _) = clipboard_app(
+        let (mut dom, _clicks, _) = clipboard_app(
             Some(vault.path().to_path_buf()),
             Err("read denied".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         for key in ["v", "l", "p"] {
             press(
@@ -21444,9 +21764,9 @@ mod tests {
         );
 
         // an empty clipboard is not a refusal, and still replaces nothing
-        let (mut dom, clicks, _) =
+        let (mut dom, _clicks, _) =
             clipboard_app(Some(vault.path().to_path_buf()), Ok(String::new()));
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         let before = source_of(&dom);
         for key in ["v", "l", "p"] {
             press(
@@ -21463,11 +21783,11 @@ mod tests {
     #[test]
     fn a_line_wise_visual_p_keeps_the_clips_own_newline() {
         let vault = temp_vault();
-        let (mut dom, clicks, _) = clipboard_app(
+        let (mut dom, _clicks, _) = clipboard_app(
             Some(vault.path().to_path_buf()),
             Ok("= collée\n".to_string()),
         );
-        let (_, sink) = activate_heading(&mut dom, &clicks);
+        let (_, sink) = woken_targets();
         for key in ["V", "p"] {
             press(
                 &mut dom,

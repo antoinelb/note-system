@@ -4,6 +4,7 @@ pub mod arrange;
 pub mod blocks;
 pub mod capture;
 pub mod caret;
+pub mod carets;
 pub mod clipboard;
 pub mod compute;
 pub mod create;
