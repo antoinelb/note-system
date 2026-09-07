@@ -213,6 +213,30 @@ pub fn block_source(text: &str, block: &Block) -> String {
     source
 }
 
+/// The number one block's gutter shows. A block is one physical line
+/// (`segment`), so the caret's own line states its absolute 1-based number
+/// and every other line its distance from it — vim's
+/// `set number relativenumber`, which is what makes `12j` a number the eye
+/// reads off the screen instead of one it counts
+/// (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+pub fn line_label(index: usize, caret_line: usize) -> usize {
+    if index == caret_line {
+        index + 1
+    } else {
+        index.abs_diff(caret_line)
+    }
+}
+
+/// How many digits wide the gutter reserves for a note of `blocks` lines:
+/// the widest absolute number it can ever show, never under two. Fixed for
+/// the whole note rather than measured per line, so typing a line that
+/// carries the count past 9 or past 99 widens nothing and the prose never
+/// moves under the caret (AIR LAY-1). `max(1)` keeps the arithmetic total
+/// for a caller that hands over no blocks at all.
+pub fn gutter_width(blocks: usize) -> usize {
+    blocks.max(1).to_string().len().max(2)
+}
+
 /// JS `selectionStart` counts UTF-16 code units; block ranges count UTF-8
 /// bytes. Clamps to the text's end, and to the character's start when the
 /// probe lands mid-surrogate-pair.
@@ -503,6 +527,28 @@ mod tests {
         };
         let source = block_source(text, &stale);
         assert_eq!(source, FRAGMENT_PREAMBLE, "{source}");
+    }
+
+    #[test]
+    fn the_caret_line_is_absolute_and_every_other_line_is_a_distance() {
+        // the caret on line 3 (index 2) of a six-line note
+        let labels: Vec<usize> =
+            (0..6).map(|index| line_label(index, 2)).collect();
+        assert_eq!(labels, vec![2, 1, 3, 1, 2, 3], "{labels:?}");
+    }
+
+    #[test]
+    fn the_first_line_under_the_caret_states_line_one() {
+        assert_eq!(line_label(0, 0), 1, "1-based, not 0-based");
+    }
+
+    #[test]
+    fn the_gutter_reserves_two_digits_until_a_note_needs_three() {
+        assert_eq!(gutter_width(0), 2, "an empty note still reserves two");
+        assert_eq!(gutter_width(1), 2);
+        assert_eq!(gutter_width(99), 2);
+        assert_eq!(gutter_width(100), 3);
+        assert_eq!(gutter_width(1000), 4);
     }
 
     #[test]

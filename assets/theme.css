@@ -96,6 +96,13 @@
   --markup-checkbox: var(--ink-faint);
   --markup-checkbox-done: #87d37c;
   --markup-quote-rule: var(--ink-muted);
+  /* the gutter's line numbers: the distances stay on the muted ink the
+     markers and the meta line already wear, so the column reads as chrome
+     beside the prose; the caret's own line takes the note's full ink, the
+     one absolute number in the column
+     (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md) */
+  --line-number: var(--ink-muted);
+  --line-number-caret: var(--ink);
   /* multiplies var(--bg), which already swaps per theme */
   --dim-opacity: 0.4;
 }
@@ -160,6 +167,9 @@
   --markup-checkbox: var(--ink-faint);
   --markup-checkbox-done: #4c9452;
   --markup-quote-rule: var(--ink-muted);
+  /* the light siblings of the gutter pair above, same aliases */
+  --line-number: var(--ink-muted);
+  --line-number-caret: var(--ink);
   --dim-opacity: 0.4;
 }
 
@@ -422,15 +432,72 @@ body {
       every other block cached SVG (wireframes 1b,
       adr/2026-07-hybrid-active-block-textarea.md) --------------------------- */
 
+/* The note's blocks, and the gutter column reserved to the left of them.
+   The reservation is the note's own digit count (`--line-digits`, written
+   inline by src/ui.rs from `blocks::gutter_width`) times one digit of the
+   label face — DejaVu Sans Mono advances 1233/2048 em, read off the font
+   the same way --mk-hang's four values were
+   (adr/2026-09-wrapped-items-hang-under-their-text.md) — plus 4px of air
+   that keeps the widest number off the column's edge. It is a property of
+   the note, not of the caret, so nothing here moves while typing
+   (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md). */
+.note-blocks {
+  --line-number-size: 12px;
+  padding-left: calc(
+    var(--line-digits, 2) * 0.602 * var(--line-number-size) + 4px
+  );
+}
+
 .block {
   cursor: text;
+  /* the gutter's number is positioned against the slot
+     (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md) */
+  position: relative;
 }
 
 /* a compiled fallback widget keeps its own compiled width and scrolls
    inside itself rather than forcing the reading column wider (task 5 puts
-   this class on the per-block SVG widgets) */
-.block-svg {
+   this class on the per-block SVG widgets). The scroll box is the widget
+   itself and not the slot around it, because the slot also holds the
+   gutter's number, which sits *outside* the slot's own left edge — on the
+   slot, `overflow-x: auto` would clip it away on exactly the compiled
+   blocks and leave the numbering with holes
+   (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md). */
+.block-svg .note,
+.block-svg .render-error {
   overflow-x: auto;
+}
+
+/* The gutter: one line number per block, vim's `set number
+   relativenumber` — the caret's own line states its absolute number, every
+   other line its distance from the caret, on every screen and in every
+   mode (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md).
+
+   Out of flow, so it can touch neither the shared block box below nor
+   .mk-item's hanging indent: the slot is the containing block (all five
+   carry `position: relative`) and `right: 100%` puts the number's right
+   edge on the slot's own left edge, whatever the number's width — which is
+   what right-aligns the column for free, with no width to state. The 8px
+   between the digits and the prose is the block box's own horizontal
+   gutter, not a second one.
+
+   The line box is one prose line tall, so the number sits on the block's
+   first row and a wrapped block keeps it there. */
+.line-number {
+  position: absolute;
+  right: 100%;
+  top: 0;
+  font: var(--line-number-size) "DejaVu Sans Mono", monospace;
+  line-height: calc(var(--prose-size) * var(--prose-leading));
+  color: var(--line-number);
+  /* a drag across the prose must not sweep the digits into the selection */
+  user-select: none;
+}
+
+/* the caret's own line is the one absolute number in the column, and it
+   carries the note's ink to say so — the distances around it stay dim */
+.line-number-caret {
+  color: var(--line-number-caret);
 }
 
 /* The shared block box. Its vertical half is nothing at all — no margin,
@@ -503,6 +570,9 @@ body {
    selection never shifts anything below it
    (adr/2026-08-visual-selection-drawn-across-lines.md) */
 .block-selected {
+  /* the gutter's number is positioned against the slot
+     (adr/2026-09-the-gutter-numbers-lines-from-the-caret.md) */
+  position: relative;
   margin: 0;
   padding: 0 8px;
   color: var(--ink-bright);
