@@ -498,6 +498,12 @@ body {
   font: var(--line-number-size) "DejaVu Sans Mono", monospace;
   line-height: calc(var(--prose-size) * var(--prose-leading));
   color: var(--line-number);
+  /* text-indent is inherited, and .mk-item hangs its first row by a
+     negative one: left to inherit, the number's box collapsed and its
+     digits were drawn that far left of the slot on every list line,
+     furthest on a checklist. The column right-aligns only with its own
+     indent stated */
+  text-indent: 0;
   /* a drag across the prose must not sweep the digits into the selection */
   user-select: none;
 }
@@ -935,7 +941,11 @@ body {
 }
 
 .mk-quote {
-  border-left: 1px solid var(--markup-quote-rule);
+  /* an inset shadow, not a border: a border sits outside the padding box
+     an absolutely positioned child measures from, so the quote's number
+     stood 1px right of every other line's. The shadow paints the same
+     1px rule at the same edge and moves no box */
+  box-shadow: inset 1px 0 0 var(--markup-quote-rule);
   padding-left: 8px;
 }
 

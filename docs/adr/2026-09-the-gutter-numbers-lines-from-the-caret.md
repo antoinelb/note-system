@@ -27,6 +27,8 @@ The reservation is spelled from the label face's own digit advance (DejaVu Sans 
 
 **The compiled fallback's scroll box moves from the slot to the widget.** `.block-svg`'s `overflow-x: auto` existed so a wide compiled block scrolls inside itself instead of forcing the reading column wider; left on the slot it would also clip the number, which sits outside the slot's left edge. It now sits on `.block-svg .note` and `.block-svg .render-error`, which scroll identically.
 
+**Two properties the slot leaks into the number, closed after the first day of use.** `text-indent` is inherited, and `.mk-item` hangs its first row by a negative one (`adr/2026-09-wrapped-items-hang-under-their-text.md`): the number inherited it, its shrink-to-fit box collapsed to nothing, and its digits were drawn that far left of the column on every list line — 9.7px on a bullet, 18px on a checklist, most on an active `- [x]` line whose hang is the whole source prefix. `.line-number` now states `text-indent: 0`. The quote's rule was a `border-left`, and a border sits outside the padding box an absolutely positioned child measures `right: 100%` from, so a quote's number stood 1px right of its neighbours'; the rule is now an inset `box-shadow` of the same 1px at the same edge, which moves no box. Both were measured in a browser against the shipped stylesheet, not argued from the spec.
+
 ## Alternatives rejected
 
 - **Normal mode only.** The counts the numbers serve are a normal-mode grammar, so this is the tempting cut — but a column that appears and disappears with the mode is a layout change on every `i` and every Escape, and the shared block box exists precisely so that entering a line shifts nothing below it. A gutter that comes and goes would undo that at the column level.

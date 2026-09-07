@@ -12059,6 +12059,30 @@ mod tests {
             "one prose line tall, so a wrapped block keeps its number on \
              the first row: {number}"
         );
+        // text-indent inherits, and .mk-item's is the negative hang: left
+        // to inherit, a list line's digits were drawn that far left of
+        // the column (measured in Firefox: 9.7px on a bullet, 18px on a
+        // checklist)
+        assert!(
+            number.contains("text-indent: 0;"),
+            "the number states its own indent so no role's hang moves it: \
+             {number}"
+        );
+        // the quote's rule is an inset shadow, not a border: a border sits
+        // outside the padding box the number is positioned against, and
+        // put the quote's number 1px right of every other line's
+        let quote = sheet
+            .split("\n.mk-quote {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet draws the quote rule");
+        assert!(
+            quote.contains(
+                "box-shadow: inset 1px 0 0 var(--markup-quote-rule);"
+            ) && !quote.contains("border-left"),
+            "the quote rule paints without moving the slot's padding box: \
+             {quote}"
+        );
         // the compiled fallback's scroll box is the widget, not the slot,
         // or it would clip its own number away
         assert!(
