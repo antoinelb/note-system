@@ -26,10 +26,7 @@ use crate::markup;
 use crate::motions::{self, Lines, Motion};
 use crate::palette;
 use crate::positions::Positions;
-use crate::render::{
-    BodyCache, BodyView, DEFAULT_SIZE, FragmentCache, FragmentView,
-    RenderTheme,
-};
+use crate::render::{DEFAULT_SIZE, FragmentCache, FragmentView, RenderTheme};
 use crate::status::{Liveness, Notice, Source, Status};
 use crate::table;
 use crate::time;
@@ -498,9 +495,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     // re-render when it fills, so a plain hook value rather than a signal
     let fragments =
         use_hook(|| Rc::new(RefCell::new(FragmentCache::default())));
-    // the body cache, its table-side sibling: per-note SVGs living until
-    // the watcher invalidates them (adr/2026-08-body-cache-per-note-svg.md)
-    let bodies = use_hook(|| Rc::new(RefCell::new(BodyCache::default())));
     // the compiles' repaint tick: the drain bumps it once per landed burst,
     // and the shell reading it below is what re-renders the fresh SVGs in —
     // the caches themselves stay plain memo stores
@@ -726,8 +720,7 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     });
 
     // the vault watcher, if one was handed over: every batch it debounces
-    // invalidates the stale bodies and rides the compute tier as a survey
-    // job — the index work itself left this thread with C3
+    // rides the compute tier as a survey job — the index work itself left this thread with C3
     // (adr/2026-08-compute-tier-worker-seam.md); the outcome lands on the
     // drain below (adr/2026-08-watcher-feeds-the-ui.md). Taken out of its
     // cell once; a second render finds `None` and starts nothing.
@@ -737,7 +730,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     use_hook({
         let root = root.clone();
         let fragments = fragments.clone();
-        let bodies = bodies.clone();
         let feed = feed.clone();
         move || {
             let Some(watched) = try_consume_context::<VaultFeed>() else {
@@ -759,25 +751,21 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                         status.write().set_liveness(Liveness::Unwatched);
                         break;
                     };
-                    // the caches hear about every change first, so the
-                    // repaint the survey triggers re-renders fresh pixels
-                    // (adr/2026-08-body-cache-per-note-svg.md). A template
-                    // edit — and a rescan, whose lost events could have
-                    // been one — clears the fragments too: the template is
-                    // the compile input their keys never carry
-                    // (adr/2026-08-template-touch-clears-caches.md)
-                    for change in &batch {
-                        match change {
-                            watch::VaultChange::Touched { path, .. }
-                            | watch::VaultChange::Removed(path) => {
-                                bodies.borrow_mut().invalidate(path);
-                            }
+                    // the cache hears about the change first, so the
+                    // repaint the survey triggers re-renders fresh pixels:
+                    // a template edit — and a rescan, whose lost events
+                    // could have been one — clears the fragments, the
+                    // template being the compile input their keys never
+                    // carry (adr/2026-08-template-touch-clears-caches.md)
+                    let template_changed = batch.iter().any(|change| {
+                        matches!(
+                            change,
                             watch::VaultChange::Template
-                            | watch::VaultChange::Rescan => {
-                                fragments.borrow_mut().clear();
-                                bodies.borrow_mut().clear();
-                            }
-                        }
+                                | watch::VaultChange::Rescan
+                        )
+                    });
+                    if template_changed {
+                        fragments.borrow_mut().clear();
                     }
                     (feed.submit)(Job::Survey {
                         root: root.clone(),
@@ -801,14 +789,13 @@ fn Shell(root: PathBuf, today: Today) -> Element {
         let root = root.clone();
         let feed = feed.clone();
         let fragments = fragments.clone();
-        let bodies = bodies.clone();
         move || {
             let taken =
                 feed.outcomes.lock().ok().and_then(|mut cell| cell.take());
             let Some(mut outcomes) = taken else { return };
             spawn(async move {
                 // absorb outcomes in bursts before repainting once: a
-                // theme toggle or a bodies zoom lands dozens together
+                // theme toggle lands dozens together
                 let mut burst = Vec::new();
                 loop {
                     burst.clear();
@@ -822,17 +809,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                 fragments
                                     .borrow_mut()
                                     .absorb(key, epoch, result);
-                                landed = true;
-                            }
-                            Outcome::Body {
-                                note,
-                                theme,
-                                epoch,
-                                result,
-                            } => {
-                                bodies
-                                    .borrow_mut()
-                                    .absorb(note, theme, epoch, result);
                                 landed = true;
                             }
                             Outcome::Export { result, .. } => {
@@ -880,7 +856,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                                 // can be trusted — but a rescan that
                                 // itself failed escalates no further
                                 if !escalated {
-                                    bodies.borrow_mut().clear();
                                     (feed.submit)(compute::rescan(
                                         &root,
                                         true,
@@ -1041,9 +1016,9 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     });
     // the pane's centre, the anchor every zoom that is not the pointer's
     // holds still
-    let zoom_to = use_callback(move |target: table::Zoom| {
+    let zoom_to = use_callback(move |target: f64| {
         let pane = *viewport.peek();
-        zoom_at.call((target.scale(), (pane.0 / 2.0, pane.1 / 2.0)));
+        zoom_at.call((target, (pane.0 / 2.0, pane.1 / 2.0)));
     });
     // one notch in or out, holding the pane point it is handed: the
     // pointer for the wheel, the pane's centre for the keys. Refused while
@@ -1087,10 +1062,10 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                 None => Visit::Logs(selected.peek().clone()),
             };
             history.with_mut(|stack| push_visit(stack, visit));
-            // the sheet, tether and raised card are titles-zoom constructs:
+            // the sheet, tether and raised card are scale-1 constructs:
             // opening one zooms out first, one legible gesture
-            // (adr/2026-08-body-zoom-scale-and-metrics.md)
-            zoom_to.call(table::Zoom::Titles);
+            // (adr/2026-09-the-table-zooms-continuously.md)
+            zoom_to.call(table::TITLES_SCALE);
             picker.set(None);
             swap_editor.call(opened);
             vim.write().note_opened();
@@ -1211,7 +1186,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
         let root = root.clone();
         let fragments = fragments.clone();
         let feed = feed.clone();
-        let bodies = bodies.clone();
         move |()| {
             let Some(own) = sheet.peek().clone() else {
                 return;
@@ -1252,7 +1226,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
             // the app indexes its own delete in the same tick rather than
             // waiting on the watcher (adr/2026-09-the-app-indexes-its-own-writes.md)
             if let Some(relative) = relative {
-                bodies.borrow_mut().invalidate(&relative);
                 (feed.submit)(compute::removed(&root, relative, today.now()));
             }
             sheet.set(None);
@@ -1391,7 +1364,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
         let window_size = window_size.clone();
         let fallback = fallback.clone();
         let feed = feed.clone();
-        let bodies = bodies.clone();
         move |(picked, title): (NoteType, String)| {
             let created = today.now().to_string();
             match crate::create::permanent(&root, &picked, &title, &created) {
@@ -1424,7 +1396,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                             tags: Vec::new(),
                         });
                     });
-                    bodies.borrow_mut().invalidate(&relative);
                     (feed.submit)(compute::touched(
                         &root,
                         NoteCategory::Permanent,
@@ -1605,7 +1576,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     let undo_last = use_callback({
         let root = root.clone();
         let feed = feed.clone();
-        let bodies = bodies.clone();
         move |()| {
             let intent = undo_register.write().pop();
             intent.into_iter().for_each(|intent| match intent {
@@ -1625,7 +1595,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                         // (adr/2026-09-the-app-indexes-its-own-writes.md)
                         let relative = vault_relative(&root, &path);
                         let category = dir_category(&relative);
-                        bodies.borrow_mut().invalidate(&relative);
                         (feed.submit)(compute::touched(
                             &root,
                             category,
@@ -1731,7 +1700,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
     let create_time_note = use_callback({
         let root = root.clone();
         let feed = feed.clone();
-        let bodies = bodies.clone();
         move |(scale, id): (NoteType, String)| -> bool {
             let created =
                 logs::selection_date(&scale, &id).unwrap_or(today.now());
@@ -1745,7 +1713,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
             ) {
                 Ok(path) => {
                     let relative = vault_relative(&root, &path);
-                    bodies.borrow_mut().invalidate(&relative);
                     (feed.submit)(compute::touched(
                         &root,
                         NoteCategory::Time,
@@ -1987,7 +1954,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
         let clipboard = clipboard.clone();
         let now = now.clone();
         let feed = feed.clone();
-        let bodies = bodies.clone();
         move |()| {
             let Some(clipboard) = clipboard.clone() else {
                 return;
@@ -1995,7 +1961,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
             let Some(now) = now.clone() else { return };
             let root = root.clone();
             let feed = feed.clone();
-            let bodies = bodies.clone();
             spawn(async move {
                 let Some(pasted) =
                     clipboard_answer((clipboard.0)().await, status)
@@ -2016,7 +1981,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                         // rather than waiting on the watcher
                         // (adr/2026-09-the-app-indexes-its-own-writes.md)
                         let relative = vault_relative(&root, &path);
-                        bodies.borrow_mut().invalidate(&relative);
                         (feed.submit)(compute::touched(
                             &root,
                             NoteCategory::Capture,
@@ -2089,7 +2053,7 @@ fn Shell(root: PathBuf, today: Today) -> Element {
             note_open: editor.peek().note().is_some(),
             on_table: *screen.peek() == Screen::Table,
             sheet_open: sheet.peek().is_some(),
-            at_bodies: table::Zoom::of(*zoom.peek()) == table::Zoom::Bodies,
+            zoomed: *zoom.peek() != table::TITLES_SCALE,
             conflict: status.peek().has(Source::Conflict),
             undoable: undo_register.peek().label().is_some(),
         }));
@@ -2182,11 +2146,8 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                 palette::CommandId::Notices => toggle_notices.call(()),
                 palette::CommandId::KeepMine => keep_mine.call(()),
                 palette::CommandId::TakeDisk => take_disk.call(()),
-                palette::CommandId::ZoomToBodies => {
-                    zoom_to.call(table::Zoom::Bodies);
-                }
                 palette::CommandId::ZoomToTitles => {
-                    zoom_to.call(table::Zoom::Titles);
+                    zoom_to.call(table::TITLES_SCALE);
                 }
                 palette::CommandId::FilterCards => open_filter.call(()),
                 palette::CommandId::FoldRail => {
@@ -5195,7 +5156,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                         div {
                             key: "{card.id}",
                             class: "card card-{card.kind.as_dir()} {card.bar}",
-                            class: if table::Zoom::of(zoom()) == table::Zoom::Bodies { "bodies" },
                             class: if card.dimmed { "dimmed" },
                             // hue on the border and weight in the fill, both
                             // from tokens the theme already carries — a
@@ -5237,29 +5197,6 @@ fn Shell(root: PathBuf, today: Today) -> Element {
                             },
                             div { class: "card-label", "{card.label}" }
                             div { class: "card-title", "{card.title}" }
-                            // the note's own rendered body, clipped — the
-                            // template's typography, never restyled
-                            // (adr/2026-08-body-cache-per-note-svg.md)
-                            if table::Zoom::of(zoom()) == table::Zoom::Bodies {
-                                div { class: "card-body",
-                                    {
-                                        match card_body(&bodies, &feed, &root, &card.path, theme) {
-                                            Ok(Some(svg)) => rsx! {
-                                                div { class: "note", dangerous_inner_html: "{svg}" }
-                                            },
-                                            // nothing compiled yet, fresh or
-                                            // stale: a quiet gap until the
-                                            // SVG lands
-                                            Ok(None) => rsx! {
-                                                div { class: "body-pending" }
-                                            },
-                                            Err(msg) => rsx! {
-                                                p { class: "render-error", "{msg}" }
-                                            },
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                     // the rubber band, last child so it paints over the
@@ -6434,31 +6371,6 @@ fn block_pane(
     }
 }
 
-/// One card's body at the Bodies zoom: the SVG to show (fresh, or stale
-/// while its recompile is out), nothing yet, or the compile's error. A
-/// miss queues the compile — through the tier when queued, in place when
-/// inline (adr/2026-08-async-caches-pending-stale.md).
-fn card_body(
-    bodies: &Rc<RefCell<BodyCache>>,
-    feed: &ComputeFeed,
-    root: &Path,
-    note: &Path,
-    theme: RenderTheme,
-) -> Result<Option<String>, String> {
-    if feed.inline {
-        return bodies.borrow_mut().render(root, note, theme).map(Some);
-    }
-    match bodies.borrow_mut().probe(root, note, theme) {
-        BodyView::Ready(result) => result.map(Some),
-        BodyView::Pending { stale, job } => {
-            if let Some(job) = job {
-                (feed.submit)(Job::Body(job));
-            }
-            Ok(stale)
-        }
-    }
-}
-
 /// The open link picker's fixed half: the index snapshot the query filters,
 /// taken once at open because nothing can change it while the popup holds
 /// focus (adr/2026-08-ctrl-l-link-picker.md). The splice point is the caret
@@ -6487,9 +6399,9 @@ struct Palette {
     /// Whether a sheet was open: delete exists only over one
     /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
     sheet_open: bool,
-    /// Whether the table stood at body zoom: each zoom command hides at its
-    /// own level (adr/2026-08-body-zoom-scale-and-metrics.md).
-    at_bodies: bool,
+    /// Whether the table stood off its one named scale: the jump back
+    /// hides where it already stands (adr/2026-09-a-card-is-always-its-title.md).
+    zoomed: bool,
     /// Whether a save stood refused over an external edit: the resolution
     /// pair exists only while there is a side to pick
     /// (adr/2026-08-external-edit-conflict-commands.md).
@@ -6531,7 +6443,7 @@ impl Palette {
             note_open: self.note_open,
             on_table: self.on_table,
             sheet_open: self.sheet_open,
-            at_bodies: self.at_bodies,
+            zoomed: self.zoomed,
             conflict: self.conflict,
             undoable: self.undoable,
         }
@@ -7670,12 +7582,28 @@ mod tests {
         assert_eq!(saved.trim(), "alpha 82 122");
     }
 
+    /// The positions file read back as (id, x, y) rows, in file order.
+    fn positions_of(saved: &str) -> Vec<(String, f64, f64)> {
+        saved
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                let id = fields.next().expect("an id").to_string();
+                let x = fields.next().and_then(|x| x.parse().ok()).expect("x");
+                let y = fields.next().and_then(|y| y.parse().ok()).expect("y");
+                (id, x, y)
+            })
+            .collect()
+    }
+
     #[test]
     fn a_card_dropped_on_its_neighbours_pushes_them_and_persists_them() {
         // the grid's row is 192 apart and a card needs 184 of clearance, so
-        // dragging alpha 50 to the right lands it on capture-idea — which
-        // yields onto digest: one drop, a chain, one debounced write
-        // (adr/2026-09-cards-yield-on-drop.md)
+        // dragging alpha 50 right and 10 up lands it on capture-idea —
+        // which slides along their line onto digest, which slides along
+        // theirs: one drop, a chain, one debounced write
+        // (adr/2026-09-cards-yield-on-drop.md,
+        // adr/2026-09-neighbours-yield-along-the-line-between-centres.md)
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
@@ -7694,22 +7622,34 @@ mod tests {
         let saved =
             std::fs::read_to_string(vault.path().join(".index/positions"))
                 .expect("the debounced write reached the file");
-        assert_eq!(
-            saved.trim(),
-            "alpha 82 22\n\
-             capture-idea 266 32\n\
-             digest 450 32",
-            "every card that yielded kept its new place: {saved}"
-        );
+        let rows = positions_of(&saved);
+        // capture-idea clears x exactly, its 10 of offset scaled by the
+        // same 42/142; digest clears x exactly too, carrying its share of
+        // that slope back
+        let capture_y = 32.0 + 10.0 * 42.0 / 142.0;
+        let digest_y = 32.0 + (32.0 - capture_y) * 34.0 / 150.0;
+        let expected = [
+            ("alpha", 82.0, 22.0),
+            ("capture-idea", 266.0, capture_y),
+            ("digest", 450.0, digest_y),
+        ];
+        assert_eq!(rows.len(), expected.len(), "{saved}");
+        for ((id, x, y), (want_id, want_x, want_y)) in
+            rows.iter().zip(expected)
+        {
+            assert_eq!(id, want_id, "{saved}");
+            assert!((x - want_x).abs() < 1e-9, "{id} x: {saved}");
+            assert!((y - want_y).abs() < 1e-9, "{id} y: {saved}");
+        }
     }
 
-    #[test]
-    fn a_drop_into_a_pile_too_tight_to_clear_speaks_and_places_anyway() {
-        // capture-idea is wedged between alpha, whose id outranks it, and
-        // the drop itself: 80 of canvas where it needs 128, so the passes
-        // run out. The drop still stands and the crowding is a line, never
-        // a refusal (adr/2026-09-cards-yield-on-drop.md).
-        let vault = temp_vault();
+    /// A column of three at the origin, alpha and digest picked as a set:
+    /// dragging the set straight down leaves capture-idea wedged between
+    /// two anchors on the one line no push can leave. The drop (alpha) and
+    /// the rest of the targets come back.
+    fn wedged_column(
+        vault: &tempfile::TempDir,
+    ) -> (VirtualDom, ElementId, Vec<ElementId>, ElementId) {
         std::fs::create_dir_all(vault.path().join(".index"))
             .expect("the index dir is creatable");
         std::fs::write(
@@ -7719,22 +7659,36 @@ mod tests {
         .expect("the pile is written");
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
-        let (pane, cards) = table_targets(&mut dom, &clicks);
+        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
+        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        shift_mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
+        shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
+        mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        mouse(&mut dom, "mousemove", pane, (100.0, 110.0));
+        mouse(&mut dom, "mouseup", pane, (100.0, 110.0));
+        (dom, pane, cards, keys)
+    }
 
-        // digest is the last card in id order — the drop, and the only one
-        // of the three whose id outranks capture-idea's
-        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
-        mouse(&mut dom, "mousemove", pane, (110.0, 100.0));
-        mouse(&mut dom, "mouseup", pane, (110.0, 100.0));
+    #[test]
+    fn a_drop_into_a_pile_too_tight_to_clear_speaks_and_places_anyway() {
+        // capture-idea is wedged between two members of the dropped set,
+        // dead on their column: 80 of canvas where it needs 128 and no
+        // sideways line to slide out along, so the passes run out. The
+        // drop still stands and the crowding is a line, never a refusal
+        // (adr/2026-09-cards-yield-on-drop.md).
+        let vault = temp_vault();
+        let (mut dom, pane, cards, _) = wedged_column(&vault);
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("layout: too tight to clear"), "{html}");
         assert!(
-            html.contains("left: 10px; top: 80px"),
+            html.contains("left: 0px; top: 10px"),
             "the drop was never refused: {html}"
         );
 
-        // and a later drop that comes out clear takes the word back
-        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
+        // and a later drop that comes out clear takes the word back: the
+        // wedged card, nobody's member, travels alone
+        mouse(&mut dom, "mousedown", cards[1], (100.0, 100.0));
         mouse(&mut dom, "mousemove", pane, (600.0, 600.0));
         mouse(&mut dom, "mouseup", pane, (600.0, 600.0));
         assert!(
@@ -7964,21 +7918,8 @@ mod tests {
         // the crowded pile of the resolver's own scenario, so a notice is
         // standing while the set is: the selection rung answers first
         let vault = temp_vault();
-        std::fs::create_dir_all(vault.path().join(".index"))
-            .expect("the index dir is creatable");
-        std::fs::write(
-            vault.path().join(".index/positions"),
-            "alpha 0 0\ncapture-idea 0 40\ndigest 0 80\n",
-        )
-        .expect("the pile is written");
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
-
-        mouse(&mut dom, "mousedown", cards[2], (100.0, 100.0));
-        mouse(&mut dom, "mousemove", pane, (110.0, 100.0));
-        mouse(&mut dom, "mouseup", pane, (110.0, 100.0));
-        shift_mouse(&mut dom, "mousedown", cards[0], (100.0, 100.0));
+        let (mut dom, pane, cards, keys) = wedged_column(&vault);
+        shift_mouse(&mut dom, "mousedown", cards[1], (100.0, 100.0));
         shift_mouse(&mut dom, "mouseup", pane, (100.0, 100.0));
         assert!(dioxus_ssr::render(&dom).contains("picked"));
 
@@ -15167,71 +15108,6 @@ mod tests {
         assert!(!healed.contains("indexing the vault"), "{healed}");
     }
 
-    #[test]
-    fn a_zoomed_body_lands_late_and_stays_stale_while_recompiling() {
-        let vault = temp_vault();
-        let (mut dom, clicks, held, sender) =
-            scripted_app(Some(vault.path().to_path_buf()));
-        held.work(&mut dom);
-
-        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
-        centre_alpha(&mut dom, pane);
-        jump_to_bodies(&mut dom, keys);
-        let pending = dioxus_ssr::render(&dom);
-        assert!(pending.contains("body-pending"), "{pending}");
-        assert!(!pending.contains(RENDERED_NOTE), "{pending}");
-
-        // a repaint while the compile is out queues nothing twice: an
-        // unrelated landing forces the re-render, and the probe answers
-        // pending without a job
-        let queued = held.take();
-        held.land(Outcome::Fragment {
-            key: 0,
-            epoch: 0,
-            result: Ok(String::new()),
-        });
-        block_on(settle(&mut dom));
-        assert!(
-            held.take().is_empty(),
-            "the in-flight body queued no sibling"
-        );
-        for job in queued {
-            held.land(compute::run(job));
-        }
-        block_on(settle(&mut dom));
-        let compiled = dioxus_ssr::render(&dom);
-        assert!(compiled.contains(RENDERED_NOTE), "{compiled}");
-        assert!(!compiled.contains("body-pending"), "{compiled}");
-
-        // alpha breaks on disk; the batch invalidates its body, and the
-        // stale SVG holds the slot while the recompile is out
-        std::fs::write(
-            vault.path().join("permanent/alpha.typ"),
-            format!("{}#let x = (\n", note("alpha")),
-        )
-        .expect("the note is broken in place");
-        feed_batch(
-            &mut dom,
-            &sender,
-            vec![watch::VaultChange::Touched {
-                category: NoteCategory::Permanent,
-                path: PathBuf::from("permanent/alpha.typ"),
-            }],
-        );
-        held.work(&mut dom);
-        let stale = dioxus_ssr::render(&dom);
-        assert!(stale.contains(RENDERED_NOTE), "the stale holds: {stale}");
-        assert!(!stale.contains("body-pending"), "{stale}");
-        assert!(!stale.contains("render-error"), "{stale}");
-
-        held.work(&mut dom);
-        let after = dioxus_ssr::render(&dom);
-        assert!(
-            after.contains("render-error"),
-            "the recompile reports: {after}"
-        );
-    }
-
     // -- in-app capture: the clipboard becomes a note ------------------------
 
     /// The capture clock, on the same day as `TODAY` so the new note lands
@@ -18139,7 +18015,8 @@ mod tests {
         assert!(dioxus_ssr::render(&dom).contains(">open note<"));
     }
 
-    // -- semantic zoom: titles ⇄ bodies ---------------------------------------
+    // -- the one named scale: zoom to titles
+    //    (adr/2026-09-a-card-is-always-its-title.md) ----------------------
 
     /// The zoom chords, spelled once.
     fn ctrl_equals() -> Key {
@@ -18157,12 +18034,21 @@ mod tests {
         mouse(dom, "mouseup", pane, (520.0, 340.0));
     }
 
-    /// Runs the palette's "zoom to bodies": the one jump to exactly 3.0,
-    /// where every key is a notch.
-    fn jump_to_bodies(dom: &mut VirtualDom, keys: ElementId) {
-        let (input, palette_keys) = open_palette(dom, keys);
-        type_into(dom, input, "zoom to bodies");
-        press(dom, palette_keys, Key::Enter, Modifiers::empty());
+    /// Steps the table in by the bare `=` key, `notches` times, around the
+    /// pane's centre.
+    fn step_in(dom: &mut VirtualDom, keys: ElementId, notches: usize) {
+        for _ in 0..notches {
+            press(dom, keys, Key::Character("=".into()), Modifiers::empty());
+        }
+    }
+
+    /// The x a card stands at, read back from the inline style of the one
+    /// card drawn on the fallback grid's first row.
+    fn card_left(html: &str) -> f64 {
+        let row = html.find("px; top: 32px").expect("a card on the row");
+        let start = html[..row].rfind("left: ").expect("the card's x")
+            + "left: ".len();
+        html[start..row].parse().expect("a number")
     }
 
     #[test]
@@ -18194,57 +18080,52 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_zooms_to_bodies_and_back_to_titles() {
+    fn the_palette_zooms_back_to_titles_from_a_stepped_scale() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
 
-        jump_to_bodies(&mut dom, keys);
+        step_in(&mut dom, keys, 3);
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("scale(3)"), "{html}");
-        assert!(html.contains("card-body"), "bodies render: {html}");
-        assert!(html.contains(RENDERED_NOTE), "the note's own svg: {html}");
-        assert!(
-            !html.contains(">digest</div>"),
-            "the card the zoom pushed out is culled: {html}"
-        );
+        assert!(!html.contains("scale(1)"), "{html}");
+        assert!(html.contains(">alpha</div>"), "still a title: {html}");
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "zoom to titles");
         press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("scale(1)"), "{html}");
-        assert!(!html.contains("card-body"), "titles again: {html}");
-        // the round trip landed the pan back where it stood
-        assert!(
-            html.contains("translate(520px, 340px)"),
-            "the centre held: {html}"
-        );
+        assert!(html.contains(">alpha</div>"), "{html}");
     }
 
     #[test]
-    fn a_drag_at_body_zoom_moves_in_canvas_units() {
+    fn a_drag_at_a_stepped_scale_moves_in_canvas_units() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
-        jump_to_bodies(&mut dom, keys);
+        step_in(&mut dom, keys, 1);
 
-        // 24 client pixels are 8 canvas units at scale 3
+        // 11 client pixels are 10 canvas units at one notch in
         mouse(&mut dom, "mousedown", cards[0], (300.0, 300.0));
-        mouse(&mut dom, "mousemove", pane, (324.0, 300.0));
-        mouse(&mut dom, "mouseup", pane, (324.0, 300.0));
+        mouse(&mut dom, "mousemove", pane, (311.0, 300.0));
+        mouse(&mut dom, "mouseup", pane, (311.0, 300.0));
+        let left = card_left(&dioxus_ssr::render(&dom));
         assert!(
-            dioxus_ssr::render(&dom).contains("left: 40px; top: 32px"),
-            "8 canvas units from the slot"
+            (left - 42.0).abs() < 1e-9,
+            "10 canvas units from the slot: {left}"
         );
         block_on(settle(&mut dom));
         let saved =
             std::fs::read_to_string(vault.path().join(".index/positions"))
                 .expect("the debounced write reached the file");
-        assert_eq!(saved.trim(), "alpha 40 32");
+        let mut fields = saved.split_whitespace();
+        assert_eq!(fields.next(), Some("alpha"));
+        let x: f64 = fields.next().and_then(|x| x.parse().ok()).expect("x");
+        assert!((x - 42.0).abs() < 1e-9, "{saved}");
+        assert_eq!(fields.next(), Some("32"));
     }
 
     #[test]
@@ -18254,15 +18135,15 @@ mod tests {
             rendered_app(Some(vault.path().to_path_buf()));
         let (pane, cards, keys) = table_targets_with_keys(&mut dom, &clicks);
         centre_alpha(&mut dom, pane);
-        jump_to_bodies(&mut dom, keys);
+        step_in(&mut dom, keys, 3);
 
-        // a click at body zoom zooms out and opens — one legible gesture
+        // a click at a stepped scale zooms out and opens — one legible
+        // gesture
         mouse(&mut dom, "mousedown", cards[0], (300.0, 300.0));
         mouse(&mut dom, "mouseup", pane, (300.0, 300.0));
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains(r#"class="sheet""#), "{html}");
         assert!(html.contains("scale(1)"), "titles again: {html}");
-        assert!(!html.contains("card-body"), "{html}");
     }
 
     #[test]
@@ -18300,53 +18181,19 @@ mod tests {
     }
 
     #[test]
-    fn a_watcher_batch_invalidates_the_body_cache() {
-        let vault = temp_vault();
-        let (mut dom, clicks, sender) =
-            watched_app(Some(vault.path().to_path_buf()));
-        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
-        centre_alpha(&mut dom, pane);
-        jump_to_bodies(&mut dom, keys);
-        let before = dioxus_ssr::render(&dom);
-        assert!(before.contains("card-body"), "{before}");
-        assert!(!before.contains("render-error"), "{before}");
-
-        // alpha keeps its meta — and its card — but stops compiling; the
-        // batch must drop the cached body, not serve it stale
-        std::fs::write(
-            vault.path().join("permanent/alpha.typ"),
-            format!("{}#let x = (\n", note("alpha")),
-        )
-        .expect("the note is broken in place");
-        feed_batch(
-            &mut dom,
-            &sender,
-            vec![watch::VaultChange::Touched {
-                category: NoteCategory::Permanent,
-                path: PathBuf::from("permanent/alpha.typ"),
-            }],
-        );
-        let after = dioxus_ssr::render(&dom);
-        assert!(after.contains(">alpha</div>"), "the card held: {after}");
-        assert!(
-            after.contains("render-error"),
-            "the recompiled body reports its error: {after}"
-        );
-    }
-
-    #[test]
-    fn the_zoom_commands_run_through_the_palette_and_hide_in_place() {
+    fn the_zoom_command_runs_through_the_palette_and_hides_in_place() {
         let vault = temp_vault();
         let (mut dom, clicks, _, _) =
             rendered_app(Some(vault.path().to_path_buf()));
         let (_, _, keys) = table_targets_with_keys(&mut dom, &clicks);
 
+        // at the one named scale there is nowhere to jump
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "zoom");
-        assert_eq!(palette_labels(&dom), vec!["zoom to bodies"]);
-        press(&mut dom, palette_keys, Key::Enter, Modifiers::empty());
-        assert!(dioxus_ssr::render(&dom).contains("scale(3)"));
+        assert_eq!(palette_labels(&dom), Vec::<String>::new());
+        press(&mut dom, palette_keys, Key::Escape, Modifiers::empty());
 
+        step_in(&mut dom, keys, 1);
         let (input, palette_keys) = open_palette(&mut dom, keys);
         type_into(&mut dom, input, "zoom");
         assert_eq!(palette_labels(&dom), vec!["zoom to titles"]);
@@ -18579,39 +18426,6 @@ mod tests {
                 .contains(&format!("scale({})", crate::table::MAX_SCALE)),
             "the near end holds"
         );
-    }
-
-    #[test]
-    fn the_cards_start_drawing_bodies_past_the_threshold() {
-        let vault = temp_vault();
-        let (mut dom, clicks, _, _) =
-            rendered_app(Some(vault.path().to_path_buf()));
-        let (pane, _, keys) = table_targets_with_keys(&mut dom, &clicks);
-        centre_alpha(&mut dom, pane);
-
-        // seven notches stop just under the threshold: still titles
-        for _ in 0..7 {
-            press(
-                &mut dom,
-                keys,
-                Key::Character("=".into()),
-                Modifiers::empty(),
-            );
-        }
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains(">alpha</div>"), "{html}");
-        assert!(!html.contains("card-body"), "still titles: {html}");
-
-        // the eighth crosses it, and the card draws its own note
-        press(
-            &mut dom,
-            keys,
-            Key::Character("=".into()),
-            Modifiers::empty(),
-        );
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("card-body"), "bodies now: {html}");
-        assert!(html.contains(RENDERED_NOTE), "the note's own svg: {html}");
     }
 
     #[test]

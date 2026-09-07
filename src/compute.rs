@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{
 use crate::domain::{NoteCategory, NoteType};
 use crate::index::{Index, IndexError, TableNote};
 use crate::loops::{self, LoopLine};
-use crate::render::{BodyJob, ExportJob, FragmentJob, RenderTheme};
+use crate::render::{ExportJob, FragmentJob};
 use crate::watch::{self, VaultChange};
 use jiff::civil::Date;
 
@@ -31,12 +31,11 @@ pub type Survey = (
     Vec<(String, String)>,
 );
 
-/// One unit of off-thread work. Compiles carry their own keys back
-/// (`render::FragmentJob`, `render::BodyJob`); a survey carries whether it
+/// One unit of off-thread work. A compile carries its own key back
+/// (`render::FragmentJob`); a survey carries whether it
 /// already is the escalation, so a failed rescan cannot escalate forever.
 pub enum Job {
     Fragment(FragmentJob),
-    Body(BodyJob),
     Export(ExportJob),
     Survey {
         root: PathBuf,
@@ -54,12 +53,6 @@ pub enum Job {
 pub enum Outcome {
     Fragment {
         key: u64,
-        epoch: u64,
-        result: Result<String, String>,
-    },
-    Body {
-        note: PathBuf,
-        theme: RenderTheme,
         epoch: u64,
         result: Result<String, String>,
     },
@@ -81,12 +74,6 @@ pub fn run(job: Job) -> Outcome {
     match job {
         Job::Fragment(job) => Outcome::Fragment {
             key: job.key,
-            epoch: job.epoch,
-            result: job.compile(),
-        },
-        Job::Body(job) => Outcome::Body {
-            note: job.note.clone(),
-            theme: job.theme,
             epoch: job.epoch,
             result: job.compile(),
         },
@@ -136,7 +123,7 @@ pub fn inline() -> ComputeFeed {
 }
 
 /// Production: two worker lanes, one for compiles and one for surveys, so
-/// a zoom's flood of body compiles never delays a watcher batch. Each lane
+/// a note's flood of fragment compiles never delays a watcher batch. Each lane
 /// is one thread draining its queue in order — FIFO is what keeps watcher
 /// batches applying in arrival order. The threads end when the feed drops
 /// their senders; nothing joins them, the outcomes channel just closes.
@@ -148,7 +135,7 @@ pub fn threaded() -> ComputeFeed {
         submit: Arc::new(move |job| {
             let lane = match &job {
                 Job::Survey { .. } => &surveys,
-                Job::Fragment(_) | Job::Body(_) | Job::Export(_) => &compiles,
+                Job::Fragment(_) | Job::Export(_) => &compiles,
             };
             let _ = lane.send(job);
         }),
@@ -296,7 +283,7 @@ pub fn removed(root: &Path, path: PathBuf, today: Date) -> Job {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::render::DEFAULT_SIZE;
+    use crate::render::{DEFAULT_SIZE, RenderTheme};
 
     const TODAY: Date = jiff::civil::date(2026, 7, 24);
 
@@ -344,7 +331,6 @@ mod tests {
             .expect("the receiver is still in its cell");
 
         (feed.submit)(fragment_job(&fixture_vault()));
-        (feed.submit)(body_job(&fixture_vault()));
         (feed.submit)(rescan(vault.path(), true, TODAY));
         with_the_shared_template(vault.path());
         (feed.submit)(export(
@@ -352,8 +338,8 @@ mod tests {
             PathBuf::from("time/2026-07-23.typ"),
         ));
 
-        let mut kinds = (false, false, false, false);
-        for _ in 0..4 {
+        let mut kinds = (false, false, false);
+        for _ in 0..3 {
             match outcomes.blocking_recv().expect("a lane answers") {
                 Outcome::Fragment { result, .. } => {
                     assert!(
@@ -363,16 +349,10 @@ mod tests {
                     );
                     kinds.0 = true;
                 }
-                Outcome::Body { result, .. } => {
-                    assert!(
-                        result.expect("the body compiles").contains("<svg")
-                    );
-                    kinds.1 = true;
-                }
                 Outcome::Survey { result, escalated } => {
                     assert!(result.is_ok(), "{result:?}");
                     assert!(escalated, "the flag rides through");
-                    kinds.2 = true;
+                    kinds.1 = true;
                 }
                 Outcome::Export { note, result } => {
                     assert_eq!(note, PathBuf::from("time/2026-07-23.typ"));
@@ -385,11 +365,11 @@ mod tests {
                     )
                     .expect("the pdf is beside the note");
                     assert!(pdf.starts_with(b"%PDF-"), "a real pdf");
-                    kinds.3 = true;
+                    kinds.2 = true;
                 }
             }
         }
-        assert_eq!(kinds, (true, true, true, true), "every lane answered");
+        assert_eq!(kinds, (true, true, true), "every lane answered");
     }
 
     /// The seeded vault compiles once it holds the fixtures' shared
@@ -650,19 +630,6 @@ mod tests {
             panic!("a fresh cache queues the compile");
         };
         Job::Fragment(job)
-    }
-
-    fn body_job(vault: &Path) -> Job {
-        let crate::render::BodyView::Pending { job: Some(job), .. } =
-            crate::render::BodyCache::default().probe(
-                vault,
-                Path::new("permanent/zettelkasten.typ"),
-                RenderTheme::Paper(DEFAULT_SIZE),
-            )
-        else {
-            panic!("a fresh cache queues the compile");
-        };
-        Job::Body(job)
     }
 
     /// A minimal vault the survey can index: the four category directories

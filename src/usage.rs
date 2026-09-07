@@ -108,7 +108,6 @@ fn key(id: CommandId) -> &'static str {
         CommandId::Notices => "notices",
         CommandId::KeepMine => "keep-mine",
         CommandId::TakeDisk => "take-disk",
-        CommandId::ZoomToBodies => "zoom-to-bodies",
         CommandId::ZoomToTitles => "zoom-to-titles",
         CommandId::FilterCards => "filter-cards",
         CommandId::FoldRail => "fold-rail",

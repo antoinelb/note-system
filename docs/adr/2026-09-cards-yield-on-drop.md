@@ -68,3 +68,12 @@ member ever yields, and a pair of members is skipped outright — the set is
 one rigid body. Everything else is unchanged: the shallower axis, the 8px
 gap, the id order between two ordinary neighbours, the 32-pass cap and the
 crowded notice.
+
+## Amended by `2026-09-neighbours-yield-along-the-line-between-centres.md` (2026-09-07)
+
+A push no longer runs along the shallower axis but along the line through
+the two centres, by the shortest run that clears one axis; and between two
+free cards the one further from the dropped set yields, the higher id only
+on a tie.
+The gap, the box, the cap and the notice stand; the "halving" rejection
+below is why the pushes stay sequential and exact.

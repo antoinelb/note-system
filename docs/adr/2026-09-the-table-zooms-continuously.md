@@ -35,3 +35,10 @@ This supersedes `adr/2026-08-body-zoom-scale-and-metrics.md`'s "two semantic zoo
 - **A third handler measuring the pane's rectangle at mount** — an async `get_client_rect` for a number two existing event paths already carry exactly.
 - **Zooming with a sheet open** — the tether would point at a card whose screen position it computes at scale 1, and the sheet frame would drift off its own index card.
 - **A visible zoom percentage** — the cards' own treatment is the readout; a number would be chrome that says nothing the map does not already show.
+
+## Amended by `2026-09-a-card-is-always-its-title.md` (2026-09-07)
+
+The scale stays continuous, but nothing is derived from it any more: `Zoom`
+and `BODIES_AT` are gone, a card is its title at every scale, culling uses
+the one title height, and "zoom to titles" is the only jump — hidden while
+the table stands at 1.0.

@@ -11,16 +11,13 @@ use crate::domain::{NoteCategory, NoteType};
 use crate::index::TableNote;
 use crate::positions::Positions;
 
-/// Titles-zoom card width (wireframe 170–180, normalized to ×4).
+/// Card width (wireframe 170–180, normalized to ×4).
 pub const CARD_WIDTH: f64 = 176.0;
 
 /// One card the canvas draws, position already resolved.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub id: String,
-    /// Vault-relative — what body zoom renders and caches by
-    /// (adr/2026-08-body-cache-per-note-svg.md).
-    pub path: std::path::PathBuf,
     /// Falls back to the id — a card is never blank.
     pub title: String,
     /// The uppercase mono line over the title: the type name, or the
@@ -113,7 +110,6 @@ pub fn cards(
             let kind = presented_kind(note);
             Card {
                 id: note.id.clone(),
-                path: note.path.clone(),
                 title: note.title.clone().unwrap_or_else(|| note.id.clone()),
                 label: label(kind, note, today),
                 kind,
@@ -259,7 +255,7 @@ pub const SHEET_MAX_WIDTH: f64 = 900.0;
 pub const SHEET_MARGIN: f64 = 44.0;
 /// The card's proportions: height over width, 3 to 5.
 pub const SHEET_RATIO: f64 = 3.0 / 5.0;
-/// Where the tether meets the card: its mid-height at titles zoom.
+/// Where the tether meets the card: its mid-height.
 pub const TETHER_DROP: f64 = 28.0;
 /// How far a press may wander and still read as a click (max-norm, px).
 pub const CLICK_SLOP: f64 = 4.0;
@@ -269,11 +265,11 @@ pub const CLICK_SLOP: f64 = 4.0;
 /// (adr/2026-08-new-card-lands-at-viewport-centre.md).
 pub const DEFAULT_VIEWPORT: (f64, f64) = (1280.0, 800.0);
 
-/// The scale the table opens at, and the one the two chords still jump
-/// between — the semantic levels survive as named stops on a continuous
-/// axis (adr/2026-09-the-table-zooms-continuously.md).
+/// The scale the table opens at, and the one jump the palette still
+/// names — the one stop on a continuous axis, since a card draws its title
+/// at every scale (adr/2026-09-the-table-zooms-continuously.md,
+/// adr/2026-09-a-card-is-always-its-title.md).
 pub const TITLES_SCALE: f64 = 1.0;
-pub const BODIES_SCALE: f64 = 3.0;
 
 /// How far the canvas may be scaled either way. A quarter still reads as a
 /// constellation; four is the closest a 176-wide card is worth drawing.
@@ -284,40 +280,6 @@ pub const MAX_SCALE: f64 = 4.0;
 /// out undoes a step in and every notch covers the same proportion of the
 /// range however far in the table already stands.
 pub const ZOOM_STEP: f64 = 1.1;
-
-/// Where a card stops being a title and starts being a body. Halfway
-/// between the two stops in log terms is nearer 1.7; 2.0 is the round
-/// number and keeps a card legible before its body appears.
-pub const BODIES_AT: f64 = 2.0;
-
-/// The two treatments a card is drawn with — derived from the scale on
-/// every read, never stored beside it, so there is one source of truth
-/// (adr/2026-09-the-table-zooms-continuously.md).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Zoom {
-    Titles,
-    Bodies,
-}
-
-impl Zoom {
-    /// The scale this level's chord jumps to — applied outside the
-    /// translate, so the pan stays in canvas units and `point()` divides
-    /// once.
-    pub fn scale(self) -> f64 {
-        match self {
-            Zoom::Titles => TITLES_SCALE,
-            Zoom::Bodies => BODIES_SCALE,
-        }
-    }
-
-    /// How a card is drawn at this scale.
-    pub fn of(scale: f64) -> Self {
-        match scale >= BODIES_AT {
-            true => Zoom::Bodies,
-            false => Zoom::Titles,
-        }
-    }
-}
 
 /// One notch closer or further, held inside the range. A scale already at
 /// a bound steps to that bound again, which the caller reads as "nothing
@@ -330,36 +292,27 @@ pub fn stepped(scale: f64, closer: bool) -> f64 {
     target.clamp(MIN_SCALE, MAX_SCALE)
 }
 
-/// The clipped body area below label and title, and the card's full height
-/// at body zoom (adr/2026-08-body-zoom-scale-and-metrics.md).
-pub const BODY_HEIGHT: f64 = 240.0;
-pub const BODY_CARD_HEIGHT: f64 = 296.0;
 /// A conservative title-card height bound for culling — cards are shorter,
 /// and a too-tall bound only keeps an off-screen card alive, never culls a
 /// visible one.
 pub const TITLE_CARD_HEIGHT: f64 = 96.0;
 
 /// Whether the card's rectangle intersects the viewport under
-/// `scale(scale) translate(pan)`: screen = s·(canvas + pan). The height is
-/// the one the card actually draws at this scale, so culling and rendering
-/// never disagree. Exact edge contact does not count — a card ending at the
-/// boundary shows nothing (adr/2026-08-viewport-culling-onresize.md).
+/// `scale(scale) translate(pan)`: screen = s·(canvas + pan). Exact edge
+/// contact does not count — a card ending at the boundary shows nothing
+/// (adr/2026-08-viewport-culling-onresize.md).
 pub fn in_view(
     card: &Card,
     scale: f64,
     pan: (f64, f64),
     viewport: (f64, f64),
 ) -> bool {
-    let height = match Zoom::of(scale) {
-        Zoom::Titles => TITLE_CARD_HEIGHT,
-        Zoom::Bodies => BODY_CARD_HEIGHT,
-    };
     let left = scale * (card.x + pan.0);
     let top = scale * (card.y + pan.1);
     left < viewport.0
         && left + scale * CARD_WIDTH > 0.0
         && top < viewport.1
-        && top + scale * height > 0.0
+        && top + scale * TITLE_CARD_HEIGHT > 0.0
 }
 
 /// The pan that keeps the canvas point under a given pane point fixed
@@ -542,11 +495,10 @@ pub fn move_set(
 /// (adr/2026-09-cards-yield-on-drop.md).
 pub const CARD_GAP: f64 = 8.0;
 
-/// The card's drawn height at titles zoom: twice the tether's drop, the one
-/// card height the layout declares. Overlap is resolved against this box
-/// whatever zoom the drop happened at — body zoom's 296-tall cards overlap
-/// by construction, the fallback grid's own 96-unit row pitch included
-/// (adr/2026-09-cards-yield-on-drop.md).
+/// The card's drawn height: twice the tether's drop, the one card height
+/// the layout declares. Overlap is resolved against this box whatever
+/// scale the drop happened at — the fallback grid's own 96-unit row pitch
+/// overlaps by construction (adr/2026-09-cards-yield-on-drop.md).
 pub const CARD_HEIGHT: f64 = 2.0 * TETHER_DROP;
 
 /// How many separation passes one drop gets before the resolver stops and
@@ -568,8 +520,8 @@ pub struct Settled {
 
 /// The neighbours yielding to a drop: `anchor` stays exactly where it was
 /// put, and every card whose rectangle comes within `CARD_GAP` of another
-/// slides clear along its shallower axis, in passes capped at
-/// `RESOLVE_PASSES`. Pure — the caller persists what comes back
+/// slides clear along the line between the two centres, in passes capped
+/// at `RESOLVE_PASSES`. Pure — the caller persists what comes back
 /// (adr/2026-09-cards-yield-on-drop.md). The one-card case of
 /// `resolve_group`.
 pub fn resolve_drop(anchor: &str, cards: &[Card]) -> Settled {
@@ -581,7 +533,7 @@ pub fn resolve_drop(anchor: &str, cards: &[Card]) -> Settled {
 /// yields to another — the set is one rigid body, so a group move
 /// preserves the arrangement it started with — while every outside card
 /// whose rectangle comes within `CARD_GAP` of another slides clear along
-/// its shallower axis, in passes capped at `RESOLVE_PASSES`
+/// the line between the two centres, in passes capped at `RESOLVE_PASSES`
 /// (adr/2026-09-shift-drag-selects-cards.md).
 pub fn resolve_group(anchors: &[&str], cards: &[Card]) -> Settled {
     let mut standing: Vec<Standing> = cards
@@ -616,23 +568,28 @@ struct Standing<'cards> {
 /// One pass over every pair, lower id first: an anchor never yields, a
 /// pair of anchors is skipped outright — two members of the dropped set
 /// are one body and never separate — and between two ordinary neighbours
-/// the higher id yields, so a chain's pushes are the same on every run.
+/// the one standing further from the dropped set yields, so the push
+/// spreads outward from the drop the way a magnet's field does instead of
+/// ricocheting by id; a tie yields the higher id, so a chain's pushes are
+/// the same on every run
+/// (adr/2026-09-neighbours-yield-along-the-line-between-centres.md).
 /// Answers whether the pass found nothing to separate.
 fn sweep(anchors: &[&str], standing: &mut [Standing]) -> bool {
+    let held: Vec<(f64, f64)> = standing
+        .iter()
+        .filter(|card| anchors.contains(&card.id))
+        .map(|card| card.now)
+        .collect();
     let mut clear = true;
     for one in 0..standing.len() {
         for other in (one + 1)..standing.len() {
-            let held_one = anchors.contains(&standing[one].id);
-            let held_other = anchors.contains(&standing[other].id);
-            if held_one && held_other {
+            let Some((mover, fixed)) =
+                yielding(anchors, &held, standing, one, other)
+            else {
                 continue;
-            }
-            let (mover, held) = match held_other {
-                true => (one, other),
-                false => (other, one),
             };
             let Some((dx, dy)) =
-                yield_step(standing[mover].now, standing[held].now)
+                yield_step(standing[mover].now, standing[fixed].now)
             else {
                 continue;
             };
@@ -644,11 +601,51 @@ fn sweep(anchors: &[&str], standing: &mut [Standing]) -> bool {
     clear
 }
 
+/// Which of a pair yields, as (mover, fixed): never an anchor, and between
+/// two free cards the one further from the nearest dropped card — the
+/// second of the pair, the higher id, on a tie. `None` for two anchors.
+fn yielding(
+    anchors: &[&str],
+    held: &[(f64, f64)],
+    standing: &[Standing],
+    one: usize,
+    other: usize,
+) -> Option<(usize, usize)> {
+    let held_one = anchors.contains(&standing[one].id);
+    let held_other = anchors.contains(&standing[other].id);
+    match (held_one, held_other) {
+        (true, true) => None,
+        (true, false) => Some((other, one)),
+        (false, true) => Some((one, other)),
+        (false, false) => {
+            let other_is_further = reach(held, standing[other].now)
+                >= reach(held, standing[one].now);
+            match other_is_further {
+                true => Some((other, one)),
+                false => Some((one, other)),
+            }
+        }
+    }
+}
+
+/// How far a card stands from the nearest dropped card — infinite when the
+/// drop names no card on the table, which leaves the pair to its id order.
+fn reach(held: &[(f64, f64)], at: (f64, f64)) -> f64 {
+    held.iter()
+        .map(|card| (at.0 - card.0).hypot(at.1 - card.1))
+        .fold(f64::INFINITY, f64::min)
+}
+
 /// How far the mover slides to leave `CARD_GAP` of clear canvas around the
-/// card it stands on: along the shallower axis, away from it, and `None`
-/// when the two rectangles are already clear. Every card is the same size,
-/// so the corner-to-corner delta is the centre-to-centre one; two
-/// coincident cards separate downward rather than dividing by zero.
+/// card it stands on: along the line through the two centres, away from
+/// it, by the shortest run that clears either axis — a magnet's push, not
+/// a slide along one side. `None` when the two rectangles are already
+/// clear. Every card is the same size, so the corner-to-corner delta is
+/// the centre-to-centre one; two coincident cards have no line between
+/// them and separate downward instead. The run is the offset scaled by
+/// the factor that brings one axis to clearance, and that axis is written
+/// exactly rather than through the factor, so the pair it clears reads as
+/// clear on the next pass and no rounding residue can spend the cap.
 fn yield_step(mover: (f64, f64), held: (f64, f64)) -> Option<(f64, f64)> {
     let (dx, dy) = (mover.0 - held.0, mover.1 - held.1);
     let depth_x = CARD_WIDTH + CARD_GAP - dx.abs();
@@ -656,10 +653,15 @@ fn yield_step(mover: (f64, f64), held: (f64, f64)) -> Option<(f64, f64)> {
     if depth_x <= 0.0 || depth_y <= 0.0 {
         return None;
     }
+    if dx == 0.0 && dy == 0.0 {
+        return Some((0.0, CARD_HEIGHT + CARD_GAP));
+    }
     let away = |delta: f64| if delta < 0.0 { -1.0 } else { 1.0 };
-    match depth_x <= depth_y {
-        true => Some((away(dx) * depth_x, 0.0)),
-        false => Some((0.0, away(dy) * depth_y)),
+    // a zero offset never clears its own axis: the division yields the
+    // infinity that loses the min, and the other axis takes the pair
+    match depth_x / dx.abs() <= depth_y / dy.abs() {
+        true => Some((away(dx) * depth_x, dy * depth_x / dx.abs())),
+        false => Some((dx * depth_y / dy.abs(), away(dy) * depth_y)),
     }
 }
 
@@ -1330,7 +1332,6 @@ mod tests {
     fn placed_card(id: &str, x: f64, y: f64) -> Card {
         Card {
             id: id.to_string(),
-            path: std::path::PathBuf::from(format!("permanent/{id}.typ")),
             title: id.to_string(),
             label: "concept".to_string(),
             kind: NoteCategory::Permanent,
@@ -1343,23 +1344,6 @@ mod tests {
 
     fn link(source: &str, target: &str) -> (String, String) {
         (source.to_string(), target.to_string())
-    }
-
-    #[test]
-    fn zoom_scales_are_titles_one_and_bodies_three() {
-        assert_eq!(Zoom::Titles.scale(), 1.0);
-        assert_eq!(Zoom::Bodies.scale(), 3.0);
-    }
-
-    #[test]
-    fn the_level_is_read_off_the_scale_at_the_threshold() {
-        assert_eq!(Zoom::of(MIN_SCALE), Zoom::Titles);
-        assert_eq!(Zoom::of(TITLES_SCALE), Zoom::Titles);
-        // the threshold itself already draws bodies
-        assert_eq!(Zoom::of(BODIES_AT - 0.001), Zoom::Titles);
-        assert_eq!(Zoom::of(BODIES_AT), Zoom::Bodies);
-        assert_eq!(Zoom::of(BODIES_SCALE), Zoom::Bodies);
-        assert_eq!(Zoom::of(MAX_SCALE), Zoom::Bodies);
     }
 
     #[test]
@@ -1393,20 +1377,22 @@ mod tests {
     #[test]
     fn culling_respects_the_pan_and_the_scale() {
         let vp = (1280.0, 800.0);
-        let (one, three) = (TITLES_SCALE, BODIES_SCALE);
-        // the same pan puts a body-zoomed card thrice as far out
+        let (one, three) = (TITLES_SCALE, 3.0);
+        // the same pan puts a zoomed card thrice as far out
         let far = placed_card("a", 500.0, 0.0);
         assert!(in_view(&far, one, (0.0, 0.0), vp));
         assert!(!in_view(&far, three, (0.0, 0.0), vp));
-        // the taller body card survives higher above the fold — the height
-        // follows the treatment the scale actually draws
-        let high = placed_card("b", 0.0, -290.0);
+        // the one card height holds at every scale: a card that clears the
+        // fold by its bound at scale one is culled the same way zoomed in
+        let high = placed_card("b", 0.0, -100.0);
         assert!(!in_view(&high, one, (0.0, 0.0), vp));
-        assert!(in_view(&high, three, (0.0, 0.0), vp));
-        // just under the threshold the title height is back, so the same
-        // card at the same scale is culled
-        assert!(!in_view(&high, BODIES_AT - 0.001, (0.0, 0.0), vp));
-        assert!(in_view(&high, BODIES_AT, (0.0, 0.0), vp));
+        assert!(!in_view(&high, three, (0.0, 0.0), vp));
+        assert!(in_view(
+            &placed_card("c", 0.0, -95.0),
+            three,
+            (0.0, 0.0),
+            vp
+        ));
         // and panning brings the far card back
         assert!(in_view(&far, three, (-200.0, 0.0), vp));
     }
@@ -1415,14 +1401,14 @@ mod tests {
     fn rezoom_keeps_the_anchor_on_the_same_canvas_point() {
         let centre = (640.0, 400.0);
         let pan = (-40.0, 40.0);
-        let zoomed = rezoom(pan, TITLES_SCALE, BODIES_SCALE, centre);
+        let zoomed = rezoom(pan, TITLES_SCALE, 3.0, centre);
         // the canvas point under the anchor: p = anchor/s − pan
         let before = (640.0 - pan.0, 400.0 - pan.1);
         let after = (640.0 / 3.0 - zoomed.0, 400.0 / 3.0 - zoomed.1);
         assert!((before.0 - after.0).abs() < 1e-9, "{before:?} {after:?}");
         assert!((before.1 - after.1).abs() < 1e-9, "{before:?} {after:?}");
         // and back out is the identity round trip
-        let back = rezoom(zoomed, BODIES_SCALE, TITLES_SCALE, centre);
+        let back = rezoom(zoomed, 3.0, TITLES_SCALE, centre);
         assert!((back.0 - pan.0).abs() < 1e-9);
         assert!((back.1 - pan.1).abs() < 1e-9);
     }
@@ -1540,10 +1526,15 @@ mod tests {
         })
     }
 
+    /// Two coordinates within float noise of each other.
+    fn near(one: (f64, f64), other: (f64, f64)) -> bool {
+        (one.0 - other.0).abs() < 1e-9 && (one.1 - other.1).abs() < 1e-9
+    }
+
     #[test]
-    fn a_card_dropped_on_its_neighbour_pushes_it_along_the_short_axis() {
-        // b sits 16 below a and dead on its column: the vertical overlap is
-        // 48 deep, the horizontal one 184 — b slides down, a never moves
+    fn a_card_dropped_dead_on_its_neighbours_column_pushes_it_straight_down() {
+        // b sits 16 below a with no horizontal offset: the line between
+        // the centres is vertical, so b slides down it — a never moves
         let dropped =
             [placed_card("a", 0.0, 0.0), placed_card("b", 0.0, 16.0)];
         let settled = resolve_drop("a", &dropped);
@@ -1556,16 +1547,42 @@ mod tests {
     }
 
     #[test]
+    fn a_neighbour_slides_along_the_line_between_the_centres() {
+        // b stands 90 right and 5 below a: the shorter escape is vertical,
+        // but the line between the centres runs almost flat, so b slides
+        // right along it — 94 to clear x, and the 5 scales to 5.2 with it
+        let dropped =
+            [placed_card("a", 0.0, 0.0), placed_card("b", 90.0, 5.0)];
+        let settled = resolve_drop("a", &dropped);
+        assert!(settled.clear);
+        assert_eq!(settled.moved.len(), 1);
+        assert_eq!(settled.moved[0].0, "b");
+        assert!(
+            near(
+                settled.moved[0].1,
+                (CARD_WIDTH + CARD_GAP, 5.0 + 5.0 * 94.0 / 90.0)
+            ),
+            "b went right, not down: {:?}",
+            settled.moved[0].1
+        );
+        assert!(all_clear(&settled.moved));
+    }
+
+    #[test]
     fn a_neighbour_above_and_left_yields_away_from_the_drop() {
         // the mirror: b is up and left of the anchor, so both pushes are
-        // negative — and a mostly-horizontal overlap slides along x
+        // negative — the steeper line clears y first, and x scales with it
         let dropped =
             [placed_card("a", 0.0, 0.0), placed_card("b", -20.0, -8.0)];
         let settled = resolve_drop("a", &dropped);
-        assert_eq!(
-            settled.moved,
-            vec![("b".to_string(), (-20.0, -(CARD_HEIGHT + CARD_GAP)))],
-            "the shallower axis here is y, so b slid straight up"
+        assert_eq!(settled.moved[0].0, "b");
+        assert!(
+            near(
+                settled.moved[0].1,
+                (-20.0 - 20.0 * 56.0 / 8.0, -(CARD_HEIGHT + CARD_GAP))
+            ),
+            "{:?}",
+            settled.moved[0].1
         );
 
         let sideways =
@@ -1573,7 +1590,7 @@ mod tests {
         assert_eq!(
             resolve_drop("a", &sideways).moved,
             vec![("b".to_string(), (-(CARD_WIDTH + CARD_GAP), 0.0))],
-            "184 of horizontal depth against 64 of vertical: b slid left"
+            "a flat line: b slid left and nothing else"
         );
     }
 
@@ -1634,23 +1651,37 @@ mod tests {
     }
 
     #[test]
-    fn a_card_wedged_between_two_that_outrank_it_runs_the_cap_out() {
-        // b is the only card free to move — a outranks it by id and c is
-        // the drop itself — and the two of them stand 80 apart where b
-        // needs 128 to clear both. Each pass slides it off one and onto the
-        // other; the cap is what stops the pair of pushes repeating, and
-        // the caller speaks the crowding rather than refusing the drop.
-        let wedged = [
-            placed_card("a", 0.0, 0.0),
-            placed_card("b", 0.0, 40.0),
-            placed_card("c", 0.0, 80.0),
+    fn the_card_further_from_the_drop_yields_whatever_its_id() {
+        // c drops at the top of a column b and a already stand in, b the
+        // nearer: between a and b it is a — the further one — that
+        // yields, though its id outranks b's, so the push runs down the
+        // column and the pile comes out clear instead of a ricocheting
+        // between the two forever
+        let column = [
+            placed_card("a", 0.0, 90.0),
+            placed_card("b", 0.0, 30.0),
+            placed_card("c", 0.0, 0.0),
         ];
-        let settled = resolve_drop("c", &wedged);
-        assert!(!settled.clear, "the cap ran out: {settled:?}");
+        let settled = resolve_drop("c", &column);
+        assert!(settled.clear, "{settled:?}");
         assert_eq!(
             settled.moved,
-            vec![("b".to_string(), (0.0, 16.0))],
-            "what the last pass managed stands"
+            vec![
+                ("a".to_string(), (0.0, 2.0 * (CARD_HEIGHT + CARD_GAP))),
+                ("b".to_string(), (0.0, CARD_HEIGHT + CARD_GAP)),
+            ]
+        );
+        assert!(all_clear(&settled.moved));
+    }
+
+    #[test]
+    fn with_no_anchor_on_the_table_the_higher_id_yields() {
+        // a drop naming no card: nothing is held, every reach is infinite,
+        // and the tie falls to id order as it always did
+        let pair = [placed_card("a", 0.0, 0.0), placed_card("b", 0.0, 16.0)];
+        assert_eq!(
+            resolve_drop("ghost", &pair).moved,
+            vec![("b".to_string(), (0.0, CARD_HEIGHT + CARD_GAP))]
         );
     }
 
@@ -1773,15 +1804,18 @@ mod tests {
         ];
         let settled = resolve_group(&["a", "b"], &dropped);
         assert!(settled.clear);
-        assert_eq!(
-            settled.moved,
-            vec![("c".to_string(), (100.0, CARD_HEIGHT + CARD_GAP))],
-            "only the outsider moved, and it slid clear of both"
-        );
+        assert_eq!(settled.moved.len(), 1, "only the outsider moved");
+        assert_eq!(settled.moved[0].0, "c");
+        // a pushed it right along their line, b then down along theirs:
+        // the second push clears y exactly, the x it carries is a's share
+        // scaled back by b's
+        let (x, y) = settled.moved[0].1;
+        assert_eq!(y, CARD_HEIGHT + CARD_GAP);
+        assert!(x > 100.0 && x < 200.0, "clear of both, between them: {x}");
         assert!(all_clear(&[
             ("a".to_string(), (0.0, 0.0)),
             ("b".to_string(), (200.0, 0.0)),
-            ("c".to_string(), (100.0, CARD_HEIGHT + CARD_GAP)),
+            ("c".to_string(), (x, y)),
         ]));
     }
 

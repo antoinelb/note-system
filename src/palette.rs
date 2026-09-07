@@ -36,7 +36,6 @@ pub enum CommandId {
     Notices,
     KeepMine,
     TakeDisk,
-    ZoomToBodies,
     ZoomToTitles,
     FilterCards,
     FoldRail,
@@ -63,7 +62,7 @@ pub struct Command {
 /// (`adr/2026-08-screen-switch-gesture.md`), alphabetized by label
 /// (`adr/2026-08-palette-order-and-overlay-placement.md`) — the order the
 /// palette shows it in.
-pub const COMMANDS: [Command; 33] = [
+pub const COMMANDS: [Command; 32] = [
     // chordless: layout is rare and deliberate — "at most a command"
     // (adr/2026-08-arrange-cluster-command.md)
     Command {
@@ -249,13 +248,9 @@ pub const COMMANDS: [Command; 33] = [
         label: "undo",
         chord: None,
     },
-    // chordless since the chords became steps: the two named scales are
-    // reached by name (adr/2026-09-the-table-zooms-continuously.md)
-    Command {
-        id: CommandId::ZoomToBodies,
-        label: "zoom to bodies",
-        chord: None,
-    },
+    // chordless since the chords became steps: the one named scale is
+    // reached by name (adr/2026-09-the-table-zooms-continuously.md,
+    // adr/2026-09-a-card-is-always-its-title.md)
     Command {
         id: CommandId::ZoomToTitles,
         label: "zoom to titles",
@@ -279,10 +274,10 @@ pub struct Context {
     /// so without one there is nothing to name
     /// (adr/2026-08-delete-note-palette-only-from-sheet.md).
     pub sheet_open: bool,
-    /// Whether the table stands at body zoom: each zoom command hides at
-    /// its own level — going where you stand is not a command
-    /// (adr/2026-08-body-zoom-scale-and-metrics.md).
-    pub at_bodies: bool,
+    /// Whether the table stands off its one named scale: the jump back
+    /// hides where it already stands — going where you stand is not a
+    /// command (adr/2026-09-a-card-is-always-its-title.md).
+    pub zoomed: bool,
     /// Whether a save stands refused over an external edit: the resolution
     /// pair exists only while there is a side to pick
     /// (adr/2026-08-external-edit-conflict-commands.md).
@@ -341,8 +336,7 @@ fn available(id: CommandId, context: Context) -> bool {
         CommandId::GoToTable => !context.on_table,
         CommandId::GoToLogs => context.on_table,
         CommandId::DeleteNote => context.sheet_open,
-        CommandId::ZoomToBodies => context.on_table && !context.at_bodies,
-        CommandId::ZoomToTitles => context.on_table && context.at_bodies,
+        CommandId::ZoomToTitles => context.on_table && context.zoomed,
         // the filter acts on cards, which only the table shows; the
         // switcher stands on every screen
         CommandId::FilterCards => context.on_table,
@@ -375,7 +369,7 @@ mod tests {
         note_open: true,
         on_table: false,
         sheet_open: false,
-        at_bodies: false,
+        zoomed: false,
         conflict: false,
         undoable: false,
     };
@@ -384,7 +378,7 @@ mod tests {
         note_open: true,
         on_table: false,
         sheet_open: false,
-        at_bodies: false,
+        zoomed: false,
         conflict: false,
         undoable: false,
     };
@@ -393,7 +387,7 @@ mod tests {
         note_open: true,
         on_table: true,
         sheet_open: false,
-        at_bodies: false,
+        zoomed: false,
         conflict: false,
         undoable: false,
     };
@@ -402,16 +396,16 @@ mod tests {
         note_open: true,
         on_table: true,
         sheet_open: true,
-        at_bodies: false,
+        zoomed: false,
         conflict: false,
         undoable: false,
     };
-    const AT_BODIES: Context = Context {
+    const ZOOMED: Context = Context {
         block_active: false,
         note_open: true,
         on_table: true,
         sheet_open: false,
-        at_bodies: true,
+        zoomed: true,
         conflict: false,
         undoable: false,
     };
@@ -570,7 +564,7 @@ mod tests {
     #[test]
     fn no_active_block_hides_the_caret_commands() {
         let visible = labels(&filter("", READING, &unused()));
-        assert_eq!(visible.len(), COMMANDS.len() - 11);
+        assert_eq!(visible.len(), COMMANDS.len() - 10);
         assert!(!visible.contains(&"insert link"));
         assert!(!visible.contains(&"follow link"));
     }
@@ -582,7 +576,7 @@ mod tests {
             note_open: true,
             on_table: true,
             sheet_open: false,
-            at_bodies: false,
+            zoomed: false,
             conflict: false,
             undoable: false,
         };
@@ -591,7 +585,7 @@ mod tests {
             note_open: true,
             on_table: true,
             sheet_open: true,
-            at_bodies: false,
+            zoomed: false,
             conflict: false,
             undoable: false,
         };
@@ -654,17 +648,17 @@ mod tests {
     }
 
     #[test]
-    fn the_zoom_commands_hide_off_the_table_and_at_their_own_level() {
+    fn the_zoom_command_hides_off_the_table_and_at_its_own_scale() {
         assert_eq!(
             labels(&filter("zoom", READING, &unused())),
             Vec::<&str>::new()
         );
         assert_eq!(
             labels(&filter("zoom", AT_TABLE, &unused())),
-            vec!["zoom to bodies"]
+            Vec::<&str>::new()
         );
         assert_eq!(
-            labels(&filter("zoom", AT_BODIES, &unused())),
+            labels(&filter("zoom", ZOOMED, &unused())),
             vec!["zoom to titles"]
         );
     }
@@ -755,7 +749,7 @@ mod tests {
     /// (adr/2026-09-edit-template-reaches-the-logs-from-the-table.md).
     #[test]
     fn edit_template_stands_on_every_screen() {
-        for context in [READING, EDITING, AT_TABLE, AT_SHEET, AT_BODIES] {
+        for context in [READING, EDITING, AT_TABLE, AT_SHEET, ZOOMED] {
             assert_eq!(
                 labels(&filter("template", context, &unused())),
                 vec!["edit template"]
@@ -841,7 +835,6 @@ mod tests {
                 "take disk",
                 "toggle theme",
                 "undo",
-                "zoom to bodies",
                 "zoom to titles"
             ]
         );

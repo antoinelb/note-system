@@ -581,12 +581,6 @@ body {
   overflow-wrap: break-word;
 }
 
-/* a body the tier has not answered yet, with no stale SVG to stand in:
-   a quiet gap the size the SVG will take */
-.body-pending {
-  height: 100%;
-}
-
 /* a block the visual selection reaches past the active line: raw source,
    highlighted where covered, same typography as .block-active and
    .block-pending .pending-source so a line entering or leaving the
@@ -1598,25 +1592,6 @@ body {
 .card-generated {
   border: 1px dashed var(--card-generated-edge);
   border-left: 3px dashed var(--bar-generated);
-}
-
-/* body zoom (adr/2026-08-body-zoom-scale-and-metrics.md): the card grows a
-   fixed, clipped area for the note's own rendered SVG — the template's
-   typography, fit to the card's width, never restyled */
-.card.bodies {
-  height: 296px;
-  overflow: hidden;
-}
-
-.card-body {
-  height: 240px;
-  margin-top: 8px;
-  overflow: hidden;
-}
-
-.card-body svg {
-  width: 100%;
-  height: auto;
 }
 
 .card-label {

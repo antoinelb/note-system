@@ -23,3 +23,11 @@ The deck never drew the bodies state; it is designed here in the phase-6-v0 voca
 - **`translate(pan) scale(s)`** — would need the division in the card-drag arm only, breaking `point()`'s one-place promise and splitting the coordinate story.
 - **Natural-height bodies** — tall notes would dominate the canvas and card footprints would vary; a fixed clip keeps the constellation legible.
 - **A third zoom level (far dots)** — the deck sketched one; the plan settled on two, and the chord pair leaves room without code.
+
+## Superseded by `2026-09-a-card-is-always-its-title.md` (2026-09-07)
+
+The body level is gone: a card draws its title at every scale, the chords
+are notches (`2026-09-the-table-zooms-continuously.md`) and "zoom to
+titles" is the one jump.
+The transform order, the canvas-unit pan and the sheet forcing scale 1
+stand.

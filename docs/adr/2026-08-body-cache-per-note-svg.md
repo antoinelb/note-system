@@ -20,3 +20,8 @@ The existing `FragmentCache` is per-block and swept at every activate/deactivate
 - **Reusing `FragmentCache` with whole-file sources** — its sweep policy is the opposite lifecycle; entangling them would make the sheet evict the table.
 - **Persisting SVGs to `.index/`** — hashes and rendered output on disk for a cache the watcher can rebuild in memory; the index stays derived-and-disposable.
 - **Async compiles now** — machinery for a jank not yet observed; the cache and culling bound the work first.
+
+## Superseded by `2026-09-a-card-is-always-its-title.md` (2026-09-07)
+
+`BodyCache` is deleted with the level it served; the fragment cache is the
+one render cache, and export compiles whole notes without caching.
